@@ -11,9 +11,9 @@ use futures::stream::BoxStream;
 
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
-use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
+use zeron_engine::{EngineCore, EngineRpc, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -1281,6 +1281,160 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
     );
 }
 
+fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
+    MessagePart::Tool {
+        id: id.into(),
+        call: ToolCall::Unknown {
+            name: "Agent: scout".into(),
+            input: None,
+        },
+        output: None,
+        diff: None,
+        is_error: false,
+        resolved: true,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: Some(format!("{CHAT}--sub--{id}")),
+        subagent_status: Some(status),
+        subagent_tail: None,
+    }
+}
+
+#[tokio::test]
+async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let device_id = "dev-host-fixed";
+    std::fs::write(dir.path().join("device-id"), device_id).unwrap();
+    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+    journal
+        .append(
+            CHAT,
+            &AgentEvent::Subagent {
+                parent_tool_use_id: "spawn-running".into(),
+                event: Box::new(AgentEvent::TextDelta {
+                    text: "working".into(),
+                }),
+            },
+        )
+        .unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    for (id, device) in [("local", device_id), ("remote", "other-device")] {
+        doc.push_message(&SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                spawn_chip(&format!("{id}-running"), SubagentStatus::Running),
+                spawn_chip(&format!("{id}-done"), SubagentStatus::Done),
+            ],
+            created_at: 1,
+            device_id: device.into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    }
+    let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let all = entries(&core);
+    let statuses: Vec<_> = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Tool {
+                subagent_status, ..
+            } => *subagent_status,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            SubagentStatus::Failed,
+            SubagentStatus::Done,
+            SubagentStatus::Running,
+            SubagentStatus::Done
+        ]
+    );
+    assert!(
+        all.iter()
+            .all(|e| e.status == Some(MessageStatus::Complete))
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: vec![
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "old-spawn".into(),
+                    event: Box::new(done(DoneStatus::Completed)),
+                },
+                done(DoneStatus::Completed),
+            ],
+        }),
+    );
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: "old-assistant".into(),
+            role: MessageRole::Assistant,
+            parts: vec![spawn_chip("old-spawn", SubagentStatus::Running)],
+            created_at: 1,
+            device_id: core.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("resume"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
+        "resumed turn completes",
+    )
+    .await;
+    let all = entries(&core);
+    let chip = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .find(|p| matches!(p, MessagePart::Tool { id, .. } if id == "old-spawn"))
+        .unwrap();
+    assert!(
+        matches!(
+            chip,
+            MessagePart::Tool {
+                subagent_status: Some(SubagentStatus::Done),
+                ..
+            }
+        ),
+        "{chip:?}"
+    );
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn rpc_surface_over_in_memory_transport() {
     let dir = tempfile::tempdir().unwrap();
@@ -1423,6 +1577,8 @@ async fn respond_input_resolves_pending_question() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                 }])
                 .await
@@ -1576,6 +1732,8 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                 }])
                 .await
@@ -1767,6 +1925,8 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         header: "Pick".into(),
                         question: "Which one?".into(),
                         options: vec!["a".into(), "b".into()],
+                        prefill: None,
+                        multiline: false,
                         multi_select: false,
                     }])
                     .await;
@@ -1914,6 +2074,8 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                 };
                 // The pre-fix Claude/Codex shape: surface the question under
@@ -2955,7 +3117,9 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         })
         .collect();
     assert_eq!(images.len(), 1);
-    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    // Materialization canonicalizes the uploads dir; macOS temp dirs sit
+    // behind the /var -> /private/var symlink.
+    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir().canonicalize().unwrap()));
     let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
     assert!(!serialized.contains(source.to_str().unwrap()));
     assert!(!serialized.contains("BASE64_SENTINEL"));
@@ -3060,4 +3224,142 @@ async fn real_image_generation_profile_smoke() {
             .contains("generated_images/")
     );
     core.sessions.shutdown().await;
+}
+
+/// A harness that fails before streaming (an OpenCode server that never
+/// booted) must leave its reason in the transcript, not only a bare
+/// "Run failed" status.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_failure_lands_in_the_transcript() {
+    struct FailsToStart;
+    #[async_trait]
+    impl Harness for FailsToStart {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "FailsToStart"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            _controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            Err(HarnessError::Protocol("server never booted".into()))
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(FailsToStart));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-fails",
+        SessionCommandPayload::Run {
+            request: run_request("hello"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Errored),
+        "errored",
+    )
+    .await;
+    let entries = entries_now(&core);
+    let assistant = entries
+        .iter()
+        .find(|e| e.role == MessageRole::Assistant)
+        .expect("assistant entry for the failed start");
+    assert_eq!(assistant.status, Some(MessageStatus::Complete));
+    assert!(matches!(
+        assistant.parts.as_slice(),
+        [MessagePart::Error { message, .. }] if message.contains("server never booted")
+    ));
+    core.sessions.shutdown().await;
+}
+
+/// The session row carries how many subagents are streaming, so sidebars on
+/// every device can badge a chat they have not opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_row_counts_running_subagents_until_the_run_ends() {
+    fn spawn(id: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "Agent: probe".into(),
+                input: None,
+            },
+        }
+    }
+    fn chatter(parent: &str) -> AgentEvent {
+        AgentEvent::Subagent {
+            parent_tool_use_id: parent.into(),
+            event: Box::new(AgentEvent::TextDelta {
+                text: "working".into(),
+            }),
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                spawn("sub-1"),
+                spawn("sub-2"),
+                chatter("sub-1"),
+                chatter("sub-2"),
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "sub-1".into(),
+                    event: Box::new(done(DoneStatus::Completed)),
+                },
+            ],
+            step_delay: Duration::from_millis(400),
+            hang_until_interrupt: true,
+        }),
+    );
+    let running = || {
+        core.sessions
+            .session_status(CHAT)
+            .map(|s| s.running_subagents)
+    };
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-run",
+        SessionCommandPayload::Run {
+            request: run_request("fan out"),
+            message_id: "subagents-user".into(),
+        },
+    );
+
+    wait_for(|| running() == Some(2), "both subagents counted").await;
+    wait_for(|| running() == Some(1), "one subagent settled").await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-interrupt",
+        SessionCommandPayload::Interrupt {},
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "run to end",
+    )
+    .await;
+    assert_eq!(
+        running(),
+        Some(0),
+        "an ended run leaves no subagents counted"
+    );
 }
