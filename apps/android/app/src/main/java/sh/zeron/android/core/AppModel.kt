@@ -465,7 +465,7 @@ class AppModel(private val app: Application) {
         withTimeoutOrNull(maximum) {
             // A reconnecting/offline blip from the redial isn't the resync landing.
             combine(_workspace, _connectivity) { ws, c -> ws to c }.first { (ws, c) ->
-                ws !== before && c?.state != ConnectivityState.RECONNECTING && c?.state != ConnectivityState.OFFLINE
+                ws != before && c?.state != ConnectivityState.RECONNECTING && c?.state != ConnectivityState.OFFLINE
             }
         }
         val wait = minimum - (SystemClock.elapsedRealtime() - started)
