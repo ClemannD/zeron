@@ -224,6 +224,10 @@ private fun AssetIcon(name: String, tint: Color) {
         "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)
         "exclamationmark.triangle" -> return ZIcon(ZIcons.Warning, null, Modifier.fillMaxSize(), tint = tint)
         "questionmark.bubble" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
+        // Prompt chips: image attachments, skills, slash commands.
+        "photo" -> return ZIcon(ZIcons.Gallery, null, Modifier.fillMaxSize(), tint = tint)
+        "wand.and.stars" -> return ZIcon(ZIcons.Magic, null, Modifier.fillMaxSize(), tint = tint)
+        "command" -> return ZIcon(ZIcons.Command, null, Modifier.fillMaxSize(), tint = tint)
     }
     val image = remember(name) { IconAssets.load(context, name) } ?: return
     Image(
@@ -267,11 +271,18 @@ private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions
         if (value == null) value = actions.loadImage(reference)?.also { images.put(reference, it) }
     }
     val radius = if (minOf(w.w, w.h) > 120) 14.dp else 12.dp
-    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(radius)), contentAlignment = Alignment.Center) {
+    val pending = reference.startsWith("pending://")
+    Box(
+        Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(radius))
+            .clickable(enabled = image != null && !pending, onClickLabel = "Open image") { actions.openImage(reference) },
+        contentAlignment = Alignment.Center,
+    ) {
         image?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
             ?: Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh))
         // Still being escorted to the host: a scrim and a wavy ring that fills with the transfer.
-        val p = if (reference.startsWith("pending://")) progress() else null
+        val p = if (pending) progress() else null
         androidx.compose.animation.AnimatedVisibility(p != null, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.38f)), contentAlignment = Alignment.Center) {
                 val side = minOf(w.w, w.h)

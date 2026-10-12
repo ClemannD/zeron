@@ -78,7 +78,28 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()
     var draft by remember { mutableStateOf(model.lastDraft) }
-    val composer = remember { ComposerModel() }
+    // What was set up when the page was last closed unsent comes back.
+    val composer = remember { ComposerModel(model.newSessionText).apply { images.addAll(model.newSessionImages) } }
+    var created by remember { mutableStateOf(false) }
+    fun rememberDraft() {
+        if (created) return
+        model.lastDraft = draft
+        model.newSessionText = composer.text
+        model.newSessionImages = composer.images.toList()
+    }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.DisposableEffect(lifecycle) {
+        // The app can be killed in the background: keep the draft first.
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) rememberDraft()
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            rememberDraft()
+        }
+    }
+    var newProject by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -119,7 +140,14 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     fun create() {
         model.lastDraft = draft
         val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
-        if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        if (id != null) {
+            created = true
+            model.newSessionText = ""
+            model.newSessionImages = emptyList()
+            onCreated(id)
+        } else {
+            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        }
     }
 
     var composerBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
@@ -177,12 +205,9 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
-                ProjectChip(draft, projects, onPick = { draft = it })
-                if (project != null) {
-                    if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
-                } else {
-                    HostChip(draft, hosts) { draft = it }
-                }
+                ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true })
+                HostChip(draft, project, projects, hosts) { draft = it }
+                if (project != null && project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
                 ModelChip(draft, choice, models) { draft = it }
                 val efforts = choice?.model?.reasoningLevels.orEmpty()
                 if (efforts.isNotEmpty()) {
@@ -190,6 +215,11 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     EffortChip(effort, efforts) { draft = draft.copy(effort = it) }
                 }
             }
+        }
+    }
+    if (newProject) {
+        NewProjectScreen(model, onDismiss = { newProject = false }) { id ->
+            draft = draft.copy(projectId = id, hostId = null, branch = null)
         }
     }
 }
@@ -200,32 +230,44 @@ private fun ProjectChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     projects: List<uniffi.zeron_core.ProjectView>,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+    onNewProject: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     val project = projects.firstOrNull { it.id == draft.projectId }
     ContextChip(
-        project?.name ?: "No project",
+        project?.groupName ?: "No project",
         leading = {
-            if (project != null) ProjectTile(project.name, project.colorIndex.toInt(), 18.dp)
+            if (project != null) ProjectTile(project.groupName, project.colorIndex.toInt(), 18.dp)
             else ZIcon(ZIcons.Home, null, Modifier.size(16.dp))
         },
         onClick = { open = true },
     )
-    if (open) ProjectSheet(draft, projects, onDismiss = { open = false }) {
+    if (open) ProjectSheet(draft, projects, onDismiss = { open = false }, onNewProject = {
+        open = false
+        onNewProject()
+    }) {
         onPick(it)
         open = false
     }
 }
 
-/** Projects grouped by the machine they live on; the choice keeps its tile and gains a check. */
+/**
+ * One entry per project — checkouts of one repository, on any device, are
+ * one entry listing their hosts; the host chip then picks which.
+ */
 @Composable
 private fun ProjectSheet(
     draft: sh.zeron.android.core.NewSessionDraft,
     projects: List<uniffi.zeron_core.ProjectView>,
     onDismiss: () -> Unit,
+    onNewProject: () -> Unit,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val picked = projects.firstOrNull { it.id == draft.projectId }
+    val groups = remember(projects) {
+        projects.groupBy { it.groupKey }.values.sortedBy { it.first().groupName.lowercase() }
+    }
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheet,
@@ -236,43 +278,29 @@ private fun ProjectSheet(
                 Text(
                     "Project",
                     style = MaterialTheme.typography.headlineSmallEmphasized,
-                    modifier = Modifier.padding(start = 24.dp, bottom = 8.dp),
+                    modifier = Modifier.padding(start = 24.dp, bottom = 16.dp),
                 )
             }
-            val byDevice = projects.groupBy { it.deviceId }.values.sortedByDescending { it.first().deviceOnline }
-            for (group in byDevice) {
-                val host = group.first()
-                item("h-${host.deviceId}") {
-                    androidx.compose.foundation.layout.Row(
-                        Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+            groups.forEachIndexed { i, members ->
+                val first = members.first()
+                item(first.groupKey) {
+                    val hosts = members.map { it.deviceName ?: "Host" }.distinct().sortedBy { it.lowercase() }
+                    ProjectRow(
+                        selected = first.groupKey == picked?.groupKey,
+                        index = i,
+                        count = groups.size,
+                        leading = { ProjectTile(first.groupName, first.colorIndex.toInt(), 40.dp) },
+                        title = first.groupName,
+                        supporting = hosts.joinToString(", "),
+                        mono = false,
                     ) {
-                        ZIcon(ZIcons.Laptop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.size(8.dp))
-                        Text(host.deviceName ?: "Host", style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.size(8.dp))
-                        Box(
-                            Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(
-                                if (host.deviceOnline) successColor() else MaterialTheme.colorScheme.outlineVariant,
-                            ),
-                        )
-                        if (!host.deviceOnline) {
-                            Spacer(Modifier.size(6.dp))
-                            Text("Offline", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
-                        }
-                    }
-                }
-                group.forEachIndexed { i, p ->
-                    item(p.id) {
-                        ProjectRow(
-                            selected = p.id == draft.projectId,
-                            index = i,
-                            count = group.size,
-                            leading = { ProjectTile(p.name, p.colorIndex.toInt(), 40.dp) },
-                            title = p.name,
-                            supporting = p.path.replace(Regex("^/(Users|home)/[^/]+"), "~"),
-                            mono = true,
-                        ) { onPick(draft.copy(projectId = p.id, hostId = null, branch = null)) }
+                        // Keep the host when it has a checkout of the project, else the first reachable one.
+                        val device = picked?.deviceId ?: draft.hostId
+                        val pick = members.firstOrNull { it.id == draft.projectId }
+                            ?: members.firstOrNull { it.deviceId == device }
+                            ?: members.firstOrNull { it.deviceOnline }
+                            ?: first
+                        onPick(draft.copy(projectId = pick.id, hostId = null, branch = if (pick.id == draft.projectId) draft.branch else null))
                     }
                 }
             }
@@ -281,12 +309,24 @@ private fun ProjectSheet(
                 ProjectRow(
                     selected = draft.projectId == null,
                     index = 0,
-                    count = 1,
+                    count = 2,
                     leading = { IconTile(ZIcons.Home) },
                     title = "No project",
                     supporting = "Run in a host's home folder",
                     mono = false,
-                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
+                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: picked?.deviceId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
+            }
+            item("new") {
+                ProjectRow(
+                    selected = false,
+                    index = 1,
+                    count = 2,
+                    leading = { IconTile(ZIcons.Plus) },
+                    title = "New project…",
+                    supporting = "Pick a folder on one of your computers",
+                    mono = false,
+                    onClick = onNewProject,
+                )
             }
         }
     }
@@ -333,21 +373,36 @@ private fun ProjectRow(
     ) { Text(title, style = MaterialTheme.typography.titleMedium) }
 }
 
+/**
+ * With a project: its checkouts, by host (the path tells apart several on
+ * one host). Without: every host — project-less sessions run in its home.
+ */
 @Composable
 private fun HostChip(
     draft: sh.zeron.android.core.NewSessionDraft,
+    project: uniffi.zeron_core.ProjectView?,
+    projects: List<uniffi.zeron_core.ProjectView>,
     hosts: List<uniffi.zeron_core.DeviceView>,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    ContextChip(
-        hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host",
-        leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) },
-        onClick = { open = true },
-    ) {
-        ChoiceMenu(open, { open = false }, listOf(MenuSection("Run on", hosts.map { h ->
-            MenuChoice(h.name, h.id == draft.hostId, if (h.online) "Online" else "Offline") { onPick(draft.copy(hostId = h.id)) }
-        })))
+    val checkouts = remember(project, projects) {
+        if (project == null) emptyList()
+        else projects.filter { it.groupKey == project.groupKey }.sortedWith(compareBy({ (it.deviceName ?: "").lowercase() }, { it.path }))
+    }
+    val title = if (project != null) project.deviceName ?: "Host" else hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host"
+    ContextChip(title, leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
+        val choices = if (checkouts.isNotEmpty()) {
+            checkouts.map { p ->
+                val shared = checkouts.count { it.deviceId == p.deviceId } > 1
+                MenuChoice(p.deviceName ?: "Host", p.id == draft.projectId, if (shared) p.path else if (p.deviceOnline) "Online" else "Offline") {
+                    onPick(draft.copy(projectId = p.id, hostId = null, branch = if (p.id == draft.projectId) draft.branch else null))
+                }
+            }
+        } else {
+            hosts.map { h -> MenuChoice(h.name, h.id == draft.hostId, if (h.online) "Online" else "Offline") { onPick(draft.copy(hostId = h.id)) } }
+        }
+        ChoiceMenu(open, { open = false }, listOf(MenuSection("Run on", choices)))
     }
 }
 

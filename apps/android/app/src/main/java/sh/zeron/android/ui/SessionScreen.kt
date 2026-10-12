@@ -56,7 +56,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.ImageBitmap
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -94,17 +99,23 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
-        Text("This session isn't available.", Modifier.padding(32.dp))
+        // Never a stand-in transcript: back to Sessions with a note.
+        LaunchedEffect(chatId) {
+            model.toast("Couldn't open session. Try again.")
+            onBack()
+        }
         return
     }
     val transcript = remember(chatId) { TranscriptState() }
     DisposableEffect(chatId) {
         transcript.engine.attach(core, chatId)
         handle.setViewAttached(true)
-        core.markSeen(chatId)
+        model.markSeen(chatId)
         onDispose {
             handle.setViewAttached(false)
             transcript.close()
+            // What arrived while it was open has been seen too.
+            model.markSeen(chatId)
         }
     }
 
@@ -120,27 +131,35 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     val row = remember(workspace, chatId) { model.row(chatId) }
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
+    var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
     val actions = remember(chatId) {
+        suspend fun load(ref: String): ImageBitmap? {
+            val device = handle.composer().host.deviceId
+            return runCatching {
+                val bytes = core.readAttachment(device, ref)
+                withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
+            }.getOrNull()
+        }
+        val open: (String) -> Unit = { ref -> scope.launch { load(ref)?.let { viewing = it } } }
         TranscriptActions(
             openUrl = { url ->
                 val uri = Uri.parse(url)
-                if (uri.scheme == "http" || uri.scheme == "https") {
-                    CustomTabsIntent.Builder().build().launchUrl(context, uri)
-                } else {
-                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                when (uri.scheme) {
+                    "http", "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
+                    // An image chip opens its upload full size, as its thumbnail did.
+                    "zeron-preview" -> uri.getQueryParameter("ref")?.let(open)
+                    else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                 }
             },
-            loadImage = { ref ->
-                val device = handle.composer().host.deviceId
-                runCatching {
-                    val bytes = core.readAttachment(device, ref)
-                    withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
-                }.getOrNull()
-            },
+            loadImage = ::load,
             showText = { title, text, mono -> sheet = TextSheet(title, text, mono) },
+            openImage = open,
         )
     }
+    // The composer's draft outlives the panel that replaces it while the agent asks.
+    val draft = remember(chatId) { ComposerModel(model.drafts.load(chatId)) }
 
     val project = row?.project?.name ?: "No project"
     val subtitle = composer.host.name?.let { "$project @ $it" } ?: project
@@ -178,7 +197,12 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                         listOfNotNull(
                             MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
                             row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                            row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
+                            row?.let {
+                                MenuAction("Archive", ZIcons.Archive) {
+                                    model.archive(chatId)
+                                    onBack()
+                                }
+                            },
                         ),
                     )
                 }
@@ -203,10 +227,17 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
         }
         Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
             Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } })
-            composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
-            Composer(model, core, handle, composer, row, transcript)
+            val input = composer.openInput
+            // The panel replaces the composer while the agent asks.
+            if (input != null) {
+                QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
+            } else {
+                Composer(model, core, handle, composer, row, transcript, draft)
+            }
         }
     }
+
+    viewing?.let { ImageViewer(it) { viewing = null } }
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {
@@ -226,13 +257,26 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     }
 }
 
+/** The status pill above the composer (iOS SessionChrome banner). */
 @Composable
 private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: () -> Unit) {
+    // Reconnect countdowns tick each second.
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val retryAt = c.room.retryAtMs
+    if (!c.room.connected && retryAt != null) {
+        LaunchedEffect(retryAt) {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(1_000)
+            }
+        }
+    }
     val text = when {
         c.sendState == SendState.FAILED -> "Not delivered"
         c.sendState == SendState.QUEUED -> "${c.host.name ?: "Host"} is offline — will send when it's back"
-        connectivity == ConnectivityState.OFFLINE -> "You're offline"
-        !c.room.connected && c.room.retryAtMs != null -> "Reconnecting…"
+        c.sendState == SendState.SENDING -> "Sending to host…"
+        connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
+        !c.room.connected && retryAt != null -> "Reconnecting in ${maxOf(1L, (retryAt - now) / 1000)}s"
         else -> null
     } ?: return
     StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)

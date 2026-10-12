@@ -117,8 +117,8 @@ fun Composer(
     c: ComposerState,
     row: SessionRow?,
     transcript: TranscriptState,
+    draft: ComposerModel,
 ) {
-    val draft = remember(c.chatId) { ComposerModel() }
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -214,7 +214,9 @@ fun Composer(
                     if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
                 ),
             )
+            model.noteDeliveryActivity()
             draft.clear()
+            model.drafts.save(c.chatId, "")
             error = null
             delivery = Delivery.Queue
             // An immediate send gets the runway; one queued behind a live turn
@@ -225,8 +227,25 @@ fun Composer(
         }
     }
 
-    // Leaving the session gives an edited row straight back.
-    DisposableEffect(c.chatId) { onDispose { finishEdit(null) } }
+    // The user's own draft (never a queued message being edited) is kept
+    // across navigation, the question panel, and the app going away.
+    fun saveDraft() = model.drafts.save(c.chatId, stash?.first ?: draft.text)
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(c.chatId, lifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) saveDraft()
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            saveDraft()
+            // Leaving the session gives an edited row straight back.
+            if (editingId != null) {
+                finishEdit(null)
+                restoreStash()
+            }
+        }
+    }
 
     Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
         if (c.queue.isNotEmpty()) QueuePanel(c.queue, handle, editingId, onEdit = ::beginEdit)
@@ -334,9 +353,17 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
     }
     val pr = row?.pullRequest
     if (pr != null) {
-        ContextChip("#${pr.number}", leading = { ZIcon(ZIcons.PullRequest, null, Modifier.size(16.dp)) }, onClick = {
-            CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(pr.url))
-        })
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        ContextChip("#${pr.number}", leading = { ZIcon(ZIcons.PullRequest, null, Modifier.size(16.dp)) }, onClick = { menu = "pr" }) {
+            ActionMenu(
+                menu == "pr",
+                { menu = null },
+                listOf(
+                    MenuAction("Open pull request", ZIcons.Link) { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(pr.url)) },
+                    MenuAction("Copy link", ZIcons.Copy) { clipboard.setText(androidx.compose.ui.text.AnnotatedString(pr.url)) },
+                ),
+            )
+        }
     } else {
         row?.branch?.takeIf { it.isNotEmpty() }?.let {
             ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
@@ -368,50 +395,6 @@ fun StatusBanner(text: String, action: Pair<String, () -> Unit>?) {
         Row(Modifier.padding(start = 16.dp, end = if (action != null) 4.dp else 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(text, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(vertical = 10.dp).weight(1f, fill = false))
             action?.let { (label, run) -> TextButton(onClick = run) { Text(label) } }
-        }
-    }
-}
-
-/** The agent asked something: answer with its options instead of typing. */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
-@Composable
-fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit) {
-    val picked = remember(input.requestId) { input.questions.associate { it.id to mutableStateListOf<String>() } }
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-    ) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            for (q in input.questions) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (q.header.isNotEmpty()) Text(q.header, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Text(q.question, style = MaterialTheme.typography.bodyLarge)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val selection = picked.getValue(q.id)
-                        for (option in q.options) {
-                            ToggleButton(
-                                checked = option in selection,
-                                onCheckedChange = { on ->
-                                    if (!q.multiSelect) selection.clear()
-                                    if (on) selection.add(option) else selection.remove(option)
-                                },
-                            ) { Text(option) }
-                        }
-                    }
-                }
-            }
-            val ready = input.questions.all { picked.getValue(it.id).isNotEmpty() }
-            Button(
-                onClick = { onSubmit(input.questions.map { UserInputAnswer(it.id, picked.getValue(it.id).toList()) }) },
-                enabled = ready,
-                shapes = ButtonDefaults.shapes(),
-                modifier = Modifier.align(Alignment.End),
-            ) {
-                ZIcon(ZIcons.Send, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Answer")
-            }
         }
     }
 }

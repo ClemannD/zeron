@@ -16,12 +16,13 @@ val buildCore by tasks.registering(Exec::class) {
     description = "Builds crates/mobile for Android and generates Kotlin bindings."
     val ndk = System.getenv("ANDROID_NDK_HOME")
         ?: androidComponents.sdkComponents.sdkDirectory.get().dir("ndk/$NDK_VERSION").asFile.path
-    val lib = coreOut.resolve("jniLibs/arm64-v8a/libzeron_mobile.so")
+    // Any ABI will do when skipping (`ZERON_ANDROID_ABIS=x86_64` builds only that one).
+    val libs = coreOut.resolve("jniLibs")
     val skip = skipCore
     workingDir = repoRoot
     commandLine("bash", "scripts/android/build-core.sh", coreOut.path)
     environment("ANDROID_NDK_HOME", ndk)
-    onlyIf { !skip || !lib.exists() }
+    onlyIf { !skip || libs.walkTopDown().none { it.name == "libzeron_mobile.so" } }
 }
 
 // Tool and file icons: the iOS asset catalog's SVGs, rasterized.
@@ -30,6 +31,7 @@ val genIcons by tasks.registering(Exec::class) {
     val out = iconsOut.get().asFile
     inputs.dir(repoRoot.resolve("apps/ios/Zeron/Assets.xcassets"))
     inputs.dir(repoRoot.resolve("crates/ui/assets/icons"))
+    inputs.dir(repoRoot.resolve("apps/android/icons"))
     inputs.file(repoRoot.resolve("scripts/android/svg2vd.py"))
     outputs.dir(out)
     commandLine("bash", repoRoot.resolve("scripts/android/gen-icons.sh").path, out.resolve("assets/icons").path, out.resolve("res").path)

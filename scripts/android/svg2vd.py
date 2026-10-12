@@ -17,6 +17,8 @@ SOURCES = [
     ("", os.path.join(ROOT, "crates/ui/assets/icons/*.svg")),
     ("", os.path.join(ROOT, "apps/ios/Zeron/Assets.xcassets/TabIcons/*/*.svg")),
     ("", os.path.join(ROOT, "apps/ios/Zeron/Assets.xcassets/ToolIcons/*/*.svg")),
+    # Android-only glyphs (share sheet, camera) in the same Solar Linear style.
+    ("", os.path.join(ROOT, "apps/android/icons/*.svg")),
 ]
 # Brand marks are drawn from path data at runtime (their own colors).
 SKIP = re.compile(r"-mark$|^zeron-logo$")

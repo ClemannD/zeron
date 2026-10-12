@@ -63,6 +63,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import sh.zeron.android.design.GeistMono
@@ -118,7 +123,14 @@ fun ComposerSurface(
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(focusRequester)
-                            .onFocusChanged { focused = it.isFocused },
+                            .onFocusChanged { focused = it.isFocused }
+                            // Hardware keyboards: Ctrl/⌘+Enter sends (plain Enter is a newline).
+                            .onPreviewKeyEvent { e ->
+                                val send = e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                                    e.key == androidx.compose.ui.input.key.Key.Enter && (e.isCtrlPressed || e.isMetaPressed)
+                                if (send && action != ComposerAction.Stop && model.hasContent) onAction()
+                                send
+                            },
                     )
                 }
                 if (!card) {
@@ -186,7 +198,7 @@ private fun StagedThumbnails(model: ComposerModel) {
     }
 }
 
-/** [+] → Photos / Files / Paste image, staged into the composer. */
+/** [+] → Photos / Take photo / Files / Paste image, staged into the composer. */
 @Composable
 private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     val context = LocalContext.current
@@ -199,6 +211,13 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     }
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
     val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
+    // The camera writes into a cache file the FileProvider shares with it.
+    var capture by remember { mutableStateOf<Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        val uri = capture
+        if (saved && uri != null) add(listOf(uri))
+    }
+    val hasCamera = remember { context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY) }
     Box {
         IconButton(onClick = { open = true }, enabled = enabled && model.images.size < Staging.MAX_IMAGES) {
             ZIcon(ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -210,7 +229,18 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
             open,
             { open = false },
             listOfNotNull(
-                MenuAction("Photos", ZIcons.Image) { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                MenuAction("Photos", ZIcons.Gallery) { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                if (hasCamera) {
+                    MenuAction("Take photo", ZIcons.Camera) {
+                        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
+                        val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
+                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+                        capture = uri
+                        camera.launch(uri)
+                    }
+                } else {
+                    null
+                },
                 MenuAction("Files", ZIcons.Folder) { files.launch(arrayOf("image/*")) },
                 pasted?.let { uri -> MenuAction("Paste image", ZIcons.Copy) { add(listOf(uri)) } },
             ),

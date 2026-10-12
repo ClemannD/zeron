@@ -74,6 +74,8 @@ class TranscriptActions(
     val openUrl: (String) -> Unit,
     val loadImage: suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?,
     val showText: (title: String, text: String, mono: Boolean) -> Unit,
+    /** Open an attachment full size (a tapped image, or an image chip's upload). */
+    val openImage: (String) -> Unit = {},
 )
 
 private const val OVERSCAN = 700f

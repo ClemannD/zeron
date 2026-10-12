@@ -43,6 +43,26 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.key
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
 
@@ -64,22 +84,73 @@ object Routes {
     const val CHAT = "chat/{id}"
     const val NEW = "new"
     const val SEARCH = "search"
+    const val ARCHIVED = "archived"
     fun chat(id: String) = "chat/$id"
 }
 
 @Composable
 private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
+    // Large screens (tablets, unfolded foldables): sessions beside the open chat.
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+    // (Width alone would split a phone turned sideways.)
+    val wide = maxWidth >= 840.dp && maxHeight >= 480.dp
+    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    val open: (String) -> Unit = { id -> if (wide) selected = id else nav.navigate(Routes.chat(id)) }
+    // Folding back to a phone keeps the open chat, full screen.
+    LaunchedEffect(wide) {
+        val id = selected
+        if (!wide && id != null) {
+            selected = null
+            nav.navigate(Routes.chat(id))
+        }
+    }
     LaunchedEffect(Unit) {
         when (val route = model.launch.route) {
             null -> Unit
             "new" -> nav.navigate(Routes.NEW)
             "search" -> nav.navigate(Routes.SEARCH)
+            "archived" -> nav.navigate(Routes.ARCHIVED)
             else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
         }
     }
+    Box(
+        Modifier.fillMaxSize().onPreviewKeyEvent { e ->
+            // Hardware keyboards: Ctrl+N new session, Ctrl+Shift+F search (iPad ⌘N / ⌘⇧F).
+            if (e.type != KeyEventType.KeyDown || !(e.isCtrlPressed || e.isMetaPressed)) return@onPreviewKeyEvent false
+            when {
+                e.key == Key.N -> nav.navigate(Routes.NEW).let { true }
+                e.key == Key.F && e.isShiftPressed -> nav.navigate(Routes.SEARCH).let { true }
+                else -> false
+            }
+        },
+    ) {
     NavHost(nav, startDestination = Routes.HOME) {
-        composable(Routes.HOME) { Home(model, nav) }
+        composable(Routes.HOME) {
+            if (!wide) {
+                Home(model, nav, open)
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.width(400.dp).fillMaxHeight()) { Home(model, nav, open, selected) }
+                    androidx.compose.material3.VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Box(Modifier.weight(1f).fillMaxHeight()) {
+                        val id = selected
+                        if (id != null) {
+                            key(id) { SessionScreen(model, id, onBack = { selected = null }) }
+                        } else {
+                            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                                sh.zeron.android.design.ZIcon(ZIcons.Chat, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.outline)
+                                androidx.compose.foundation.layout.Spacer(Modifier.size(12.dp))
+                                Text("Pick a session, or start a new one", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        composable(Routes.ARCHIVED) {
+            ArchivedScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
+        }
         composable(Routes.CHAT) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
             SessionScreen(model, id, onBack = { nav.popBackStack() })
@@ -87,26 +158,55 @@ private fun MainNav(model: AppModel) {
         composable(Routes.NEW) {
             NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->
                 nav.popBackStack()
-                nav.navigate(Routes.chat(id))
+                open(id)
             })
         }
         composable(Routes.SEARCH) {
-            SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
+            SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { id ->
+                if (wide) nav.popBackStack()
+                open(id)
+            })
         }
     }
+    Toasts(model, nav)
+    }
+    }
+}
+
+/** App-wide snackbars ("Archived · Undo"), just above whatever bottom chrome the page has. */
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, nav: NavHostController) {
+    val host = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        model.toasts.collect { toast ->
+            // One at a time: a new toast replaces the one showing.
+            host.currentSnackbarData?.dismiss()
+            launch {
+                val result = host.showSnackbar(toast.message, actionLabel = toast.action, withDismissAction = toast.action != null, duration = SnackbarDuration.Long)
+                if (result == SnackbarResult.ActionPerformed) toast.run?.invoke()
+            }
+        }
+    }
+    val entry by nav.currentBackStackEntryAsState()
+    val inset = when (entry?.destination?.route) {
+        Routes.HOME -> 176.dp
+        Routes.CHAT, Routes.NEW -> 96.dp
+        else -> 16.dp
+    }
+    SnackbarHost(host, Modifier.align(Alignment.BottomCenter).imePadding().navigationBarsPadding().padding(bottom = inset))
 }
 
 private enum class Tab { Sessions, Settings }
 
 @Composable
-private fun Home(model: AppModel, nav: NavHostController) {
-    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
+private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit, selected: String? = null) {
+    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings" || model.launch.route == "more") Tab.Settings else Tab.Sessions) }
     val workspace by model.workspace.collectAsState()
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
-            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.navigate(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model)
+            Tab.Sessions -> SessionsScreen(model, onOpen = open, onArchived = { nav.navigate(Routes.ARCHIVED) }, selected = selected)
+            Tab.Settings -> SettingsScreen(model, onArchived = { nav.navigate(Routes.ARCHIVED) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(

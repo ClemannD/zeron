@@ -138,12 +138,14 @@ fun StatusLabel(row: SessionRow) {
             Text(text, style = MaterialTheme.typography.labelLarge, color = color)
         }
     }
+    // A send that never reached the host outranks the live state; a finished
+    // run reads Done only until it's been seen.
+    if (row.sendState == uniffi.zeron_core.SendState.FAILED) return label("Failed", MaterialTheme.colorScheme.error, dot = true)
     when (row.indicator) {
         ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(26.dp))
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
         ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
-        ChatIndicator.COMPLETED -> label("Done", successColor(), dot = false)
-        ChatIndicator.IDLE -> Row(verticalAlignment = Alignment.CenterVertically) {
+        ChatIndicator.COMPLETED, ChatIndicator.IDLE -> if (row.indicator == ChatIndicator.COMPLETED && row.unseen) label("Done", successColor(), dot = false) else Row(verticalAlignment = Alignment.CenterVertically) {
             if (row.unseen) {
                 Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
                 Spacer(Modifier.width(5.dp))
@@ -170,3 +172,16 @@ fun segmentedShapes(index: Int, count: Int): androidx.compose.material3.ListItem
     } else {
         androidx.compose.material3.ListItemDefaults.segmentedShapes(index, count)
     }
+
+/** Inside a full-screen dialog: status and navigation bar icons that read on the page (dark on light). */
+@Composable
+fun DialogSystemBars(lightIcons: Boolean = LocalDarkTheme.current) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.SideEffect {
+        val window = (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window ?: return@SideEffect
+        androidx.core.view.WindowCompat.getInsetsController(window, view).apply {
+            isAppearanceLightStatusBars = !lightIcons
+            isAppearanceLightNavigationBars = !lightIcons
+        }
+    }
+}

@@ -61,6 +61,21 @@ object ZIcons {
     val Text = R.drawable.zi_document
     val Image = R.drawable.zi_file_image
     val Link = R.drawable.zi_arrow_up_right
+    val Share = R.drawable.zi_share
+    val Camera = R.drawable.zi_camera
+    val Gallery = R.drawable.zi_gallery
+    val File = R.drawable.zi_document_add
+    val Bell = R.drawable.zi_bell
+    val Mic = R.drawable.zi_microphone
+    val MicOff = R.drawable.zi_microphone_off
+    val HangUp = R.drawable.zi_phone_hang_up
+    val Speaker = R.drawable.zi_volume_loud
+    val Collapse = R.drawable.zi_collapse_arrows
+    val Sort = R.drawable.zi_sort_vertical
+    val FolderTree = R.drawable.zi_folder_tree
+    val Worktree = R.drawable.zi_worktree
+    val Restart = R.drawable.zi_restart
+    val Command = R.drawable.zi_command
 }
 
 @Composable

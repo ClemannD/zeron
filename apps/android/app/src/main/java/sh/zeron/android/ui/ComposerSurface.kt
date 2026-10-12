@@ -156,7 +156,14 @@ class MenuChoice(
 
 class MenuSection(val title: String?, val choices: List<MenuChoice>)
 
-class MenuAction(val label: String, @androidx.annotation.DrawableRes val icon: Int, val destructive: Boolean = false, val onClick: () -> Unit)
+class MenuAction(
+    val label: String,
+    @androidx.annotation.DrawableRes val icon: Int,
+    val destructive: Boolean = false,
+    /** A toggle's state (a trailing check), or null for a plain action. */
+    val checked: Boolean? = null,
+    val onClick: () -> Unit,
+)
 
 /** An expressive action menu (one segmented group). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -174,6 +181,11 @@ fun ActionMenu(expanded: Boolean, onDismiss: () -> Unit, actions: List<MenuActio
                     text = { Text(a.label, color = tint) },
                     shape = MenuDefaults.itemShape(i, actions.size).shape,
                     leadingIcon = { sh.zeron.android.design.ZIcon(a.icon, null, Modifier.size(20.dp), tint = tint) },
+                    trailingIcon = if (a.checked == true) {
+                        { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Check, "On", Modifier.size(20.dp), tint = tint) }
+                    } else {
+                        null
+                    },
                 )
             }
         }

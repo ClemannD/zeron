@@ -53,8 +53,10 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel) {
+fun SettingsScreen(model: AppModel, onArchived: () -> Unit) {
     val appearance by model.appearance.collectAsState()
+    val groupByProject by model.groupByProject.collectAsState()
+    var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -131,6 +133,27 @@ fun SettingsScreen(model: AppModel) {
         }
         section("Wallpaper")
         item { WallpaperSettings(model) }
+        section("Sessions")
+        item {
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                SegmentedListItem(
+                    onClick = { model.setGroupByProject(!groupByProject) },
+                    shapes = segmentedShapes(0, 2),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Project) },
+                    supportingContent = { Text("Recent sessions grouped by repository") },
+                    trailingContent = { Switch(groupByProject, { model.setGroupByProject(it) }) },
+                ) { Text("Group by project") }
+                SegmentedListItem(
+                    onClick = onArchived,
+                    shapes = segmentedShapes(1, 2),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Archive) },
+                    supportingContent = { (workspace?.archived?.size ?: 0).takeIf { it > 0 }?.let { Text("$it sessions") } },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline) },
+                ) { Text("Archived sessions") }
+            }
+        }
         if (devices.isNotEmpty()) {
             section("Devices")
             item {
@@ -181,7 +204,7 @@ fun SettingsScreen(model: AppModel) {
                     supportingContent = { Text("Zeron for Android · core ${coreVersion()}") },
                 ) { Text("Version") }
                 SegmentedListItem(
-                    onClick = { model.signOut() },
+                    onClick = { if (model.isDemo) model.signOut() else confirmSignOut = true },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
@@ -190,6 +213,21 @@ fun SettingsScreen(model: AppModel) {
         }
     }
     StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
+    }
+    if (confirmSignOut) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            icon = { ZIcon(ZIcons.Logout, null) },
+            title = { Text("Sign out?") },
+            text = { Text("Local drafts stay on this device.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    confirmSignOut = false
+                    model.signOut()
+                }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
+        )
     }
 }
 

@@ -6,9 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import sh.zeron.android.core.LaunchOptions
 import sh.zeron.android.ui.ZeronRoot
 
@@ -40,10 +37,6 @@ class MainActivity : ComponentActivity() {
             ),
         )
         handleCallback(intent)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = model.onForeground()
-            override fun onStop(owner: LifecycleOwner) = model.onBackground()
-        })
         setContent { ZeronRoot(model) }
     }
 
