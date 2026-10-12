@@ -42,6 +42,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="zeron" android:host="callback" />
+                <!-- zeron://voice returns to the call (iOS parity). -->
+                <data android:host="voice" />
             </intent-filter>
         </activity>
         <provider
