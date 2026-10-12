@@ -72,8 +72,12 @@ fun ZeronRoot(model: AppModel) {
     ZeronTheme(appearance) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val client by model.client.collectAsState()
-            AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
-                if (signedIn) MainNav(model) else SignInScreen(model)
+            Box(Modifier.fillMaxSize()) {
+                AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
+                    if (signedIn) MainNav(model) else SignInScreen(model)
+                }
+                // Mic prompt, keep-awake and the off-stage "call ended" snackbar.
+                sh.zeron.android.voice.VoiceHost(model.voice)
             }
         }
     }
@@ -85,6 +89,8 @@ object Routes {
     const val NEW = "new"
     const val SEARCH = "search"
     const val ARCHIVED = "archived"
+    const val VOICE = "voice"
+    const val VOICE_SETTINGS = "voice-settings"
     fun chat(id: String) = "chat/$id"
 }
 
@@ -114,6 +120,12 @@ private fun MainNav(model: AppModel) {
             else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
         }
     }
+    // The notification, a snackbar Retry or `voice-stage` asks for the call.
+    LaunchedEffect(Unit) {
+        model.voice.stageRequests.collect {
+            if (nav.currentDestination?.route != Routes.VOICE) nav.navigate(Routes.VOICE) { launchSingleTop = true }
+        }
+    }
     Box(
         Modifier.fillMaxSize().onPreviewKeyEvent { e ->
             // Hardware keyboards: Ctrl+N new session, Ctrl+Shift+F search (iPad ⌘N / ⌘⇧F).
@@ -136,7 +148,15 @@ private fun MainNav(model: AppModel) {
                     Box(Modifier.weight(1f).fillMaxHeight()) {
                         val id = selected
                         if (id != null) {
-                            key(id) { SessionScreen(model, id, onBack = { selected = null }) }
+                            key(id) {
+                                SessionScreen(
+                                    model,
+                                    id,
+                                    onBack = { selected = null },
+                                    onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
+                                    onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                                )
+                            }
                         } else {
                             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                                 sh.zeron.android.design.ZIcon(ZIcons.Chat, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.outline)
@@ -153,7 +173,27 @@ private fun MainNav(model: AppModel) {
         }
         composable(Routes.CHAT) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
-            SessionScreen(model, id, onBack = { nav.popBackStack() })
+            SessionScreen(
+                model,
+                id,
+                onBack = { nav.popBackStack() },
+                onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
+                onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+            )
+        }
+        composable(Routes.VOICE) {
+            sh.zeron.android.voice.VoiceStageScreen(
+                model.voice,
+                onClose = { nav.popBackStack() },
+                onOpenChat = { chatId ->
+                    nav.popBackStack()
+                    open(chatId)
+                },
+                wallpaper = model.wallpaper,
+            )
+        }
+        composable(Routes.VOICE_SETTINGS) {
+            sh.zeron.android.voice.VoiceSettingsScreen(model.voice, onBack = { nav.popBackStack() })
         }
         composable(Routes.NEW) {
             NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->
@@ -206,7 +246,7 @@ private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
             Tab.Sessions -> SessionsScreen(model, onOpen = open, onArchived = { nav.navigate(Routes.ARCHIVED) }, selected = selected)
-            Tab.Settings -> SettingsScreen(model, onArchived = { nav.navigate(Routes.ARCHIVED) })
+            Tab.Settings -> SettingsScreen(model, onArchived = { nav.navigate(Routes.ARCHIVED) }, onOpenVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(
@@ -218,7 +258,17 @@ private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit
                 .padding(top = 28.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.navigate(Routes.NEW) })
+            if (tab == Tab.Sessions) {
+                val voiceLive = model.voice.snapshot.collectAsState().value.live
+                NewSessionBar(summary, onClick = { nav.navigate(Routes.NEW) }, voiceLive = voiceLive) {
+                    sh.zeron.android.voice.VoiceNewSessionAccessory(
+                        model.voice,
+                        onOpenStage = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
+                        onOpenSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                        modifier = if (voiceLive) Modifier.weight(1f) else Modifier,
+                    )
+                }
+            }
             FloatingNavBar(
                 listOf(
                     NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },

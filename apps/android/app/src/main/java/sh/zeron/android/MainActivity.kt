@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
                 route = extras?.getString("route"),
                 wallpaper = extras?.getString("wallpaper"),
                 wallpaperEffect = extras?.getString("wallpaper-effect"),
+                voicePreview = extras?.getBoolean("voice-preview") == true,
+                voiceStage = extras?.getBoolean("voice-stage") == true,
+                remoteVoice = extras?.getBoolean("remote-voice") == true,
+                voiceSelfTest = extras?.getBoolean("voice-selftest") == true,
             ),
         )
         handleCallback(intent)
@@ -46,6 +50,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleCallback(intent: Intent?) {
+        // The call notification (or `zeron://voice`) returns to the stage.
+        if (sh.zeron.android.voice.VoiceController.opensStage(intent)) {
+            if (model.voice.live) model.voice.requestStage()
+            return
+        }
         val data = intent?.data ?: return
         if (data.scheme == "zeron") model.handleCallback(data.toString())
     }

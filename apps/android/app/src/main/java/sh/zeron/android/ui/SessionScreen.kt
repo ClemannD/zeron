@@ -95,7 +95,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -188,6 +188,11 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                // The session has its own composer; the call stays a tap away up here.
+                if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
+                    sh.zeron.android.voice.VoiceHeaderButton(model.voice, onOpenStage = onOpenVoice, onOpenSettings = onVoiceSettings)
+                    androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
                 }
                 Box {
                     TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)

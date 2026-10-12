@@ -53,7 +53,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel, onArchived: () -> Unit) {
+fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings: () -> Unit = {}) {
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
@@ -152,6 +152,30 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit) {
                     supportingContent = { (workspace?.archived?.size ?: 0).takeIf { it > 0 }?.let { Text("$it sessions") } },
                     trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline) },
                 ) { Text("Archived sessions") }
+            }
+        }
+        item {
+            // Voice: once any registered host can run it (iOS More → Voice).
+            if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
+                val style by model.voice.selectedStyle.collectAsState()
+                Column {
+                    Text(
+                        "Voice",
+                        style = MaterialTheme.typography.titleSmallEmphasized,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 28.dp, top = 24.dp, bottom = 8.dp),
+                    )
+                    SegmentedListItem(
+                        onClick = onOpenVoiceSettings,
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(sh.zeron.android.R.drawable.zi_microphone) },
+                        supportingContent = {
+                            Text(style?.let { "Codex voice · ${sh.zeron.android.voice.VoiceController.styleLabel(it)}" } ?: "Codex voice device and style")
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    ) { Text("Voice") }
+                }
             }
         }
         if (devices.isNotEmpty()) {

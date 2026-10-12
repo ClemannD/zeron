@@ -69,6 +69,14 @@ data class LaunchOptions(
     val route: String? = null,
     val wallpaper: String? = null,
     val wallpaperEffect: String? = null,
+    /** `--ez voice-preview true`: the scripted call (debuggable builds). */
+    val voicePreview: Boolean = false,
+    /** `--ez voice-stage true`: open the call stage at launch (with the preview). */
+    val voiceStage: Boolean = false,
+    /** `--ez remote-voice true`: offer voice before any host advertises it. */
+    val remoteVoice: Boolean = false,
+    /** `--ez voice-selftest true`: log a host-less WebRTC offer (debuggable builds). */
+    val voiceSelfTest: Boolean = false,
 )
 
 /**
@@ -81,6 +89,11 @@ class AppModel(private val app: Application) {
     private val main = Handler(Looper.getMainLooper())
     val credentials = CredentialStore(app)
     val wallpaper = WallpaperStore(app)
+
+    /** The app-wide voice call (one at a time, outlives screens). */
+    val voice: sh.zeron.android.voice.VoiceController by lazy {
+        sh.zeron.android.voice.VoiceController(app, client, workspace)
+    }
 
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
@@ -209,6 +222,9 @@ class AppModel(private val app: Application) {
         options.wallpaperEffect?.let { name ->
             WallpaperStore.effects.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let(wallpaper::setEffect)
         }
+        if (options.remoteVoice) voice.forced = true
+        if (options.voicePreview && voice.preview() && options.voiceStage) voice.requestStage()
+        if (options.voiceSelfTest) voice.selfTest()
         val stored = credentials.stored()
         when {
             // A `route` with nobody signed in opens on the demo (screenshots, tests).
@@ -367,6 +383,7 @@ class AppModel(private val app: Application) {
      * the `.owner` marker still keeps a different account out of it.
      */
     private fun signOutLocally(forget: Boolean) {
+        voice.stop()
         val wasDemo = isDemo
         endDeliveryHold()
         lastDeliveryActivity = 0L
