@@ -8,6 +8,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- Voice calls (sh.zeron.android.voice): the microphone, call audio
+         routing, the ongoing-call service and notification, the proximity
+         screen-off lock and call haptics. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
         android:name=".ZeronApplication"
         android:allowBackup="false"
@@ -47,5 +57,10 @@
             android:name=".core.DeliveryService"
             android:exported="false"
             android:foregroundServiceType="shortService|dataSync" />
+        <!-- The ongoing voice call: keeps the microphone with the screen locked. -->
+        <service
+            android:name=".voice.VoiceCallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 </manifest>
