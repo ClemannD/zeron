@@ -69,7 +69,7 @@ mod chat_dropzone;
 mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
-pub(crate) mod command_palette;
+mod command_palette;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
@@ -1002,7 +1002,7 @@ fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -
 }
 
 /// Flex gap between sidebar list items.
-pub(crate) const SIDEBAR_LIST_GAP: f32 = 2.0;
+const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
 #[cfg(test)]
 const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;

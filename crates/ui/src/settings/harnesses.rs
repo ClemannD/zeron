@@ -1,6 +1,7 @@
 //! Settings → Providers: install and enable harnesses, one card row per agent.
 //! Any ACP agent can join the list too — from the ACP registry or as a custom
-//! command — through Add provider ([`add_provider`]), and leaves it again
+//! command — from the Add a provider section under the list
+//! ([`add_provider`]), and leaves it again
 //! from its expanded details.
 //!
 //! The state is PER-DEVICE and lives on the engine (`harness-prefs.json` in
@@ -68,6 +69,24 @@ const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
         "Don't check for new versions.",
     ),
 ];
+
+/// A provider row's mark: widgets::row_tile with the brand tint honored (the
+/// Claude mark keeps its orange, like the picker rail).
+fn provider_tile(theme: &Theme, icon_path: &'static str, tint: Option<gpui::Hsla>) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(36.0))
+        .rounded(px(10.0))
+        .bg(theme.wash(0.06))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(16.0))
+                .text_color(tint.unwrap_or(theme.text_muted)),
+        )
+}
 
 /// Whether a provider row opens its details: enabled providers, and every
 /// user-added ACP agent (its Remove lives there, on or off).
@@ -205,7 +224,7 @@ pub struct HarnessesPage {
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
-    /// The Add provider palette, while open.
+    /// The Add a provider section, once the target device supports it.
     add_provider: Option<add_provider::AddProvider>,
     /// A user-added agent awaiting the Remove confirmation.
     remove_confirm: Option<HarnessId>,
@@ -760,10 +779,6 @@ impl HarnessesPage {
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
         if self.remove_confirm.take().is_some() || self.env_dialog.take().is_some() {
             cx.notify();
-            return true;
-        }
-        if self.add_provider.is_some() {
-            self.close_add_provider(cx);
             return true;
         }
         self.expanded_harness.is_some()
@@ -1338,21 +1353,7 @@ impl HarnessesPage {
                         meta.push(div().text_color(color).child(text).into_any_element());
                     }
                 }
-                // widgets::row_tile with the brand tint honored (the Claude
-                // mark keeps its orange, like the picker rail).
-                let tile = div()
-                    .flex_none()
-                    .size(px(36.0))
-                    .rounded(px(10.0))
-                    .bg(theme.wash(0.06))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(icon_path)
-                            .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    );
+                let tile = provider_tile(&theme, icon_path, tint);
                 let can_expand = enabled || descriptor.acp.is_some();
                 let expanded = can_expand && self.expanded_harness == Some(harness);
                 // The row's one update action sits inside the trigger, before
@@ -1591,11 +1592,14 @@ impl Render for HarnessesPage {
         let theme = Theme::of(cx).for_settings_surface();
         let supports_updates = self.supports_updates(cx);
         let overlays: Vec<AnyElement> = self
-            .render_add_provider(window, cx)
+            .render_remove_confirm(window, cx)
             .into_iter()
-            .chain(self.render_remove_confirm(window, cx))
             .chain(self.render_env_dialog(window, cx))
             .collect();
+        let add_provider = match &self.harnesses {
+            Loadable::Ready(_) => self.render_add_provider(&theme, cx),
+            _ => None,
+        };
 
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1678,22 +1682,6 @@ impl Render for HarnessesPage {
             } else {
                 "Check now"
             });
-        // Same quiet button as Check now, for the same header.
-        let add_provider = self.supports_acp_agents(cx).then(|| {
-            div()
-                .id("add-provider")
-                .flex_none()
-                .px(px(9.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .hover(|style| style.bg(crate::theme::ink(0.05)))
-                .on_click(cx.listener(|page, _, _, cx| page.open_add_provider(cx)))
-                .child("Add provider")
-        });
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1726,13 +1714,13 @@ impl Render for HarnessesPage {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                .children(add_provider)
                                                 .when(supports_updates, |el| el.child(check))
                                                 .child(switcher),
                                         ),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .children(add_provider),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

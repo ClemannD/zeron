@@ -1,8 +1,7 @@
-//! Settings → Providers → Add provider: any agent from the ACP registry, or
-//! any local command that speaks ACP, added to the target device's provider
-//! list. Built as the New project palette is (search header, Cmd+K rows, a
-//! key-hint footer with the primary action on its right edge), with a second
-//! step for a custom command.
+//! Settings → Providers → Add a provider: a search over the ACP registry
+//! right under the provider list, plus a custom command for any local agent
+//! that speaks ACP. Rows reuse the provider rows' anatomy (tile, title, meta,
+//! trailing action), so an agent looks the same before and after it joins.
 //!
 //! The engine does the work (`ListAcpRegistry` / `AddAcpAgent`, forwarded to
 //! the target device like every other provider RPC): availability depends
@@ -10,38 +9,29 @@
 //! agent there before it joins the list.
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable as _, IntoElement, ScrollHandle,
-    SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, IntoElement, SharedString, Subscription, Task, div, prelude::*, px,
 };
 
 use zeron_engine::registry::{AcpRegistryListing, HarnessDescriptor};
 use zeron_rpc::methods;
 
-use super::HarnessesPage;
+use super::{DETAILS_INSET, HarnessesPage, provider_tile};
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::icons::{self, icon};
 use crate::popover::{self, Loadable};
-use crate::shell::command_palette;
+use crate::settings::widgets;
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Step {
-    Registry,
-    Custom,
-}
+/// Registry rows shown before "Show all" while nothing is typed.
+const COLLAPSED_ROWS: usize = 5;
 
 pub(super) struct AddProvider {
-    pub(super) step: Step,
     search: Entity<ComposerInput>,
     name: Entity<ComposerInput>,
     command: Entity<ComposerInput>,
     env: Entity<ComposerInput>,
-    focus: FocusHandle,
-    /// Focus the step's first field on the next render.
-    focus_pending: bool,
     registry: Loadable<Vec<AcpRegistryListing>>,
-    active: usize,
-    scroll: ScrollHandle,
+    show_all: bool,
+    custom_open: bool,
     /// The registry id being added, or `""` for the custom command.
     adding: Option<String>,
     error: Option<String>,
@@ -79,17 +69,16 @@ fn filtered<'a>(listings: &'a [AcpRegistryListing], query: &str) -> Vec<&'a AcpR
         .iter()
         .filter_map(|listing| {
             let name = listing.name.to_lowercase();
-            let rank = if query.is_empty() {
-                0
-            } else if name.starts_with(&query) || listing.id.starts_with(&query) {
-                0
-            } else if name.contains(&query) || listing.id.contains(&query) {
-                1
-            } else if listing.description.to_lowercase().contains(&query) {
-                2
-            } else {
-                return None;
-            };
+            let rank =
+                if query.is_empty() || name.starts_with(&query) || listing.id.starts_with(&query) {
+                    0
+                } else if name.contains(&query) || listing.id.contains(&query) {
+                    1
+                } else if listing.description.to_lowercase().contains(&query) {
+                    2
+                } else {
+                    return None;
+                };
             Some((rank, row_state(listing), name, listing))
         })
         .collect();
@@ -98,10 +87,12 @@ fn filtered<'a>(listings: &'a [AcpRegistryListing], query: &str) -> Vec<&'a AcpR
 }
 
 impl HarnessesPage {
-    pub(super) fn open_add_provider(&mut self, cx: &mut Context<Self>) {
-        // Form fields edit like the app's dialog fields (caret keys stay in
-        // the field, Enter submits); only the search uses the palette's
-        // navigation-bubbling context.
+    /// Build the section once the target device supports it, and load the
+    /// registry as that device sees it.
+    pub(super) fn ensure_add_provider(&mut self, cx: &mut Context<Self>) {
+        if self.add_provider.is_some() || !self.supports_acp_agents(cx) {
+            return;
+        }
         let field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 ComposerInput::new(placeholder, cx)
@@ -110,22 +101,15 @@ impl HarnessesPage {
             })
         };
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search the ACP registry", "PaletteSearch", cx)
+            ComposerInput::new("Search the ACP registry", cx)
                 .with_accessibility_role(gpui::Role::SearchInput)
                 .with_single_line()
+                .with_tab_stop()
         });
         let name = field("Name (optional)", cx);
         let command = field("my-agent --acp", cx);
         let env = field("API_KEY=… (optional)", cx);
-        let mut events = vec![cx.subscribe(&search, |page: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited)
-                && let Some(flow) = page.add_provider.as_mut()
-            {
-                flow.active = 0;
-                flow.scroll.scroll_to_item(0);
-                cx.notify();
-            }
-        })];
+        let mut events = vec![cx.observe(&search, |_, _, cx| cx.notify())];
         for input in [&name, &command, &env] {
             events.push(cx.subscribe(input, |page: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Submitted) {
@@ -134,16 +118,13 @@ impl HarnessesPage {
             }));
         }
         self.add_provider = Some(AddProvider {
-            step: Step::Registry,
             search,
             name,
             command,
             env,
-            focus: cx.focus_handle(),
-            focus_pending: true,
             registry: Loadable::Loading,
-            active: 0,
-            scroll: ScrollHandle::new(),
+            show_all: false,
+            custom_open: false,
             adding: None,
             error: None,
             load_task: None,
@@ -151,15 +132,6 @@ impl HarnessesPage {
             _events: events,
         });
         self.load_registry(false, cx);
-        cx.notify();
-    }
-
-    pub(super) fn close_add_provider(&mut self, cx: &mut Context<Self>) {
-        // An install in flight keeps running on the device; its reply still
-        // lands in the list (see `add_agent`).
-        if self.add_provider.take().is_some() {
-            cx.notify();
-        }
     }
 
     fn load_registry(&mut self, force: bool, cx: &mut Context<Self>) {
@@ -237,7 +209,8 @@ impl HarnessesPage {
     }
 
     /// `AddAcpAgent` on the target device. The reply is the device's fresh
-    /// catalog, so the new provider shows up (enabled) in one round trip.
+    /// catalog, so the new provider shows up (enabled) in one round trip, and
+    /// the registry reloads so its row reads "Added".
     fn add_agent(&mut self, key: String, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -266,20 +239,29 @@ impl HarnessesPage {
                 if page.target_device != target {
                     return;
                 }
+                let added = result.is_ok();
                 match result {
                     Ok(list) => {
                         page.set_catalog(list, cx);
                         crate::pickers::bump_harness_catalog(cx);
-                        page.add_provider = None;
                     }
                     Err(error) => {
                         if let Some(flow) = page.add_provider.as_mut() {
-                            flow.adding = None;
                             flow.error = Some(error);
-                        } else {
-                            page.error = Some(format!("Couldn't add the provider — {error}"));
                         }
                     }
+                }
+                if let Some(flow) = page.add_provider.as_mut() {
+                    flow.adding = None;
+                    if added {
+                        flow.custom_open = false;
+                        for input in [&flow.search, &flow.name, &flow.command, &flow.env] {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                    }
+                }
+                if added {
+                    page.load_registry(false, cx);
                 }
                 cx.notify();
             })
@@ -288,201 +270,135 @@ impl HarnessesPage {
         cx.notify();
     }
 
-    fn add_provider_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_provider.as_mut() else {
-            return;
-        };
-        let key = event.keystroke.key.as_str();
-        if key == "escape" {
-            if flow.step == Step::Custom {
-                self.add_provider_step(Step::Registry, cx);
-            } else {
-                self.close_add_provider(cx);
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if flow.step != Step::Registry {
-            return;
-        }
-        let Some(listings) = flow.registry.ready() else {
-            return;
-        };
-        let query = flow.search.read(cx).text().to_string();
-        let rows = filtered(listings, &query);
-        match key {
-            "down" | "up" if !rows.is_empty() => {
-                let last = rows.len() - 1;
-                flow.active = if key == "down" {
-                    (flow.active + 1).min(last)
-                } else {
-                    flow.active.saturating_sub(1)
-                };
-                flow.scroll.scroll_to_item(flow.active);
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "enter" => {
-                let pick = rows
-                    .get(flow.active)
-                    .filter(|row| row_state(row) == RowState::Addable)
-                    .map(|row| row.id.clone());
-                if let Some(id) = pick {
-                    self.add_registry_agent(id, cx);
-                }
-                cx.stop_propagation();
-            }
-            _ => {}
-        }
-    }
-
-    fn add_provider_step(&mut self, step: Step, cx: &mut Context<Self>) {
-        if let Some(flow) = self.add_provider.as_mut()
-            && flow.adding.is_none()
-        {
-            flow.step = step;
-            flow.error = None;
-            flow.focus_pending = true;
-            cx.notify();
-        }
-    }
-
+    /// The "Add a provider" section under the provider list.
     pub(super) fn render_add_provider(
         &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let viewport = window.viewport_size();
-        let theme = Theme::of(cx).for_popup();
-        let flow = self.add_provider.as_mut()?;
-        if std::mem::take(&mut flow.focus_pending) {
-            let field = match flow.step {
-                Step::Registry => &flow.search,
-                Step::Custom => &flow.command,
-            };
-            window.focus(&field.focus_handle(cx), cx);
-        }
-        let step = flow.step;
-        let focus = flow.focus.clone();
-        let error = flow.error.clone();
-        let busy = flow.adding.is_some();
-        let body = match step {
-            Step::Registry => self.render_registry_step(viewport, &theme, cx),
-            Step::Custom => self.render_custom_step(&theme),
-        };
-        let footer = self.render_add_provider_footer(step, busy, &theme, cx);
-        let header = match step {
-            Step::Registry => {
-                let search = self.add_provider.as_ref()?.search.clone();
-                command_palette::palette_header(&theme, search.into_any_element(), div())
-                    .into_any_element()
-            }
-            Step::Custom => custom_header(&theme, cx).into_any_element(),
-        };
-        let card = command_palette::palette_card("add-provider-palette", &focus, viewport, &theme)
-            .role(gpui::Role::Dialog)
-            .aria_label("Add provider")
-            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
-                page.add_provider_key(event, cx)
-            }))
-            .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_add_provider(cx)))
-            .child(header)
-            .child(body)
-            .when_some(error, |el, error| {
-                el.child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(8.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .child(error),
-                )
-            })
-            .child(footer);
-        Some(command_palette::palette_overlay(viewport, card))
-    }
-
-    fn render_registry_step(
-        &mut self,
-        viewport: gpui::Size<gpui::Pixels>,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(flow) = self.add_provider.as_ref() else {
-            return div().into_any_element();
-        };
+    ) -> Option<AnyElement> {
+        self.ensure_add_provider(cx);
+        let flow = self.add_provider.as_ref()?;
         let query = flow.search.read(cx).text().to_string();
-        let scroll = flow.scroll.clone();
         let adding = flow.adding.clone();
-        let registry = match &flow.registry {
-            Loadable::Ready(list) => Ok(list.clone()),
-            Loadable::Error(error) => Err(Some(error.clone())),
-            Loadable::Idle | Loadable::Loading => Err(None),
-        };
-        let mut results = div()
-            .id("add-provider-results")
-            .min_h_0()
-            .max_h(px(command_palette::palette_results_height(viewport)))
-            .overflow_y_scroll()
-            .track_scroll(&scroll)
+        let show_all = flow.show_all || !query.trim().is_empty();
+        let error = flow.error.clone();
+        let search = div()
+            .mx(px(16.0))
+            .min_h(px(48.0))
             .flex()
-            .flex_col()
-            .gap(px(crate::shell::SIDEBAR_LIST_GAP));
-        match registry {
-            Err(None) => {
-                results = results.child(div().p(px(8.0)).child(popover::skeleton_rows(
-                    "add-provider-loading",
-                    theme,
-                    6,
-                    cx.entity_id(),
-                    cx,
-                )));
-            }
-            Err(Some(message)) => {
-                results = results.child(
-                    popover::error_row(theme, &message).p(px(16.0)).child(
-                        popover::btn_ghost(theme, "Retry", "add-provider-retry")
-                            .id("add-provider-retry")
-                            .on_click(cx.listener(|page, _, _, cx| page.load_registry(true, cx))),
-                    ),
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(36.0))
+                    .flex()
+                    .justify_center()
+                    .child(popover::palette_search_icon(theme)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(flow.search.clone()),
+            );
+        let mut card = widgets::section_card(theme).mt(px(0.0)).child(search);
+        match &flow.registry {
+            Loadable::Idle | Loadable::Loading => {
+                card = card.child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(12.0))
+                        .border_t_1()
+                        .border_color(widgets::row_divider(theme))
+                        .child(popover::skeleton_rows(
+                            "acp-registry-skeleton",
+                            theme,
+                            3,
+                            cx.entity_id(),
+                            cx,
+                        )),
                 );
             }
-            Ok(listings) => {
-                let rows = filtered(&listings, &query);
-                let active = flow.active.min(rows.len().saturating_sub(1));
-                let count = rows.len();
-                if count == 0 {
-                    results = results.child(command_palette::palette_empty(
-                        theme,
-                        "No agents found",
-                        "Try another name, or add a custom command.",
-                    ));
+            Loadable::Error(message) => {
+                let message = format!("Couldn't load the ACP registry — {message}");
+                card = card.child(
+                    widgets::card_row(theme, false)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(theme.danger_muted)
+                                .child(message),
+                        )
+                        .child(
+                            widgets::ghost_action(theme)
+                                .id("acp-registry-retry")
+                                .flex_none()
+                                .on_click(
+                                    cx.listener(|page, _, _, cx| page.load_registry(true, cx)),
+                                )
+                                .child("Retry"),
+                        ),
+                );
+            }
+            Loadable::Ready(listings) => {
+                let rows = filtered(listings, &query);
+                let total = rows.len();
+                let shown = if show_all {
+                    total
+                } else {
+                    total.min(COLLAPSED_ROWS)
+                };
+                if total == 0 {
+                    card =
+                        card.child(widgets::card_row(theme, false).child(
+                            div().text_color(theme.text_muted).child(
+                                "No agents match — try another name, or add a custom command.",
+                            ),
+                        ));
                 }
-                for (ix, listing) in rows.into_iter().enumerate() {
-                    let row =
-                        self.registry_row(ix, ix == active, listing, &query, &adding, theme, cx);
-                    // End spacing scrolls with the content (Cmd+K).
-                    results = results.child(
-                        div()
-                            .flex_none()
-                            .px(px(8.0))
-                            .when(ix == 0, |row| row.pt(px(8.0)))
-                            .when(ix + 1 == count, |row| row.pb(px(8.0)))
-                            .child(row),
+                let rows: Vec<AnyElement> = rows
+                    .into_iter()
+                    .take(shown)
+                    .enumerate()
+                    .map(|(ix, listing)| self.registry_row(ix, listing, &adding, theme, cx))
+                    .collect();
+                card = card.children(rows);
+                if shown < total {
+                    card = card.child(
+                        widgets::card_row(theme, false).min_h(px(44.0)).child(
+                            // Text on the titles' edge (tile + gap, less
+                            // the button's own padding).
+                            widgets::ghost_action(theme)
+                                .id("acp-registry-show-all")
+                                .ml(px(4.0 + 36.0 + 12.0 - 10.0))
+                                .on_click(cx.listener(|page, _, _, cx| {
+                                    if let Some(flow) = page.add_provider.as_mut() {
+                                        flow.show_all = true;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(format!("Show all {total}")),
+                        ),
                     );
                 }
             }
         }
-        command_palette::palette_results_fade(results, &scroll).into_any_element()
+        card = card.child(self.custom_row(theme, cx));
+        let section = widgets::section(theme, "Add a provider", card)
+            .when_some(error, |el, error| {
+                el.child(widgets::error_strip(theme, error))
+            });
+        Some(section.into_any_element())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn registry_row(
         &self,
         ix: usize,
-        active: bool,
         listing: &AcpRegistryListing,
-        query: &str,
         adding: &Option<String>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -490,14 +406,25 @@ impl HarnessesPage {
         let state = row_state(listing);
         let installing = adding.as_deref() == Some(listing.id.as_str());
         let mark = crate::acp_icons::mark_for_url(listing.icon.as_deref(), cx);
+        let mut meta: Vec<AnyElement> = Vec::new();
+        if !listing.description.trim().is_empty() {
+            meta.push(
+                div()
+                    .truncate()
+                    .child(listing.description.clone())
+                    .into_any_element(),
+            );
+        }
         let trailing: AnyElement = if installing {
             div()
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
                 .child(crate::loaders::mini_mono_spinner(
-                    format!("add-provider-spinner-{ix}"),
+                    format!("acp-registry-spinner-{ix}"),
                     1.5,
                     theme.text_muted,
                     cx.entity_id(),
@@ -505,212 +432,165 @@ impl HarnessesPage {
                 ))
                 .child("Installing…")
                 .into_any_element()
+        } else if state == RowState::Addable {
+            let id = listing.id.clone();
+            widgets::ghost_action(theme)
+                .id(("acp-registry-add", ix))
+                .flex_none()
+                .when(adding.is_none(), |el| {
+                    el.on_click(
+                        cx.listener(move |page, _, _, cx| page.add_registry_agent(id.clone(), cx)),
+                    )
+                })
+                .when(adding.is_some(), |el| el.opacity(0.5))
+                .child("Add")
+                .into_any_element()
         } else {
             let label: SharedString = match state {
-                RowState::Addable => format!("v{}", listing.version).into(),
                 RowState::Added => "Added".into(),
                 RowState::BuiltIn => "Built in".into(),
-                RowState::Unavailable => listing.unavailable.clone().unwrap_or_default().into(),
+                _ => listing.unavailable.clone().unwrap_or_default().into(),
             };
             div()
+                .flex_none()
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.75))
                 .child(label)
                 .into_any_element()
         };
-        let dimmed = state != RowState::Addable && !installing;
-        let id = listing.id.clone();
-        let name = listing.name.clone();
-        popover::menu_row(theme, active, format!("add-provider-row-{ix}"))
-            .id(("add-provider-row", ix))
-            .rounded(px(popover::PALETTE_ITEM_RADIUS))
-            .min_h(px(30.0))
-            .py(px(4.0))
-            .role(gpui::Role::Button)
-            .aria_label(format!("Add {name}"))
-            .on_mouse_move(cx.listener(move |page, _: &gpui::MouseMoveEvent, _, cx| {
-                if let Some(flow) = page.add_provider.as_mut()
-                    && flow.active != ix
-                {
-                    flow.active = ix;
-                    cx.notify();
-                }
-            }))
-            .when(state == RowState::Addable && adding.is_none(), |row| {
-                row.on_click(
-                    cx.listener(move |page, _, _, cx| page.add_registry_agent(id.clone(), cx)),
-                )
-            })
-            .when(state != RowState::Addable, |row| row.cursor_default())
-            .child(
-                icon(mark)
-                    .size(px(16.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(200.0))
-                    .truncate()
-                    .when(dimmed, |el| el.text_color(theme.text_muted))
-                    .child(popover::search_highlight(
-                        listing.name.clone().into(),
-                        Some(query),
-                        theme,
-                    )),
-            )
+        widgets::card_row(theme, false)
+            .id(("acp-registry-row", ix))
+            .flex_nowrap()
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted.opacity(0.75))
-                    .child(listing.description.clone()),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(4.0))
+                    .child(provider_tile(theme, mark, None))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(theme, listing.name.clone()))
+                            .when(!meta.is_empty(), |el| {
+                                el.child(widgets::meta_line(theme, meta))
+                            }),
+                    ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .child(trailing),
-            )
+            .child(trailing)
             .into_any_element()
     }
 
-    fn render_custom_step(&self, theme: &Theme) -> AnyElement {
+    /// The last row: any local command, expanding into its fields the way a
+    /// provider row expands into its details.
+    fn custom_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(flow) = self.add_provider.as_ref() else {
             return div().into_any_element();
         };
-        let field = |label: &'static str, hint: &'static str, input: &Entity<ComposerInput>| {
+        let open = flow.custom_open;
+        let busy = flow.adding.as_deref() == Some("");
+        let header = widgets::card_row(theme, false).child(
+            div()
+                .id("acp-custom-trigger")
+                .group("acp-custom-trigger")
+                .flex_1()
+                .min_h(px(44.0))
+                .px(px(4.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label("Custom ACP command")
+                .aria_expanded(open)
+                .on_click(cx.listener(|page, _, _, cx| {
+                    if let Some(flow) = page.add_provider.as_mut() {
+                        flow.custom_open = !flow.custom_open;
+                        flow.error = None;
+                        cx.notify();
+                    }
+                }))
+                .child(provider_tile(theme, crate::icons::BOT, None))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(theme, "Custom command"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Any local agent that speaks ACP over stdio")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    crate::icons::icon(if open {
+                        crate::icons::ALT_ARROW_DOWN
+                    } else {
+                        crate::icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .group_hover("acp-custom-trigger", |s| s.text_color(theme.text)),
+                ),
+        );
+        let field = |label: &'static str, input: &Entity<ComposerInput>| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
                 .child(
                     div()
-                        .flex()
-                        .items_baseline()
-                        .gap(px(8.0))
                         .text_size(crate::typography::ui_rems(12.0))
-                        .child(div().text_color(theme.text).child(label))
-                        .child(div().text_color(theme.text_muted).child(hint)),
+                        .text_color(theme.text_muted)
+                        .child(label),
                 )
                 .child(popover::dialog_field(input.clone().into_any_element()))
         };
+        let details = open.then(|| {
+            div()
+                .mx(px(16.0))
+                .pl(px(DETAILS_INSET))
+                .pb(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(field("Command", &flow.command))
+                .child(field("Name", &flow.name))
+                .child(field("Environment", &flow.env))
+                .child(
+                    div().flex().justify_end().child(
+                        widgets::text_action(
+                            theme,
+                            widgets::ActionTone::Filled,
+                            if busy { "Adding…" } else { "Add" },
+                        )
+                        .id("acp-custom-add")
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|page, _, _, cx| page.submit_custom_agent(cx)))
+                        }),
+                    ),
+                )
+        });
         div()
-            .px(px(16.0))
-            .py(px(12.0))
             .flex()
             .flex_col()
-            .gap(px(14.0))
-            .child(field(
-                "Command",
-                "Starts the agent speaking ACP over stdio",
-                &flow.command,
-            ))
-            .child(field("Name", "Shown in the provider list", &flow.name))
-            .child(field("Environment", "KEY=value pairs", &flow.env))
+            .child(header)
+            .children(details)
             .into_any_element()
     }
-
-    fn render_add_provider_footer(
-        &mut self,
-        step: Step,
-        busy: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let (label, busy_label) = match step {
-            Step::Registry => ("Custom command", "Installing…"),
-            Step::Custom => ("Add agent", "Adding…"),
-        };
-        let action = div()
-            .id("add-provider-action")
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .py(px(3.0))
-            .my(px(-3.0))
-            .mr(px(-8.0))
-            .rounded(px(8.0))
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .when(!busy, |el| {
-                el.cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::card_selected_bg()))
-                    .active(|s| s.opacity(0.8))
-                    .on_click(cx.listener(move |page, _, _, cx| match step {
-                        Step::Registry => page.add_provider_step(Step::Custom, cx),
-                        Step::Custom => page.submit_custom_agent(cx),
-                    }))
-            })
-            .when(busy, |el| el.opacity(0.5))
-            .when(step == Step::Custom, |el| {
-                el.child(popover::kbd_hint(theme, "↵"))
-            })
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(if busy && step == Step::Custom {
-                        busy_label
-                    } else {
-                        label
-                    }),
-            );
-        command_palette::palette_footer()
-            .when(step == Step::Registry, |el| {
-                el.child(command_palette::command_key_hint(theme, "↑ ↓", "Navigate"))
-                    .child(command_palette::command_key_hint(theme, "↵", "Add"))
-                    .child(command_palette::command_key_hint(theme, "Esc", "Close"))
-            })
-            .when(step == Step::Custom, |el| {
-                el.child(command_palette::command_key_hint(theme, "Esc", "Back"))
-            })
-            .child(div().flex_1())
-            .child(action)
-    }
-}
-
-/// The custom step's top bar: back to the registry, and the step's title
-/// (the New project palette's crumb bar, one crumb deep).
-fn custom_header(theme: &Theme, cx: &mut Context<HarnessesPage>) -> gpui::Div {
-    div()
-        .h(px(44.0))
-        .flex_none()
-        .px(px(12.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .border_b_1()
-        .border_color(crate::theme::hairline(0.06))
-        .text_size(crate::typography::ui_rems(13.0))
-        .child(
-            div()
-                .id("add-provider-back")
-                .group("add-provider-back")
-                .size(px(24.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label("Back")
-                .tooltip(crate::settings::widgets::text_tooltip("Back"))
-                .hover(|s| s.bg(theme.element_hover))
-                .on_click(cx.listener(|page, _, _, cx| page.add_provider_step(Step::Registry, cx)))
-                .child(
-                    icon(icons::ARROW_LEFT)
-                        .size(px(16.0))
-                        .text_color(theme.text_muted)
-                        .group_hover("add-provider-back", |s| s.text_color(theme.text)),
-                ),
-        )
-        .child(div().text_color(theme.text).child("Custom ACP command"))
 }
 
 #[cfg(test)]
