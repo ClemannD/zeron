@@ -118,6 +118,9 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 /// legible, while each newly appended row reveals quickly enough to read as a
 /// continuous log rather than a stack of discrete pop-ins.
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
+/// How long an inline visual may stay offscreen before its engine page is
+/// released (it reloads from the local server when scrolled back).
+const VISUAL_IDLE_RELEASE: Duration = Duration::from_secs(5);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
 const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
@@ -1025,6 +1028,13 @@ pub enum RowKind {
         name: String,
         mime_type: String,
     },
+    /// An agent's `show_visual` page, rendered inline by [`crate::visuals`].
+    Visual {
+        owner: String,
+        path: String,
+        title: String,
+        height: u32,
+    },
     User {
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
@@ -1622,6 +1632,31 @@ pub fn rows_for_entry(
                                 path: path.clone(),
                                 name: name.clone(),
                                 mime_type: mime_type.clone(),
+                            },
+                        });
+                    }
+                    MessagePart::Visual {
+                        id: part_id,
+                        path,
+                        title,
+                        height,
+                    } => {
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("{}\0{path}\0{title}\0{height}", entry.device_id)
+                                    .as_bytes(),
+                            ),
+                            turn_start: false,
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                            kind: RowKind::Visual {
+                                owner: entry.device_id.clone(),
+                                path: path.clone(),
+                                title: title.clone(),
+                                height: *height,
                             },
                         });
                     }
@@ -3339,6 +3374,11 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
+    /// Inline `show_visual` pages, keyed by row id, with the render pass that
+    /// last drew each one.
+    visuals: HashMap<SharedString, (Entity<crate::visuals::VisualFrame>, u64)>,
+    /// Counts render passes, so a visual knows whether the last pass drew it.
+    visual_pass: u64,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
@@ -3634,6 +3674,8 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
+            visuals: HashMap::new(),
+            visual_pass: 0,
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
@@ -6677,6 +6719,71 @@ impl Transcript {
         }
     }
 
+    /// A visual the previous pass did not draw is offscreen; after a while it
+    /// gives its engine page back, and scrolling to it reloads the page from
+    /// the local server. Rows render after this, so a pass that draws a visual
+    /// always stamps it before the next sweep.
+    fn release_offscreen_visuals(&mut self, cx: &mut Context<Self>) {
+        let previous = self.visual_pass;
+        self.visual_pass += 1;
+        for (frame, drawn) in self.visuals.values() {
+            if *drawn < previous
+                && frame.read(cx).has_page()
+                && frame.read(cx).idle_for() > VISUAL_IDLE_RELEASE
+            {
+                frame.update(cx, |frame, cx| frame.release_page(cx));
+            }
+        }
+    }
+
+    fn render_visual(
+        &mut self,
+        row_id: &SharedString,
+        owner: &str,
+        path: &str,
+        title: &str,
+        height: u32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let link_ui = self.link_ui(cx);
+        let pass = self.visual_pass;
+        let frame = match self.visuals.get_mut(row_id) {
+            Some((frame, drawn)) => {
+                *drawn = pass;
+                frame.clone()
+            }
+            None => {
+                let state = self.state.read(cx);
+                let engine = state.engine().cloned();
+                // Relay-forward only for a genuinely remote owner.
+                let target =
+                    (state.local_device_id.as_deref() != Some(owner)).then(|| owner.to_owned());
+                let frame = cx.new(|cx| {
+                    crate::visuals::VisualFrame::new(
+                        row_id.clone(),
+                        title.to_owned(),
+                        height,
+                        path.to_owned(),
+                        engine,
+                        target,
+                        cx,
+                    )
+                });
+                // A page reporting its height resizes the row, like a
+                // diagram finishing.
+                let id = row_id.clone();
+                cx.observe(&frame, move |this, _, cx| {
+                    this.diagram_layout_changed(std::slice::from_ref(&id), cx);
+                })
+                .detach();
+                self.visuals.insert(row_id.clone(), (frame.clone(), pass));
+                frame
+            }
+        };
+        frame.update(cx, |frame, _| frame.set_link_ui(link_ui));
+        div().w_full().child(frame).into_any_element()
+    }
+
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -7451,6 +7558,12 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
+            RowKind::Visual {
+                owner,
+                path,
+                title,
+                height,
+            } => self.render_visual(&row.id, owner, path, title, *height, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
@@ -10004,6 +10117,19 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
+        if let MessagePart::Visual {
+            path,
+            title,
+            height,
+            ..
+        } = part
+        {
+            for field in [path, title] {
+                acc.extend_from_slice(field.as_bytes());
+                acc.push(0);
+            }
+            acc.extend_from_slice(&height.to_le_bytes());
+        }
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
@@ -10013,6 +10139,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.release_offscreen_visuals(cx);
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),

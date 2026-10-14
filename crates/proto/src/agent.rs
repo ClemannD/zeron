@@ -415,6 +415,13 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+/// Bounds on an agent's inline HTML page ([`AgentEvent::Visual`]).
+pub const VISUAL_MIN_HEIGHT: u32 = 80;
+pub const VISUAL_MAX_HEIGHT: u32 = 2000;
+pub const VISUAL_DEFAULT_HEIGHT: u32 = 360;
+pub const VISUAL_MAX_BYTES: usize = 512 * 1024;
+pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
@@ -570,6 +577,17 @@ pub enum AgentEvent {
         path: String,
         name: String,
         mime_type: String,
+    },
+    /// An agent-authored HTML page shown inline in the reply. The engine
+    /// emits it when the agent calls Zeron's `show_visual` MCP tool; `path`
+    /// is the stored page on the host device.
+    Visual {
+        id: String,
+        path: String,
+        title: String,
+        /// The agent's frame height in CSS pixels, used until the page
+        /// reports its own.
+        height: u32,
     },
     ReasoningDelta {
         text: String,

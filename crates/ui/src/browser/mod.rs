@@ -112,6 +112,9 @@ pub struct BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     presentation: Presentation,
+    /// A page embedded in other content (an agent visual): no toolbar, no
+    /// focus grab on load, and wheel scrolling stays with the host.
+    inline: bool,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
     #[cfg(any(target_os = "macos", windows))]
@@ -195,6 +198,7 @@ impl BrowserSurface {
             #[cfg(feature = "browser-fixture")]
             fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
+            inline: false,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(any(target_os = "macos", windows))]
@@ -215,6 +219,11 @@ impl BrowserSurface {
             #[cfg(windows)]
             page_cursor: gpui::CursorStyle::Arrow,
         }
+    }
+
+    /// Embed the page in other content instead of a browser tab.
+    pub fn set_inline(&mut self) {
+        self.inline = true;
     }
 
     pub fn title(&self) -> gpui::SharedString {
@@ -390,7 +399,9 @@ impl BrowserSurface {
             if let Err(error) = result {
                 self.page.error = Some(format!("Could not open this page: {error}"));
             }
-            window.focus(&self.focus, cx);
+            if !self.inline {
+                window.focus(&self.focus, cx);
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
