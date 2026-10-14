@@ -1057,9 +1057,70 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
     out
 }
 
+/// One scene's render targets between frames (about 70 MB at a Retina
+/// size): made once, then reused while the size holds.
+pub struct SceneState {
+    size: (u32, u32),
+    shadow_map: wgpu::Texture,
+    msaa_color: wgpu::Texture,
+    msaa_depth: wgpu::Texture,
+    opaque_resolved: wgpu::Texture,
+    lit: wgpu::Texture,
+    bloom_a: wgpu::Texture,
+    bloom_b: wgpu::Texture,
+    output: wgpu::Texture,
+    dummy_depth: wgpu::Texture,
+    staging: Option<wgpu::Buffer>,
+}
+
+impl SceneState {
+    fn new(gpu: &crate::Gpu, (w, h): (u32, u32)) -> Self {
+        use wgpu::TextureUsages as U;
+        let device = &gpu.device;
+        let texture = |label: &str, size: (u32, u32), format, samples, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let sampled = U::RENDER_ATTACHMENT | U::TEXTURE_BINDING;
+        let half = ((w / 2).max(1), (h / 2).max(1));
+        Self {
+            size: (w, h),
+            shadow_map: texture(
+                "scene shadow map",
+                (SHADOW_SIZE, SHADOW_SIZE),
+                DEPTH,
+                1,
+                sampled,
+            ),
+            msaa_color: texture("scene color", (w, h), HDR, SAMPLES, U::RENDER_ATTACHMENT),
+            msaa_depth: texture("scene depth", (w, h), DEPTH, SAMPLES, sampled),
+            opaque_resolved: texture("scene behind glass", (w, h), HDR, 1, sampled),
+            lit: texture("scene lit", (w, h), HDR, 1, sampled),
+            bloom_a: texture("scene bloom", half, HDR, 1, sampled),
+            bloom_b: texture("scene bloom", half, HDR, 1, sampled),
+            output: gpu.target(w, h, "scene output"),
+            dummy_depth: lit_dummy_depth(device),
+            staging: None,
+        }
+    }
+}
+
 /// Render `scene` on the GPU for a canvas `width` by `height` logical pixels
-/// at `pixel_scale`. `None` without a GPU (or geometry), so the caller can
-/// fall back to the software renderer.
+/// at `pixel_scale`, reusing `state`'s targets (made or remade as needed).
+/// `None` without a GPU (or geometry), so the caller can fall back to the
+/// software renderer.
 pub fn render_scene(
     scene: &Scene,
     camera: Camera,
@@ -1067,6 +1128,7 @@ pub fn render_scene(
     height: f32,
     pixel_scale: f32,
     rgba: &dyn Fn(Color) -> [f32; 4],
+    state: &mut Option<SceneState>,
 ) -> Option<Frame> {
     let gpu = gpu()?;
     let frame = scene.camera_frame(camera, width, height)?;
@@ -1171,40 +1233,25 @@ pub fn render_scene(
         usage: wgpu::BufferUsages::UNIFORM,
     });
 
-    // Targets.
-    use wgpu::TextureUsages as U;
-    let texture = |label: &str, size: (u32, u32), format, samples, usage| {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: samples,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        })
-    };
-    let sampled = U::RENDER_ATTACHMENT | U::TEXTURE_BINDING;
-    let shadow_map = texture(
-        "scene shadow map",
-        (SHADOW_SIZE, SHADOW_SIZE),
-        DEPTH,
-        1,
-        sampled,
-    );
-    let msaa_color = texture("scene color", (w, h), HDR, SAMPLES, U::RENDER_ATTACHMENT);
-    let msaa_depth = texture("scene depth", (w, h), DEPTH, SAMPLES, sampled);
-    let opaque_resolved = texture("scene behind glass", (w, h), HDR, 1, sampled);
-    let lit = texture("scene lit", (w, h), HDR, 1, sampled);
+    // Targets, kept between frames.
+    if state.as_ref().is_none_or(|t| t.size != (w, h)) {
+        *state = Some(SceneState::new(gpu, (w, h)));
+    }
+    let targets = state.as_mut().expect("made above");
+    let SceneState {
+        shadow_map,
+        msaa_color,
+        msaa_depth,
+        opaque_resolved,
+        lit,
+        bloom_a,
+        bloom_b,
+        output,
+        dummy_depth,
+        staging,
+        ..
+    } = targets;
     let half = ((w / 2).max(1), (h / 2).max(1));
-    let bloom_a = texture("scene bloom", half, HDR, 1, sampled);
-    let bloom_b = texture("scene bloom", half, HDR, 1, sampled);
-    let output = gpu.target(w, h, "scene output");
     let view = |t: &wgpu::Texture| t.create_view(&Default::default());
 
     let env_view = environment
@@ -1247,7 +1294,7 @@ pub fn render_scene(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&view(&shadow_map)),
+                resource: wgpu::BindingResource::TextureView(&view(shadow_map)),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -1307,7 +1354,7 @@ pub fn render_scene(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&view(&lit_dummy_depth(device))),
+                resource: wgpu::BindingResource::TextureView(&view(dummy_depth)),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -1324,7 +1371,7 @@ pub fn render_scene(
         ],
     });
     {
-        let shadow_view = view(&shadow_map);
+        let shadow_view = view(shadow_map);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene shadow"),
             color_attachments: &[],
@@ -1344,12 +1391,12 @@ pub fn render_scene(
         pass.set_bind_group(0, &shadow_globals, &[]);
         draw(&mut pass, &opaque, geometry.shadowed);
     }
-    let color_view = view(&msaa_color);
-    let depth_view = view(&msaa_depth);
+    let color_view = view(msaa_color);
+    let depth_view = view(msaa_depth);
     // 2. Opaque surfaces; see-through ones and sprites over them (so glass
     // refracts them too); then lines and points.
     {
-        let resolve = view(&opaque_resolved);
+        let resolve = view(opaque_resolved);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene main"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1397,7 +1444,7 @@ pub fn render_scene(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view(&opaque_resolved)),
+                    resource: wgpu::BindingResource::TextureView(&view(opaque_resolved)),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -1405,7 +1452,7 @@ pub fn render_scene(
                 },
             ],
         });
-        let resolve = view(&lit);
+        let resolve = view(lit);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene glass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1508,32 +1555,32 @@ pub fn render_scene(
     let step_y = post_uniform([0.0, 1.0 / half.1 as f32, 0.0, 0.0]);
     fullscreen(
         &mut encoder,
-        &bloom_a,
+        bloom_a,
         &pipelines.bright,
-        &post_bind(shaded, &zero, &bloom_b),
+        &post_bind(shaded, &zero, bloom_b),
     );
     for _ in 0..2 {
         fullscreen(
             &mut encoder,
-            &bloom_b,
+            bloom_b,
             &pipelines.blur,
-            &post_bind(&bloom_a, &step_x, &lit_dummy(device)),
+            &post_bind(bloom_a, &step_x, &lit_dummy(device)),
         );
         fullscreen(
             &mut encoder,
-            &bloom_a,
+            bloom_a,
             &pipelines.blur,
-            &post_bind(&bloom_b, &step_y, &lit_dummy(device)),
+            &post_bind(bloom_b, &step_y, &lit_dummy(device)),
         );
     }
     let strength = post_uniform([0.9, 0.0, 0.0, 0.0]);
     fullscreen(
         &mut encoder,
-        &output,
+        output,
         &pipelines.composite,
-        &post_bind(shaded, &strength, &bloom_a),
+        &post_bind(shaded, &strength, bloom_a),
     );
-    Some(gpu.read_back(encoder, &output, false))
+    Some(gpu.read_back(encoder, output, staging))
 }
 
 /// A 1×1 texture for bind slots a pass doesn't read (a texture can't be both
@@ -1689,12 +1736,13 @@ mod tests {
             return;
         }
         let scene = gallery();
+        let mut state = None;
         let camera = Camera {
             yaw: 0.5,
             pitch: 0.35,
             zoom: 1.0,
         };
-        let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette).unwrap();
+        let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         if let Ok(path) = std::env::var("ZERON_VISUAL_DUMP_ASSETS") {
             crate::dump_ppm(&frame, &path);
         }
@@ -1716,7 +1764,7 @@ mod tests {
             .count();
         assert!(blueish > 500, "{blueish}");
         // A texture uploads once, however many frames draw it.
-        render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette).unwrap();
+        render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
     }
 
     #[test]
@@ -1725,15 +1773,16 @@ mod tests {
             return;
         }
         let scene = room();
+        let mut state = None;
         let camera = Camera {
             yaw: 0.6,
             pitch: 0.45,
             zoom: 1.0,
         };
         // The first frame also makes the device and compiles pipelines.
-        render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette).unwrap();
+        render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         let start = std::time::Instant::now();
-        let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette).unwrap();
+        let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         eprintln!(
             "gpu scene {}x{} in {:?}",
             frame.width,
@@ -1780,7 +1829,16 @@ mod tests {
                   {shell}
                 end }}"#
             );
-            render_scene(&scene(&script), camera, 720.0, 360.0, 1.0, &palette).unwrap()
+            render_scene(
+                &scene(&script),
+                camera,
+                720.0,
+                360.0,
+                1.0,
+                &palette,
+                &mut None,
+            )
+            .unwrap()
         };
         let bare = red_center(&render(""));
         // A faded shell around the box (like a cutaway wall) must not shift

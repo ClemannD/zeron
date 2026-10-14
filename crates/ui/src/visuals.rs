@@ -78,15 +78,19 @@ struct Local {
     draw_error: Option<String>,
 }
 
-/// A shader's last frame and what it was drawn with.
+/// A shader's newest finished frame, and the next one in the works. Frames
+/// render on a background thread; the view shows the newest one meanwhile.
+#[derive(Default)]
 struct ShaderCache {
-    uniforms: zeron_visual::shader::ShaderUniforms,
-    size: (u32, u32),
-    image: Arc<gpui::RenderImage>,
+    /// The newest frame and the uniforms it was drawn with.
+    shown: Option<(zeron_visual::shader::ShaderUniforms, Arc<gpui::RenderImage>)>,
+    /// Frames started, and the wall time the last one was started at.
     frame: u32,
     last_time: f64,
-    /// Buffers carried between frames (feedback, simulations).
+    /// Buffers carried between frames (feedback, simulations); away on the
+    /// render thread while a frame renders.
     gpu: Option<zeron_visual_gpu::ShaderState>,
+    rendering: bool,
 }
 
 struct CanvasCache {
@@ -96,14 +100,21 @@ struct CanvasCache {
     commands: Rc<Vec<DrawCmd>>,
 }
 
+/// A scene's drawing, its newest finished image, and the next one in the
+/// works (rendered on a background thread, like shaders).
 struct SceneCache {
     generation: u64,
-    scene: Rc<zeron_visual::Scene>,
-    /// The last image rendered from `scene`, and what it was rendered for.
+    /// Bumped with every new drawing, so an image of an older one is stale.
+    drawing: u64,
+    scene: Arc<zeron_visual::Scene>,
+    /// The newest image, and what it was rendered for.
     image: Option<(RasterKey, SceneImage)>,
-    /// How long the last supersampled render took: cheap scenes stay
-    /// supersampled while the camera moves.
+    /// How long the last supersampled software render took: cheap scenes
+    /// stay supersampled while the camera moves.
     final_cost: Option<std::time::Duration>,
+    /// GPU targets kept between frames; away while a frame renders.
+    gpu: Option<zeron_visual_gpu::SceneState>,
+    rendering: bool,
 }
 
 /// What a scene image depends on besides the geometry.
@@ -116,13 +127,22 @@ struct RasterKey {
     pixel_scale: f32,
     quality: zeron_visual::Quality,
     palette: u64,
+    drawing: u64,
 }
 
 #[derive(Clone)]
 struct SceneImage {
     image: Arc<gpui::RenderImage>,
-    hints: Rc<Vec<([f32; 2], f32, String)>>,
-    labels: Rc<Vec<zeron_visual::RasterLabel>>,
+    hints: Arc<Vec<([f32; 2], f32, String)>>,
+    labels: Arc<Vec<zeron_visual::RasterLabel>>,
+}
+
+/// A rendered frame as an image GPUI can paint (off the main thread).
+fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<gpui::RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(Arc::new(gpui::RenderImage::new([image::Frame::new(
+        buffer,
+    )])))
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +388,7 @@ fn chart_series(theme: &Theme) -> [Hsla; 6] {
 }
 
 /// Theme colors for one paint, resolved once.
+#[derive(Clone)]
 struct Palette {
     text: Hsla,
     muted: Hsla,
@@ -533,7 +554,7 @@ impl Local {
         let mut images = Vec::new();
         self.shaders.retain(|key, cache| {
             kept(key) || {
-                images.push(cache.image.clone());
+                images.extend(cache.shown.as_ref().map(|(_, image)| image.clone()));
                 false
             }
         });
@@ -1626,7 +1647,11 @@ impl VisualFrame {
             .textures
             .iter()
             // A missing one keeps its slot (and samples as clear).
-            .map(|name| zeron_visual::TextureData::Encoded(assets.get(name).unwrap_or_else(|| Arc::from([]))))
+            .map(|name| {
+                zeron_visual::TextureData::Encoded(
+                    assets.get(name).unwrap_or_else(|| Arc::from([])),
+                )
+            })
             .collect();
         let (code, buffers, blend, bloom, zoom) = (
             node.code.clone(),
@@ -1637,10 +1662,10 @@ impl VisualFrame {
         );
         // Buffers evolve every frame, so a shader with any keeps running.
         let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
-        let (local, time) = (self.local.clone(), self.time());
+        let (local, time, entity) = (self.local.clone(), self.time(), cx.entity().downgrade());
         el.child(
             canvas(
-                move |bounds, window, _| {
+                move |bounds, window, cx| {
                     if moving {
                         window.request_animation_frame();
                     }
@@ -1655,7 +1680,10 @@ impl VisualFrame {
                     // (negative otherwise).
                     let device = |p: Point<Pixels>| {
                         let at = p - bounds.origin;
-                        [f32::from(at.x) * scale, size.1 as f32 - f32::from(at.y) * scale]
+                        [
+                            f32::from(at.x) * scale,
+                            size.1 as f32 - f32::from(at.y) * scale,
+                        ]
                     };
                     let mouse = match (state.presses.get(&key), state.pointers.get(&key)) {
                         (Some(start), Some(now)) => {
@@ -1668,88 +1696,112 @@ impl VisualFrame {
                         }
                         _ => [0.0, 0.0, -1.0, -1.0],
                     };
-                    let buffers_run = !buffers.is_empty();
-                    let previous = state.shaders.get(&key);
+                    let entry = state.shaders.entry(key.clone()).or_default();
                     // A still shader keeps the time it first showed.
                     let shown_time = if animate {
                         time
                     } else {
-                        previous.map_or(0.0, |p| f64::from(p.uniforms.time[0]))
+                        entry
+                            .shown
+                            .as_ref()
+                            .map_or(0.0, |(u, _)| f64::from(u.time[0]))
                     };
-                    let frame = previous.map_or(0, |p| p.frame + 1);
-                    let delta = previous.map_or(0.0, |p| (time - p.last_time).max(0.0));
+                    let delta = if entry.frame == 0 {
+                        0.0
+                    } else {
+                        (time - entry.last_time).max(0.0)
+                    };
                     let uniforms = zeron_visual::shader::ShaderUniforms {
                         resolution: [size.0 as f32, size.1 as f32, scale, 0.0],
                         mouse,
                         camera: [yaw, orbit.pitch, zoom, 0.0],
-                        time: [shown_time as f32, delta as f32, frame as f32, 0.0],
+                        time: [shown_time as f32, delta as f32, entry.frame as f32, 0.0],
                         inputs,
                         channels: Default::default(),
                     };
-                    let unchanged = !buffers_run && previous.is_some_and(|p| {
-                        p.size == size
-                            && p.uniforms.resolution == uniforms.resolution
-                            && p.uniforms.mouse == uniforms.mouse
-                            && p.uniforms.camera == uniforms.camera
-                            && p.uniforms.inputs == uniforms.inputs
-                            && (!animate || p.uniforms.time[0] == uniforms.time[0])
-                    });
-                    if unchanged {
-                        return previous.map(|p| p.image.clone());
-                    }
-                    let mut gpu_state = state.shaders.get_mut(&key).and_then(|p| p.gpu.take());
-                    let rendered = zeron_visual_gpu::render_shader(
-                        &zeron_visual_gpu::ShaderSpec {
-                            image: &code,
-                            buffers: &buffers,
-                            inputs: &names,
-                            blend,
-                            bloom,
-                            textures: &textures,
-                        },
-                        &uniforms,
-                        size.0,
-                        size.1,
-                        &mut gpu_state,
-                    );
-                    match rendered {
-                        Ok(rendered) => {
-                            let buffer =
-                                image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.bgra)?;
-                            let image =
-                                Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)]));
-                            let replaced = state.shaders.insert(
-                                key.clone(),
-                                ShaderCache {
-                                    uniforms,
-                                    size,
-                                    image: image.clone(),
-                                    frame,
-                                    last_time: time,
-                                    gpu: gpu_state,
+                    let unchanged = buffers.is_empty()
+                        && entry.shown.as_ref().is_some_and(|(p, _)| {
+                            p.resolution == uniforms.resolution
+                                && p.mouse == uniforms.mouse
+                                && p.camera == uniforms.camera
+                                && p.inputs == uniforms.inputs
+                                && (!animate || p.time[0] == uniforms.time[0])
+                        });
+                    let shown = entry.shown.as_ref().map(|(_, image)| image.clone());
+                    // One frame in flight at a time; when it lands the view
+                    // paints again and starts the next if anything moved.
+                    if !unchanged && !entry.rendering {
+                        entry.rendering = true;
+                        entry.frame += 1;
+                        entry.last_time = time;
+                        let mut gpu_state = entry.gpu.take();
+                        let (code, buffers, names, textures) = (
+                            code.clone(),
+                            buffers.clone(),
+                            names.clone(),
+                            textures.clone(),
+                        );
+                        let render = cx.background_executor().spawn(async move {
+                            let rendered = zeron_visual_gpu::render_shader(
+                                &zeron_visual_gpu::ShaderSpec {
+                                    image: &code,
+                                    buffers: &buffers,
+                                    inputs: &names,
+                                    blend,
+                                    bloom,
+                                    textures: &textures,
                                 },
-                            );
-                            if let Some(old) = replaced {
-                                let _ = window.drop_image(old.image);
-                            }
-                            state.draw_error = None;
-                            Some(image)
-                        }
-                        Err(error) => {
-                            state.draw_error = Some(error);
-                            None
-                        }
+                                &uniforms,
+                                size.0,
+                                size.1,
+                                &mut gpu_state,
+                            )
+                            .and_then(|frame| {
+                                render_image(frame.width, frame.height, frame.bgra)
+                                    .ok_or_else(|| "the shader's frame was malformed".to_owned())
+                            });
+                            (rendered, gpu_state)
+                        });
+                        let (local, key, entity) = (local.clone(), key.clone(), entity.clone());
+                        cx.spawn(async move |cx| {
+                            let (rendered, gpu_state) = render.await;
+                            cx.update(|cx| {
+                                let mut freed = Vec::new();
+                                let mut state = local.borrow_mut();
+                                match (state.shaders.get_mut(&key), rendered) {
+                                    (Some(entry), Ok(image)) => {
+                                        entry.rendering = false;
+                                        entry.gpu = gpu_state;
+                                        freed.extend(
+                                            entry
+                                                .shown
+                                                .replace((uniforms, image))
+                                                .map(|(_, old)| old),
+                                        );
+                                        state.draw_error = None;
+                                    }
+                                    (Some(entry), Err(error)) => {
+                                        entry.rendering = false;
+                                        entry.gpu = gpu_state;
+                                        state.draw_error = Some(error);
+                                    }
+                                    // The node left the tree meanwhile.
+                                    (None, Ok(image)) => freed.push(image),
+                                    (None, Err(_)) => {}
+                                }
+                                drop(state);
+                                free_images(freed, cx);
+                                let _ = entity.update(cx, |_, cx| cx.notify());
+                            })
+                        })
+                        .detach();
                     }
+                    shown
                 },
                 move |bounds, image, window, _| {
                     if let Some(image) = image {
-                        let _ = window.paint_image(
-                            bounds,
-                            gpui::Corners::default(),
-                            image,
-                            0,
-                            false,
-                        );
+                        let _ =
+                            window.paint_image(bounds, gpui::Corners::default(), image, 0, false);
                     }
                 },
             )
@@ -1791,6 +1843,7 @@ impl VisualFrame {
         let moving = (spin != 0.0 && orbit.drag.is_none()) || node.animate;
         let dragging = orbit.drag.is_some();
         let (local, generation, time) = (self.local.clone(), self.generation, self.time());
+        let entity = cx.entity().downgrade();
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let mut el = div()
@@ -1805,56 +1858,54 @@ impl VisualFrame {
         let render_palette = paint_palette.clone();
         el.child(
             canvas(
-                move |bounds, window, _| {
+                move |bounds, window, cx| {
                     let paint_palette = &render_palette;
                     if moving {
                         window.request_animation_frame();
                     }
                     let mut state = local.borrow_mut();
-                    let cached = state
+                    let fresh = state
                         .scenes
                         .get(&key)
-                        .filter(|c| !animate && c.generation == generation)
-                        .map(|c| c.scene.clone());
-                    let scene = match cached {
-                        Some(scene) => scene,
-                        None => {
-                            drop(state);
-                            let drawn = runtime.borrow_mut().draw_scene(draw, time);
-                            state = local.borrow_mut();
-                            match drawn {
-                                Ok(scene) => {
-                                    let scene = Rc::new(scene);
-                                    // A new drawing replaces the old one's image.
-                                    let previous = state.scenes.insert(
-                                        key.clone(),
-                                        SceneCache {
-                                            generation,
-                                            scene: scene.clone(),
-                                            image: None,
-                                            final_cost: None,
-                                        },
-                                    );
-                                    if let Some(previous) = previous {
-                                        // An animated scene redraws every
-                                        // frame; its render cost carries over.
-                                        if let Some(entry) = state.scenes.get_mut(&key) {
-                                            entry.final_cost = previous.final_cost;
-                                        }
-                                        if let Some((_, old)) = previous.image {
-                                            let _ = window.drop_image(old.image);
-                                        }
+                        .is_some_and(|c| !animate && c.generation == generation);
+                    if !fresh {
+                        drop(state);
+                        let drawn = runtime.borrow_mut().draw_scene(draw, time);
+                        state = local.borrow_mut();
+                        match drawn {
+                            Ok(scene) => {
+                                let scene = Arc::new(scene);
+                                // A new drawing keeps the old image up (and the
+                                // GPU targets) until its own frame lands.
+                                match state.scenes.get_mut(&key) {
+                                    Some(entry) => {
+                                        entry.generation = generation;
+                                        entry.drawing += 1;
+                                        entry.scene = scene;
                                     }
-                                    state.draw_error = None;
-                                    scene
+                                    None => {
+                                        state.scenes.insert(
+                                            key.clone(),
+                                            SceneCache {
+                                                generation,
+                                                drawing: 0,
+                                                scene,
+                                                image: None,
+                                                final_cost: None,
+                                                gpu: None,
+                                                rendering: false,
+                                            },
+                                        );
+                                    }
                                 }
-                                Err(error) => {
-                                    state.draw_error = Some(error.message);
-                                    return None;
-                                }
+                                state.draw_error = None;
+                            }
+                            Err(error) => {
+                                state.draw_error = Some(error.message);
+                                return None;
                             }
                         }
-                    };
+                    }
                     // Always at full density. While the camera moves, a scene
                     // too heavy to supersample within a frame drops to one
                     // sample per pixel; at rest it is always supersampled.
@@ -1866,12 +1917,14 @@ impl VisualFrame {
                         .is_some_and(|cost| cost < std::time::Duration::from_millis(8));
                     // Quality only steers the software renderer; on the GPU
                     // a finished drag mustn't render the same frame again.
-                    let quality = if (moving || dragging) && !cheap && !zeron_visual_gpu::available() {
-                        zeron_visual::Quality::Draft
-                    } else {
-                        zeron_visual::Quality::Final
-                    };
+                    let quality =
+                        if (moving || dragging) && !cheap && !zeron_visual_gpu::available() {
+                            zeron_visual::Quality::Draft
+                        } else {
+                            zeron_visual::Quality::Final
+                        };
                     let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                    let entry = state.scenes.get_mut(&key)?;
                     let raster_key = RasterKey {
                         yaw: camera.yaw,
                         pitch: camera.pitch,
@@ -1880,58 +1933,101 @@ impl VisualFrame {
                         pixel_scale,
                         quality,
                         palette: palette_key(paint_palette),
+                        drawing: entry.drawing,
                     };
-                    let entry = state.scenes.get_mut(&key)?;
-                    let image = match &entry.image {
-                        Some((cached_key, image)) if *cached_key == raster_key => image.clone(),
-                        _ => {
-                            let palette = paint_palette.clone();
+                    let shown = entry.image.as_ref().map(|(_, image)| image.clone());
+                    // One frame in flight at a time, on a background thread;
+                    // when it lands the view paints again.
+                    if entry.image.as_ref().map(|(k, _)| *k) != Some(raster_key) && !entry.rendering
+                    {
+                        entry.rendering = true;
+                        let (scene, mut gpu_state) = (entry.scene.clone(), entry.gpu.take());
+                        let palette = (**paint_palette).clone();
+                        let render = cx.background_executor().spawn(async move {
                             let rgba = move |color| {
                                 let rgba = palette.color(color).to_rgb();
                                 [rgba.r, rgba.g, rgba.b, rgba.a]
                             };
                             // On the GPU when there is one (materials, shadows,
                             // glass, bloom); the software renderer otherwise.
-                            let (width, height, bgra, hints, labels) = match zeron_visual_gpu::render_scene(
-                                &scene,
-                                camera,
-                                size.0,
-                                size.1,
-                                pixel_scale,
-                                &rgba,
-                            ) {
-                                Some(frame) => {
-                                    let (hints, labels) = scene.annotations(camera, size.0, size.1);
-                                    (frame.width, frame.height, frame.bgra, hints, labels)
-                                }
-                                None => {
-                                    let started = Instant::now();
-                                    let raster = scene.render(
-                                        camera,
-                                        size.0,
-                                        size.1,
-                                        pixel_scale,
-                                        quality,
-                                        &rgba,
-                                    );
-                                    if quality == zeron_visual::Quality::Final {
-                                        entry.final_cost = Some(started.elapsed());
+                            let started = Instant::now();
+                            let mut cost = None;
+                            let (width, height, bgra, hints, labels) =
+                                match zeron_visual_gpu::render_scene(
+                                    &scene,
+                                    camera,
+                                    size.0,
+                                    size.1,
+                                    pixel_scale,
+                                    &rgba,
+                                    &mut gpu_state,
+                                ) {
+                                    Some(frame) => {
+                                        let (hints, labels) =
+                                            scene.annotations(camera, size.0, size.1);
+                                        (frame.width, frame.height, frame.bgra, hints, labels)
                                     }
-                                    (raster.width, raster.height, raster.bgra, raster.hints, raster.labels)
+                                    None => {
+                                        let raster = scene.render(
+                                            camera,
+                                            size.0,
+                                            size.1,
+                                            pixel_scale,
+                                            quality,
+                                            &rgba,
+                                        );
+                                        if quality == zeron_visual::Quality::Final {
+                                            cost = Some(started.elapsed());
+                                        }
+                                        (
+                                            raster.width,
+                                            raster.height,
+                                            raster.bgra,
+                                            raster.hints,
+                                            raster.labels,
+                                        )
+                                    }
+                                };
+                            let image = render_image(width, height, bgra).map(|image| SceneImage {
+                                image,
+                                hints: Arc::new(hints),
+                                labels: Arc::new(labels),
+                            });
+                            (image, gpu_state, cost)
+                        });
+                        let (local, key, entity) = (local.clone(), key.clone(), entity.clone());
+                        cx.spawn(async move |cx| {
+                            let (image, gpu_state, cost) = render.await;
+                            cx.update(|cx| {
+                                let mut freed = Vec::new();
+                                let mut state = local.borrow_mut();
+                                match state.scenes.get_mut(&key) {
+                                    Some(entry) => {
+                                        entry.rendering = false;
+                                        entry.gpu = gpu_state;
+                                        if cost.is_some() {
+                                            entry.final_cost = cost;
+                                        }
+                                        if let Some(image) = image {
+                                            freed.extend(
+                                                entry
+                                                    .image
+                                                    .replace((raster_key, image))
+                                                    .map(|(_, old)| old.image),
+                                            );
+                                        }
+                                    }
+                                    // The node left the tree meanwhile.
+                                    None => freed.extend(image.map(|image| image.image)),
                                 }
-                            };
-                            let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
-                            let image = SceneImage {
-                                image: Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])),
-                                hints: Rc::new(hints),
-                                labels: Rc::new(labels),
-                            };
-                            if let Some((_, old)) = entry.image.replace((raster_key, image.clone())) {
-                                let _ = window.drop_image(old.image);
-                            }
-                            image
-                        }
-                    };
+                                drop(state);
+                                free_images(freed, cx);
+                                let _ = entity.update(cx, |_, cx| cx.notify());
+                            })
+                        })
+                        .detach();
+                    }
+                    let image = shown?;
                     let hovered = state.pointers.get(&pointer_key).and_then(|p| {
                         let at = *p - bounds.origin;
                         let (x, y) = (f32::from(at.x), f32::from(at.y));

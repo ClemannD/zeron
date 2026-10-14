@@ -13,7 +13,7 @@ mod scene;
 mod shader;
 mod textures;
 
-pub use scene::render_scene;
+pub use scene::{SceneState, render_scene};
 pub use shader::{ShaderSpec, ShaderState, render_shader};
 
 /// One rendered frame: straight-alpha BGRA, top row first.
@@ -139,26 +139,31 @@ impl Gpu {
         })
     }
 
-    /// Read a rendered texture back as straight-alpha BGRA.
+    /// Read a rendered texture back as straight-alpha BGRA, through a
+    /// staging buffer kept in `staging` between frames.
     pub(crate) fn read_back(
         &self,
         mut encoder: wgpu::CommandEncoder,
         texture: &wgpu::Texture,
-        opaque: bool,
+        staging: &mut Option<wgpu::Buffer>,
     ) -> Frame {
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("visual readback"),
-            size: u64::from(row * height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let size = u64::from(row * height);
+        if staging.as_ref().is_none_or(|b| b.size() != size) {
+            *staging = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("visual readback"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+        }
+        let buffer = staging.as_ref().expect("made above");
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(row),
@@ -185,7 +190,7 @@ impl Gpu {
                     d[0] = s[2];
                     d[1] = s[1];
                     d[2] = s[0];
-                    d[3] = if opaque { 255 } else { s[3] };
+                    d[3] = s[3];
                 }
             }
             drop(mapped);

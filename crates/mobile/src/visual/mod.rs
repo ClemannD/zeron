@@ -498,6 +498,8 @@ struct SurfaceState {
     reads_pointer: bool,
     orbit: Option<Orbit>,
     shader: Option<zeron_visual_gpu::ShaderState>,
+    /// A scene's GPU targets, kept while its size holds.
+    scene_gpu: Option<zeron_visual_gpu::SceneState>,
     shader_frame: u32,
     shader_time: f64,
     scene: Option<(u64, zeron_visual::Scene)>,
@@ -529,6 +531,7 @@ impl SurfaceState {
             reads_pointer: false,
             orbit,
             shader: None,
+            scene_gpu: None,
             shader_frame: 0,
             shader_time: 0.0,
             scene: None,
@@ -1136,7 +1139,15 @@ impl Worker {
         };
         let pixel_scale = self.source.pixel_scale.min(MAX_GPU_SCALE);
         let (image, hints, labels) =
-            match zeron_visual_gpu::render_scene(scene, camera, w, h, pixel_scale, &rgba) {
+            match zeron_visual_gpu::render_scene(
+                scene,
+                camera,
+                w,
+                h,
+                pixel_scale,
+                &rgba,
+                &mut state.scene_gpu,
+            ) {
                 Some(frame) => {
                     let (hints, labels) = scene.annotations(camera, w, h);
                     (

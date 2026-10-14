@@ -37,6 +37,7 @@ pub struct ShaderState {
     image: wgpu::Texture,
     bloom: [wgpu::Texture; 2],
     output: wgpu::Texture,
+    staging: Option<wgpu::Buffer>,
 }
 
 pub(crate) struct Pipelines {
@@ -401,6 +402,7 @@ impl ShaderState {
                 texture(device, "shader bloom", half, HDR),
             ],
             output: texture(device, "shader output", size, FORMAT),
+            staging: None,
         }
     }
 }
@@ -662,7 +664,7 @@ pub fn render_shader(
         &pipelines.composite,
         &post_bind(&state.image, &composite, &glow),
     );
-    let frame = gpu.read_back(encoder, &state.output, false);
+    let frame = gpu.read_back(encoder, &state.output, &mut state.staging);
     state.latest = write;
     Ok(frame)
 }
