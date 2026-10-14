@@ -1,0 +1,278 @@
+use super::*;
+
+fn text_of(node: &Node) -> String {
+    match &node.kind {
+        NodeKind::Text(text) => text.spans.iter().map(|s| s.text.as_str()).collect(),
+        _ => children(node).map(text_of).collect::<Vec<_>>().join("|"),
+    }
+}
+
+fn find<'a>(node: &'a Node, pred: &dyn Fn(&Node) -> bool) -> Option<&'a Node> {
+    if pred(node) {
+        return Some(node);
+    }
+    children(node).find_map(|child| find(child, pred))
+}
+
+#[test]
+fn a_view_renders_and_handlers_change_state() {
+    let mut visual = Visual::load(
+        r#"
+        local s = ui.state { tab = "p95" }
+        return function()
+          return ui.column { gap = 12,
+            ui.text { "Latency ", ui.span { s.tab, weight = 600, color = "accent" }, size = "lg" },
+            ui.tabs { options = { "p95", "p99" }, value = s.tab, on_change = function(v) s.tab = v end },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    assert_eq!(text_of(&tree), "Latency p95|");
+    let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
+    let NodeKind::Tabs { on_change, .. } = tabs.kind else {
+        unreachable!()
+    };
+    visual
+        .call(on_change, HandlerArg::Text("p99".into()))
+        .unwrap();
+    assert_eq!(text_of(&visual.render().unwrap()), "Latency p99|");
+}
+
+#[test]
+fn a_script_may_return_a_static_node() {
+    let mut visual = Visual::load(r#"return ui.text "hello""#, 1).unwrap();
+    assert_eq!(text_of(&visual.render().unwrap()), "hello");
+}
+
+#[test]
+fn style_rules_are_enforced_with_reasons() {
+    for (script, needle) in [
+        (
+            r##"return ui.text { "x", color = "#ff0000" }"##,
+            "theme tokens",
+        ),
+        (
+            r#"return ui.column { background = "accent" }"#,
+            "no containers",
+        ),
+        (
+            r#"return ui.text { "x", font = "Comic Sans" }"#,
+            "interface font",
+        ),
+        (r#"return ui.text { "x", size = "40px" }"#, "type scale"),
+        (r#"return ui.row { colour = "x" }"#, "has no 'colour'"),
+        (
+            r#"return ui.chart { type = "pie", series = {} }"#,
+            "ui.canvas",
+        ),
+        (
+            r#"return ui.canvas { draw = function() end }"#,
+            "needs height",
+        ),
+    ] {
+        let err = Visual::load(script, 1)
+            .and_then(|mut v| v.render())
+            .unwrap_err();
+        assert!(err.message.contains(needle), "{script}: {}", err.message);
+    }
+}
+
+#[test]
+fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
+    for script in [
+        "return os.execute('true')",
+        "return io.open('/etc/passwd')",
+        "return require('x')",
+    ] {
+        assert!(Visual::load(script, 1).is_err(), "{script}");
+    }
+    let started = Instant::now();
+    let err = Visual::load("while true do end", 1).err().unwrap();
+    assert!(err.message.contains("time budget"), "{}", err.message);
+    assert!(started.elapsed() < Duration::from_secs(2));
+
+    let err = Visual::load(
+        "local t = {} for i = 1, 1e9 do t[i] = string.rep('x', 1024) .. i end",
+        1,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        err.message.contains("MB") || err.message.contains("time budget"),
+        "{}",
+        err.message
+    );
+    // The ui library can't be replaced by a script.
+    assert!(Visual::load("ui.text = nil return ui.text 'x'", 1).is_err());
+}
+
+#[test]
+fn random_data_is_stable_across_renders() {
+    let script = r#"
+        return function() return ui.text { tostring(math.random(1, 1000000)) } end
+    "#;
+    let mut a = Visual::load(script, 7).unwrap();
+    let first = text_of(&a.render().unwrap());
+    assert_eq!(first, text_of(&a.render().unwrap()));
+    let mut b = Visual::load(script, 7).unwrap();
+    assert_eq!(first, text_of(&b.render().unwrap()));
+}
+
+#[test]
+fn canvases_record_theme_colored_commands() {
+    let mut visual = Visual::load(
+        r#"
+        return ui.canvas { height = 120, draw = function(g, w, h)
+          g:line(0, h, w, 0, { color = "border" })
+          g:rect(10, 10, 40, 20, { fill = "chart2", radius = 4 })
+          g:circle(w / 2, h / 2, 8, { color = ui.color("accent", 0.5) })
+          g:arc(60, 60, 30, 0, math.pi, { fill = "chart3", inner = 20 })
+          g:text(w, 0, "label", { align = "end", color = "muted", size = "xs" })
+        end }
+        "#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    let NodeKind::Canvas(canvas) = &tree.kind else {
+        panic!()
+    };
+    assert_eq!(canvas.height, 120.0);
+    let commands = visual
+        .draw_canvas(canvas.draw, 300.0, 120.0, 0.0, None)
+        .unwrap();
+    assert_eq!(commands.len(), 5);
+    assert!(matches!(&commands[0], DrawCmd::Stroke { color, .. } if color.token == Token::Border));
+    assert!(matches!(&commands[2], DrawCmd::Fill { color, .. } if color.alpha == 0.5));
+    let DrawCmd::Text(text) = &commands[4] else {
+        panic!()
+    };
+    assert_eq!((text.x, text.align), (300.0, Align::End));
+}
+
+#[test]
+fn scenes_project_lit_depth_sorted_geometry() {
+    let mut visual = Visual::load(
+        r#"
+        return ui.scene { height = 300, spin = 0.3, draw = function(s)
+          s:grid { size = 4, step = 1 }
+          s:surface { x = { -2, 2 }, z = { -2, 2 }, detail = 12,
+            colors = { "chart1", "chart3" },
+            f = function(x, z) return math.sin(x) * math.cos(z) end }
+          s:box { at = { 0, 1.5, 0 }, size = 0.5, color = "chart2" }
+          s:point({ 1, 1, 1 }, { hint = "peak" })
+          s:point { at = { -1, 1, -1 }, color = "chart4" }
+          s:label { at = { 0, 2, 0 }, text = "top" }
+        end }
+        "#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    let NodeKind::Scene(node) = &tree.kind else {
+        panic!()
+    };
+    let scene = visual.draw_scene(node.draw, 0.0).unwrap();
+    assert_eq!(scene.face_count(), 12 * 12 + 6);
+    let projection = scene.project(
+        Camera {
+            yaw: node.yaw,
+            pitch: node.pitch,
+            zoom: node.zoom,
+        },
+        640.0,
+        300.0,
+    );
+    assert!(matches!(projection.prims.last(), Some(Prim::Label { .. })));
+    assert_eq!(projection.hints.len(), 1);
+    // A closed box shows at most three faces.
+    let box_faces = projection
+        .prims
+        .iter()
+        .filter(|p| matches!(p, Prim::Face { color, .. } if color.token == Token::Chart(1)))
+        .count();
+    assert!((1..=3).contains(&box_faces), "{box_faces}");
+}
+
+#[test]
+fn charts_and_tables_parse() {
+    let mut visual = Visual::load(
+        r#"
+        return ui.column {
+          ui.chart { type = "line", height = 200, x = { "Mon", "Tue", "Wed" }, unit = "ms",
+            series = { { name = "p95", values = { 120, 180, 140 } }, { name = "p99", values = { 200, nil, 260 } } } },
+          ui.table { columns = { "Region", "p95" }, rows = { { "us-east", 182 }, { "eu-west", 140 } } },
+          ui.row { ui.stat { value = "182 ms", label = "p95" }, ui.stat { value = 99.2, label = "uptime", tone = "success" } },
+        }
+        "#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    let chart = find(&tree, &|n| matches!(n.kind, NodeKind::Chart(_))).unwrap();
+    let NodeKind::Chart(chart) = &chart.kind else {
+        unreachable!()
+    };
+    assert_eq!(chart.series[1].values, [Some(200.0), None, Some(260.0)]);
+    assert_eq!(chart.series[1].color, Color::token(Token::Chart(1)));
+    let table = find(&tree, &|n| matches!(n.kind, NodeKind::Table(_))).unwrap();
+    let NodeKind::Table(table) = &table.kind else {
+        unreachable!()
+    };
+    // Numeric columns right-align.
+    assert_eq!(table.columns[1].align, Align::End);
+}
+
+#[test]
+fn check_exercises_every_control_and_reports_where_it_broke() {
+    let report = check(
+        r#"
+        local s = ui.state { tab = "a", on = false, n = 1 }
+        return function()
+          return ui.column {
+            ui.tabs { options = { "a", "b" }, value = s.tab, on_change = function(v) s.tab = v end },
+            ui.toggle { label = "Log scale", value = s.on, on_change = function(v) s.on = v end },
+            ui.slider { label = "Window", value = s.n, min = 1, max = 10, on_change = function(v) s.n = v end },
+            ui.canvas { height = 100, animate = true, draw = function(g, w, h, t) g:line(0, 0, w * t, h) end },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
+    assert_eq!(report.interactions, 5);
+
+    let err = check(
+        r#"
+        local s = ui.state { tab = "a" }
+        return function()
+          local body = s.tab == "a" and ui.text "fine" or ui.text { nil .. "boom" }
+          return ui.column {
+            ui.tabs { options = { "a", "b" }, value = s.tab, on_change = function(v) s.tab = v end },
+            body,
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap_err();
+    assert!(
+        err.message.starts_with("after selecting tab 'b':"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("visual:4"), "{}", err.message);
+}
+
+#[test]
+fn ticks_are_round() {
+    assert_eq!(
+        nice_ticks(0.0, 100.0, 5),
+        [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
+    );
+    assert_eq!(nice_ticks(0.0, 0.9, 4), [0.0, 0.2, 0.4, 0.6, 0.8]);
+    assert_eq!(nice_ticks(5.0, 5.0, 4), [5.0]);
+}

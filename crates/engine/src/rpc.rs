@@ -63,7 +63,7 @@ use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
 use zeron_proto::{
-    ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
+    AgentEvent, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
     ProjectActionDraft, Space, ToolCall, WorkspaceScope,
 };
 use zeron_rpc::{
@@ -499,6 +499,16 @@ struct ReadAttachmentChunkParams {
     path: String,
     #[serde(default)]
     offset: u64,
+}
+
+const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishVisualParams {
+    chat_id: String,
+    title: String,
+    script: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3690,6 +3700,60 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
+            }
+            methods::PUBLISH_VISUAL => {
+                let p: PublishVisualParams = parse_params(params)?;
+                let title: String = p
+                    .title
+                    .trim()
+                    .chars()
+                    .take(zeron_proto::VISUAL_MAX_TITLE_CHARS)
+                    .collect();
+                if title.is_empty() {
+                    return Err(RpcError::BadParams("title is empty".into()));
+                }
+                if p.script.trim().is_empty() || p.script.len() > zeron_proto::VISUAL_MAX_BYTES {
+                    return Err(RpcError::BadParams(format!(
+                        "script must be 1 to {} bytes",
+                        zeron_proto::VISUAL_MAX_BYTES
+                    )));
+                }
+                let id = format!("v:{}", crate::new_id());
+                // Run the script the way the desktop will (setup, render,
+                // every draw, every control) before anyone sees it, so the
+                // agent gets its errors with line numbers and can fix them.
+                let uploads = self.uploads.clone();
+                let (stored_id, script) = (id.clone(), p.script);
+                let (path, report) = tokio::task::spawn_blocking(move || {
+                    let checked = zeron_visual::check(&script, zeron_visual::seed_for(&stored_id));
+                    let report = checked
+                        .map_err(|e| RpcError::BadParams(format!("visual script failed: {e}")))?;
+                    let path = uploads
+                        .store_visual(&stored_id, &script)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    Ok::<_, RpcError>((path, report))
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))??;
+                let event = AgentEvent::Visual {
+                    id: id.clone(),
+                    path: path.clone(),
+                    title: title.clone(),
+                };
+                if !self.sessions.inject_event(&p.chat_id, event) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(RpcError::Failed(
+                        "This chat has no running turn on this device; show_visual only works \
+                         from inside a turn."
+                            .into(),
+                    ));
+                }
+                RpcReply::value(&serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "checkedInteractions": report.interactions,
+                    "printed": report.logs,
+                }))
             }
             methods::FETCH_TOOL_BLOB => {
                 let p: FetchToolBlobParams = parse_params(params)?;

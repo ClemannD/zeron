@@ -415,6 +415,11 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+/// Bounds on an agent's inline visual ([`AgentEvent::Visual`]): a Luau
+/// script Zeron runs in a sandbox and renders natively.
+pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
+pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
@@ -570,6 +575,15 @@ pub enum AgentEvent {
         path: String,
         name: String,
         mime_type: String,
+    },
+    /// An agent-authored visual shown inline in the reply: a Luau script
+    /// that builds native UI (`zeron-visual`). The engine emits it when the
+    /// agent calls Zeron's `show_visual` MCP tool; `path` is the stored
+    /// script on the host device.
+    Visual {
+        id: String,
+        path: String,
+        title: String,
     },
     ReasoningDelta {
         text: String,
