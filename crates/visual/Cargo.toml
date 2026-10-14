@@ -8,4 +8,6 @@ description = "Sandboxed Luau runtime for agent visuals: scripts build a native 
 
 [dependencies]
 mlua = { version = "0.12", features = ["luau"] }
+# The GLSL compiler wgpu uses, so a shader is validated exactly as it will run.
+naga = { version = "29", features = ["glsl-in"] }
 thiserror.workspace = true

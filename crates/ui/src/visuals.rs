@@ -26,7 +26,7 @@ use gpui::{
     TextAlign, TextRun, Window, canvas, div, point, px,
 };
 use zeron_visual::{
-    Align, ChartKind, DrawCmd, HandlerArg, HandlerId, Justify, Node, NodeKind, Prim, Token,
+    Align, ChartKind, DrawCmd, HandlerArg, HandlerId, Justify, Node, NodeKind, Token,
 };
 
 use crate::markdown::render::LinkUi;
@@ -72,7 +72,19 @@ struct Local {
     cameras: HashMap<SharedString, Orbit>,
     canvases: HashMap<SharedString, CanvasCache>,
     scenes: HashMap<SharedString, SceneCache>,
+    shaders: HashMap<SharedString, ShaderCache>,
     draw_error: Option<String>,
+}
+
+/// A shader's last frame and what it was drawn with.
+struct ShaderCache {
+    uniforms: zeron_visual::shader::ShaderUniforms,
+    size: (u32, u32),
+    image: Arc<gpui::RenderImage>,
+    frame: u32,
+    last_time: f64,
+    /// Buffers carried between frames (feedback, simulations).
+    gpu: Option<zeron_visual_gpu::ShaderState>,
 }
 
 struct CanvasCache {
@@ -85,6 +97,30 @@ struct CanvasCache {
 struct SceneCache {
     generation: u64,
     scene: Rc<zeron_visual::Scene>,
+    /// The last image rendered from `scene`, and what it was rendered for.
+    image: Option<(RasterKey, SceneImage)>,
+    /// How long the last supersampled render took: cheap scenes stay
+    /// supersampled while the camera moves.
+    final_cost: Option<std::time::Duration>,
+}
+
+/// What a scene image depends on besides the geometry.
+#[derive(Clone, Copy, PartialEq)]
+struct RasterKey {
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+    size: (f32, f32),
+    pixel_scale: f32,
+    quality: zeron_visual::Quality,
+    palette: u64,
+}
+
+#[derive(Clone)]
+struct SceneImage {
+    image: Arc<gpui::RenderImage>,
+    hints: Rc<Vec<([f32; 2], f32, String)>>,
+    labels: Rc<Vec<zeron_visual::RasterLabel>>,
 }
 
 #[derive(Clone, Copy)]
@@ -354,14 +390,6 @@ fn mix_rgb(a: Hsla, b: Hsla, t: f32) -> Hsla {
     .into()
 }
 
-/// A face's color under the scene light.
-fn shaded(color: Hsla, shade: f32) -> Hsla {
-    Hsla {
-        l: (color.l * (0.42 + 0.62 * shade)).clamp(0.0, 0.97),
-        ..color
-    }
-}
-
 fn weight(weight: zeron_visual::Weight) -> FontWeight {
     match weight {
         zeron_visual::Weight::Regular => FontWeight::NORMAL,
@@ -504,6 +532,7 @@ impl VisualFrame {
             NodeKind::Chart(chart) => self.chart(chart, key, theme, palette, cx),
             NodeKind::Canvas(canvas) => self.canvas(canvas, key, cx),
             NodeKind::Scene(scene) => self.scene(scene, key, cx),
+            NodeKind::Shader(shader) => self.shader(shader, key, cx),
             NodeKind::Button {
                 label,
                 on_click,
@@ -1350,6 +1379,242 @@ fn paint_commands(
 // ---- 3D -------------------------------------------------------------------
 
 impl VisualFrame {
+    /// Drag to orbit a scene's or shader's camera, picking up from where a
+    /// turntable `spin` has turned it.
+    fn orbit_handlers(
+        &self,
+        mut el: gpui::Stateful<gpui::Div>,
+        key: &SharedString,
+        spin: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (down_key, drag_key, move_key, up_key, out_key) = (
+            key.clone(),
+            key.clone(),
+            key.clone(),
+            key.clone(),
+            key.clone(),
+        );
+        let release = move |this: &mut VisualFrame, key: &SharedString| {
+            if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(key)
+                && orbit.drag.take().is_some()
+            {
+                orbit.spin_epoch = Instant::now();
+            }
+        };
+        el = el
+            .cursor_grab()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&down_key) {
+                        orbit.yaw += spin * orbit.spin_epoch.elapsed().as_secs_f32();
+                        orbit.drag = Some((event.position, orbit.yaw, orbit.pitch));
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_drag(VisualDrag(drag_key), |_, _, _, cx| cx.new(|_| DragGhost))
+            .on_drag_move(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<VisualDrag>, _, cx| {
+                    if event.drag(cx).0 != move_key {
+                        return;
+                    }
+                    if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&move_key)
+                        && let Some((start, yaw, pitch)) = orbit.drag
+                    {
+                        let delta = event.event.position - start;
+                        orbit.yaw = yaw - f32::from(delta.x) * 0.01;
+                        orbit.pitch = (pitch + f32::from(delta.y) * 0.01).clamp(-1.5, 1.5);
+                    }
+                    cx.notify();
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
+                    release(this, &up_key);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
+                    release(this, &out_key);
+                    cx.notify();
+                }),
+            );
+        el
+    }
+
+    /// A `ui.shader`: the script's GLSL run on the GPU every frame it
+    /// animates, painted as an image like any other.
+    fn shader(
+        &mut self,
+        node: &zeron_visual::ShaderNode,
+        key: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let spin = if cx.reduce_motion() { 0.0 } else { node.spin };
+        let animate = node.animate && !cx.reduce_motion();
+        let orbit = *self
+            .local
+            .borrow_mut()
+            .cameras
+            .entry(key.clone())
+            .or_insert(Orbit {
+                yaw: node.yaw,
+                pitch: node.pitch,
+                spin_epoch: Instant::now(),
+                drag: None,
+            });
+        let yaw = match orbit.drag {
+            Some(_) => orbit.yaw,
+            None => orbit.yaw + spin * orbit.spin_epoch.elapsed().as_secs_f32(),
+        };
+        let moving = animate || (spin != 0.0 && orbit.drag.is_none());
+        let mut el = div()
+            .id(self.element_id(&format!("{key}-shader")))
+            .w_full()
+            .h(px(node.height));
+        el = self.pointer_tracking(el, &key, cx);
+        if node.orbit {
+            el = self.orbit_handlers(el, &key, spin, cx);
+        }
+        let names: Vec<String> = node.inputs.iter().map(|(n, _)| n.clone()).collect();
+        let mut inputs = [[0.0f32; 4]; zeron_visual::shader::MAX_INPUTS / 4];
+        for (i, (_, value)) in node.inputs.iter().enumerate() {
+            inputs[i / 4][i % 4] = *value;
+        }
+        let (code, buffers, blend, bloom, zoom) = (
+            node.code.clone(),
+            node.buffers.clone(),
+            node.blend,
+            node.bloom,
+            node.zoom,
+        );
+        // Buffers evolve every frame, so a shader with any keeps running.
+        let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
+        let (local, time) = (self.local.clone(), self.time());
+        let drag = orbit.drag;
+        el.child(
+            canvas(
+                move |bounds, window, _| {
+                    if moving {
+                        window.request_animation_frame();
+                    }
+                    let scale = window.scale_factor();
+                    let size = (
+                        (f32::from(bounds.size.width) * scale).round().max(1.0) as u32,
+                        (f32::from(bounds.size.height) * scale).round().max(1.0) as u32,
+                    );
+                    let mut state = local.borrow_mut();
+                    // Shadertoy's mouse: pixels from the bottom-left; xy while
+                    // pressed and zw where it went down (negative after).
+                    let device = |p: Point<Pixels>| {
+                        let at = p - bounds.origin;
+                        [f32::from(at.x) * scale, size.1 as f32 - f32::from(at.y) * scale]
+                    };
+                    let mouse = match (drag, state.pointers.get(&key)) {
+                        (Some((start, _, _)), Some(now)) => {
+                            let ([x, y], [sx, sy]) = (device(*now), device(start));
+                            [x, y, sx, sy]
+                        }
+                        (None, Some(now)) => {
+                            let [x, y] = device(*now);
+                            [x, y, -1.0, -1.0]
+                        }
+                        _ => [0.0, 0.0, -1.0, -1.0],
+                    };
+                    let buffers_run = !buffers.is_empty();
+                    let previous = state.shaders.get(&key);
+                    let shown_time = if animate {
+                        time
+                    } else {
+                        previous.map_or(0.0, |p| p.last_time)
+                    };
+                    let frame = previous.map_or(0, |p| p.frame + 1);
+                    let delta = previous.map_or(0.0, |p| (time - p.last_time).max(0.0));
+                    let uniforms = zeron_visual::shader::ShaderUniforms {
+                        resolution: [size.0 as f32, size.1 as f32, scale, 0.0],
+                        mouse,
+                        camera: [yaw, orbit.pitch, zoom, 0.0],
+                        time: [shown_time as f32, delta as f32, frame as f32, 0.0],
+                        inputs,
+                        channels: Default::default(),
+                    };
+                    let unchanged = !buffers_run && previous.is_some_and(|p| {
+                        p.size == size
+                            && p.uniforms.resolution == uniforms.resolution
+                            && p.uniforms.mouse == uniforms.mouse
+                            && p.uniforms.camera == uniforms.camera
+                            && p.uniforms.inputs == uniforms.inputs
+                            && (!animate || p.uniforms.time[0] == uniforms.time[0])
+                    });
+                    if unchanged {
+                        return previous.map(|p| p.image.clone());
+                    }
+                    let mut gpu_state = state.shaders.get_mut(&key).and_then(|p| p.gpu.take());
+                    let rendered = zeron_visual_gpu::render_shader(
+                        &zeron_visual_gpu::ShaderSpec {
+                            image: &code,
+                            buffers: &buffers,
+                            inputs: &names,
+                            blend,
+                            bloom,
+                        },
+                        &uniforms,
+                        size.0,
+                        size.1,
+                        &mut gpu_state,
+                    );
+                    match rendered {
+                        Ok(rendered) => {
+                            let buffer =
+                                image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.bgra)?;
+                            let image =
+                                Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)]));
+                            let replaced = state.shaders.insert(
+                                key.clone(),
+                                ShaderCache {
+                                    uniforms,
+                                    size,
+                                    image: image.clone(),
+                                    frame,
+                                    last_time: time,
+                                    gpu: gpu_state,
+                                },
+                            );
+                            if let Some(old) = replaced {
+                                let _ = window.drop_image(old.image);
+                            }
+                            state.draw_error = None;
+                            Some(image)
+                        }
+                        Err(error) => {
+                            state.draw_error = Some(error);
+                            None
+                        }
+                    }
+                },
+                move |bounds, image, window, _| {
+                    if let Some(image) = image {
+                        let _ = window.paint_image(
+                            bounds,
+                            gpui::Corners::default(),
+                            image,
+                            0,
+                            false,
+                        );
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+    }
+
     fn scene(
         &mut self,
         node: &zeron_visual::SceneNode,
@@ -1381,6 +1646,7 @@ impl VisualFrame {
             zoom: node.zoom,
         };
         let moving = (spin != 0.0 && orbit.drag.is_none()) || node.animate;
+        let dragging = orbit.drag.is_some();
         let (local, generation, time) = (self.local.clone(), self.generation, self.time());
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
@@ -1390,68 +1656,14 @@ impl VisualFrame {
             .h(px(node.height));
         el = self.pointer_tracking(el, &key, cx);
         if node.orbit {
-            let (down_key, drag_key, move_key, up_key, out_key) = (
-                key.clone(),
-                key.clone(),
-                key.clone(),
-                key.clone(),
-                key.clone(),
-            );
-            let release = move |this: &mut VisualFrame, key: &SharedString| {
-                if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(key)
-                    && orbit.drag.take().is_some()
-                {
-                    orbit.spin_epoch = Instant::now();
-                }
-            };
-            el = el
-                .cursor_grab()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&down_key) {
-                            orbit.yaw += spin * orbit.spin_epoch.elapsed().as_secs_f32();
-                            orbit.drag = Some((event.position, orbit.yaw, orbit.pitch));
-                        }
-                        cx.notify();
-                    }),
-                )
-                .on_drag(VisualDrag(drag_key), |_, _, _, cx| cx.new(|_| DragGhost))
-                .on_drag_move(cx.listener(
-                    move |this, event: &gpui::DragMoveEvent<VisualDrag>, _, cx| {
-                        if event.drag(cx).0 != move_key {
-                            return;
-                        }
-                        if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&move_key)
-                            && let Some((start, yaw, pitch)) = orbit.drag
-                        {
-                            let delta = event.event.position - start;
-                            orbit.yaw = yaw - f32::from(delta.x) * 0.01;
-                            orbit.pitch = (pitch + f32::from(delta.y) * 0.01).clamp(-1.5, 1.5);
-                        }
-                        cx.notify();
-                    },
-                ))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
-                        release(this, &up_key);
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
-                        release(this, &out_key);
-                        cx.notify();
-                    }),
-                );
+            el = self.orbit_handlers(el, &key, spin, cx);
         }
         let pointer_key = key.clone();
+        let render_palette = paint_palette.clone();
         el.child(
             canvas(
                 move |bounds, window, _| {
+                    let paint_palette = &render_palette;
                     if moving {
                         window.request_animation_frame();
                     }
@@ -1470,13 +1682,26 @@ impl VisualFrame {
                             match drawn {
                                 Ok(scene) => {
                                     let scene = Rc::new(scene);
-                                    state.scenes.insert(
+                                    // A new drawing replaces the old one's image.
+                                    let previous = state.scenes.insert(
                                         key.clone(),
                                         SceneCache {
                                             generation,
                                             scene: scene.clone(),
+                                            image: None,
+                                            final_cost: None,
                                         },
                                     );
+                                    if let Some(previous) = previous {
+                                        // An animated scene redraws every
+                                        // frame; its render cost carries over.
+                                        if let Some(entry) = state.scenes.get_mut(&key) {
+                                            entry.final_cost = previous.final_cost;
+                                        }
+                                        if let Some((_, old)) = previous.image {
+                                            let _ = window.drop_image(old.image);
+                                        }
+                                    }
                                     state.draw_error = None;
                                     scene
                                 }
@@ -1487,15 +1712,85 @@ impl VisualFrame {
                             }
                         }
                     };
-                    let projection = scene.project(
-                        camera,
-                        f32::from(bounds.size.width),
-                        f32::from(bounds.size.height),
-                    );
+                    // Always at full density. While the camera moves, a scene
+                    // too heavy to supersample within a frame drops to one
+                    // sample per pixel; at rest it is always supersampled.
+                    let pixel_scale = window.scale_factor();
+                    let cheap = state
+                        .scenes
+                        .get(&key)
+                        .and_then(|c| c.final_cost)
+                        .is_some_and(|cost| cost < std::time::Duration::from_millis(8));
+                    let quality = if (moving || dragging) && !cheap {
+                        zeron_visual::Quality::Draft
+                    } else {
+                        zeron_visual::Quality::Final
+                    };
+                    let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                    let raster_key = RasterKey {
+                        yaw: camera.yaw,
+                        pitch: camera.pitch,
+                        zoom: camera.zoom,
+                        size,
+                        pixel_scale,
+                        quality,
+                        palette: palette_key(paint_palette),
+                    };
+                    let entry = state.scenes.get_mut(&key)?;
+                    let image = match &entry.image {
+                        Some((cached_key, image)) if *cached_key == raster_key => image.clone(),
+                        _ => {
+                            let palette = paint_palette.clone();
+                            let rgba = move |color| {
+                                let rgba = palette.color(color).to_rgb();
+                                [rgba.r, rgba.g, rgba.b, rgba.a]
+                            };
+                            // On the GPU when there is one (materials, shadows,
+                            // glass, bloom); the software renderer otherwise.
+                            let (width, height, bgra, hints, labels) = match zeron_visual_gpu::render_scene(
+                                &scene,
+                                camera,
+                                size.0,
+                                size.1,
+                                pixel_scale,
+                                &rgba,
+                            ) {
+                                Some(frame) => {
+                                    let (hints, labels) = scene.annotations(camera, size.0, size.1);
+                                    (frame.width, frame.height, frame.bgra, hints, labels)
+                                }
+                                None => {
+                                    let started = Instant::now();
+                                    let raster = scene.render(
+                                        camera,
+                                        size.0,
+                                        size.1,
+                                        pixel_scale,
+                                        quality,
+                                        &rgba,
+                                    );
+                                    if quality == zeron_visual::Quality::Final {
+                                        entry.final_cost = Some(started.elapsed());
+                                    }
+                                    (raster.width, raster.height, raster.bgra, raster.hints, raster.labels)
+                                }
+                            };
+                            let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+                            let image = SceneImage {
+                                image: Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])),
+                                hints: Rc::new(hints),
+                                labels: Rc::new(labels),
+                            };
+                            if let Some((_, old)) = entry.image.replace((raster_key, image.clone())) {
+                                let _ = window.drop_image(old.image);
+                            }
+                            image
+                        }
+                    };
                     let hovered = state.pointers.get(&pointer_key).and_then(|p| {
                         let at = *p - bounds.origin;
                         let (x, y) = (f32::from(at.x), f32::from(at.y));
-                        projection
+                        image
                             .hints
                             .iter()
                             .map(|([hx, hy], r, text)| ((hx - x).hypot(hy - y), *r, text))
@@ -1503,13 +1798,33 @@ impl VisualFrame {
                             .min_by(|a, b| a.0.total_cmp(&b.0))
                             .map(|(_, _, text)| text.clone())
                     });
-                    Some((projection, hovered))
+                    Some((image, hovered))
                 },
-                move |bounds, projected, window, cx| {
-                    let Some((projection, hovered)) = projected else {
+                move |bounds, rendered, window, cx| {
+                    let Some((image, hovered)) = rendered else {
                         return;
                     };
-                    paint_scene(&projection, bounds.origin, &paint_palette, window, cx);
+                    let _ = window.paint_image(
+                        bounds,
+                        gpui::Corners::default(),
+                        image.image.clone(),
+                        0,
+                        false,
+                    );
+                    for label in image.labels.iter() {
+                        paint_text(
+                            &label.text,
+                            at(bounds.origin, label.at),
+                            label.size,
+                            FontWeight::NORMAL,
+                            false,
+                            paint_palette.color(label.color),
+                            Align::Center,
+                            Align::End,
+                            window,
+                            cx,
+                        );
+                    }
                     if let Some(hint) = hovered {
                         paint_text(
                             &hint,
@@ -1532,81 +1847,29 @@ impl VisualFrame {
     }
 }
 
-fn paint_scene(
-    projection: &zeron_visual::Projection,
-    origin: Point<Pixels>,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    for prim in &projection.prims {
-        match prim {
-            Prim::Face {
-                points,
-                color,
-                shade,
-            } => {
-                // Grow each face half a pixel from its center so neighbours
-                // overlap and anti-aliasing leaves no seams between them.
-                let n = points.len() as f32;
-                let (cx_, cy_) = points
-                    .iter()
-                    .fold((0.0, 0.0), |(x, y), p| (x + p[0] / n, y + p[1] / n));
-                let grown: Vec<Point<Pixels>> = points
-                    .iter()
-                    .map(|[x, y]| {
-                        let (dx, dy) = (x - cx_, y - cy_);
-                        let len = dx.hypot(dy).max(1e-3);
-                        at(origin, [x + dx / len * 0.5, y + dy / len * 0.5])
-                    })
-                    .collect();
-                fill_convex(&grown, shaded(palette.color(*color), *shade), window);
-            }
-            Prim::Line { a, b, color, width } => stroke_path(
-                [at(origin, *a), at(origin, *b)],
-                false,
-                *width,
-                None,
-                palette.color(*color),
-                window,
-            ),
-            Prim::Dot {
-                at: center,
-                radius,
-                color,
-            } => {
-                let points: Vec<Point<Pixels>> = (0..16)
-                    .map(|i| {
-                        let a = std::f32::consts::TAU * i as f32 / 16.0;
-                        at(
-                            origin,
-                            [center[0] + radius * a.cos(), center[1] + radius * a.sin()],
-                        )
-                    })
-                    .collect();
-                fill_convex(&points, palette.color(*color), window);
-            }
-            Prim::Label {
-                at: anchor,
-                text,
-                color,
-                size,
-            } => {
-                paint_text(
-                    text,
-                    at(origin, *anchor),
-                    *size,
-                    FontWeight::NORMAL,
-                    false,
-                    palette.color(*color),
-                    Align::Center,
-                    Align::End,
-                    window,
-                    cx,
-                );
-            }
+/// Identifies a palette's colors, so a theme change re-renders scenes.
+fn palette_key(palette: &Palette) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for color in [
+        palette.text,
+        palette.muted,
+        palette.faint,
+        palette.accent,
+        palette.on_accent,
+        palette.success,
+        palette.warning,
+        palette.danger,
+        palette.border,
+    ]
+    .iter()
+    .chain(palette.chart.iter())
+    {
+        for channel in [color.h, color.s, color.l, color.a] {
+            channel.to_bits().hash(&mut hasher);
         }
     }
+    hasher.finish()
 }
 
 // ---- charts ---------------------------------------------------------------

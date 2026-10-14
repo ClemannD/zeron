@@ -17,49 +17,144 @@ const MAX_ITEMS: usize = 20_000;
 pub type V3 = [f32; 3];
 
 #[derive(Debug, Clone, PartialEq)]
-struct Face {
-    v: [V3; 4],
+pub(crate) struct Face {
+    pub(crate) v: [V3; 4],
     /// 3 or 4 corners.
-    n: u8,
-    normal: V3,
-    color: Color,
+    pub(crate) n: u8,
+    pub(crate) normal: V3,
+    /// Per-corner normals of a curved solid (spheres, cylinder sides), so it
+    /// shades smoothly instead of faceted.
+    pub(crate) normals: Option<[V3; 4]>,
+    pub(crate) color: Color,
     /// Closed solids cull faces turned away from the camera; open surfaces
     /// and meshes light both sides.
-    two_sided: bool,
+    pub(crate) two_sided: bool,
+    pub(crate) material: Material,
+}
+
+/// How a surface takes light. `glass` lets light through (refracting by
+/// `ior`, splitting into colors by `dispersion`); `glow` emits light of the
+/// surface's own color, which blooms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Material {
+    /// 0 is a mirror finish, 1 fully matte.
+    pub roughness: f32,
+    /// 0 is a dielectric (plastic, wood), 1 a metal.
+    pub metalness: f32,
+    pub glow: f32,
+    /// 0 opaque to 1 clear glass.
+    pub glass: f32,
+    pub ior: f32,
+    pub dispersion: f32,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            roughness: 0.55,
+            metalness: 0.0,
+            glow: 0.0,
+            glass: 0.0,
+            ior: 1.5,
+            dispersion: 0.0,
+        }
+    }
+}
+
+/// A face as the GPU renderer reads it.
+pub struct FaceView<'a> {
+    pub corners: &'a [V3],
+    pub normal: V3,
+    /// Per-corner normals of a curved solid.
+    pub normals: Option<&'a [V3]>,
+    pub color: Color,
+    pub two_sided: bool,
+    pub material: Material,
+}
+
+/// The framed orbit camera, for a renderer that does its own projection.
+#[derive(Debug, Clone, Copy)]
+pub struct CameraFrame {
+    pub eye: V3,
+    pub right: V3,
+    pub up: V3,
+    /// Into the screen.
+    pub forward: V3,
+    /// Pixels per unit at unit depth, for the canvas the frame was made for.
+    pub focal: f32,
+    pub near: f32,
+    /// The geometry's center and bounding radius.
+    pub center: V3,
+    pub radius: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Line3 {
-    a: V3,
-    b: V3,
-    color: Color,
-    width: f32,
+pub(crate) struct Line3 {
+    pub(crate) a: V3,
+    pub(crate) b: V3,
+    pub(crate) color: Color,
+    pub(crate) width: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Point3 {
-    at: V3,
-    radius: f32,
-    color: Color,
-    hint: Option<String>,
+pub(crate) struct Point3 {
+    pub(crate) at: V3,
+    pub(crate) radius: f32,
+    pub(crate) color: Color,
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Label3 {
-    at: V3,
-    text: String,
-    color: Color,
-    size: TextSize,
+pub(crate) struct Label3 {
+    pub(crate) at: V3,
+    pub(crate) text: String,
+    pub(crate) color: Color,
+    pub(crate) size: TextSize,
 }
 
 /// The geometry one draw call produced.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Scene {
-    faces: Vec<Face>,
-    lines: Vec<Line3>,
-    points: Vec<Point3>,
-    labels: Vec<Label3>,
+    pub(crate) faces: Vec<Face>,
+    pub(crate) lines: Vec<Line3>,
+    pub(crate) points: Vec<Point3>,
+    pub(crate) labels: Vec<Label3>,
     pub time: f64,
+    /// The material the primitive being added gives its faces.
+    pub(crate) material: Material,
+}
+
+/// The camera a scene is seen through: framed on its geometry and orbited.
+pub(crate) struct View {
+    pub(crate) eye: V3,
+    right: V3,
+    up: V3,
+    forward: V3,
+    focal: f32,
+    pub(crate) near: f32,
+    cx: f32,
+    cy: f32,
+    pub(crate) center: V3,
+    /// The geometry's bounding radius.
+    pub(crate) radius: f32,
+    /// The soft key light the painter shades with, from the upper left.
+    pub(crate) light: V3,
+}
+
+impl View {
+    /// World to view space: x right, y up, z into the screen.
+    pub(crate) fn view(&self, p: V3) -> V3 {
+        let d = sub(p, self.eye);
+        [dot(d, self.right), dot(d, self.up), dot(d, self.forward)]
+    }
+
+    /// View space to canvas pixels.
+    pub(crate) fn screen(&self, v: V3) -> [f32; 2] {
+        [
+            self.cx + self.focal * v[0] / v[2],
+            self.cy - self.focal * v[1] / v[2],
+        ]
+    }
 }
 
 /// The orbit camera: angles in radians around the geometry's center.
@@ -106,16 +201,16 @@ pub struct Projection {
     pub hints: Vec<([f32; 2], f32, String)>,
 }
 
-fn sub(a: V3, b: V3) -> V3 {
+pub(crate) fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
-fn add(a: V3, b: V3) -> V3 {
+pub(crate) fn add(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
-fn scale(a: V3, s: f32) -> V3 {
+pub(crate) fn scale(a: V3, s: f32) -> V3 {
     [a[0] * s, a[1] * s, a[2] * s]
 }
-fn dot(a: V3, b: V3) -> f32 {
+pub(crate) fn dot(a: V3, b: V3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn cross(a: V3, b: V3) -> V3 {
@@ -125,7 +220,7 @@ fn cross(a: V3, b: V3) -> V3 {
         a[0] * b[1] - a[1] * b[0],
     ]
 }
-fn normalize(a: V3) -> V3 {
+pub(crate) fn normalize(a: V3) -> V3 {
     let len = dot(a, a).sqrt();
     if len < 1e-9 {
         [0.0, 1.0, 0.0]
@@ -142,7 +237,7 @@ impl Scene {
         }
     }
 
-    fn face(
+    pub(crate) fn face(
         &mut self,
         corners: &[V3],
         color: Color,
@@ -179,9 +274,25 @@ impl Scene {
             v,
             n: corners.len() as u8,
             normal,
+            normals: None,
             color,
             two_sided,
+            material: self.material,
         });
+        Ok(())
+    }
+
+    /// A face of a curved solid, shaded from the surface's own normals.
+    pub(crate) fn smooth_face(&mut self, corners: &[V3], normals: &[V3], color: Color) -> mlua::Result<()> {
+        let outward = normals.iter().fold([0.0; 3], |acc, n| add(acc, *n));
+        self.face(corners, color, Some(outward), false)?;
+        let mut n = [[0.0; 3]; 4];
+        for (slot, normal) in n.iter_mut().zip(normals) {
+            *slot = normalize(*normal);
+        }
+        if let Some(face) = self.faces.last_mut() {
+            face.normals = Some(n);
+        }
         Ok(())
     }
 
@@ -253,11 +364,10 @@ impl Scene {
         lo[0].is_finite().then_some((lo, hi))
     }
 
-    /// Frame the geometry, orbit to `camera`, light, cull, and depth-sort.
-    pub fn project(&self, camera: Camera, width: f32, height: f32) -> Projection {
-        let Some((lo, hi)) = self.bounds() else {
-            return Projection::default();
-        };
+    /// The camera framed on this geometry and orbited to `camera`, for a
+    /// canvas `width` by `height`.
+    pub(crate) fn view_for(&self, camera: Camera, width: f32, height: f32) -> Option<View> {
+        let (lo, hi) = self.bounds()?;
         let target = scale(add(lo, hi), 0.5);
         let half = scale(sub(hi, lo), 0.5);
         let radius = dot(half, half).sqrt().max(1e-3);
@@ -287,18 +397,70 @@ impl Scene {
             * (width / 2.0 / footprint).min(height / 2.0 / tall)
             * distance
             * camera.zoom.max(0.05);
-        let near = distance * 0.02;
-        let (cx, cy) = (width / 2.0, height / 2.0);
-        let view = |p: V3| {
-            let d = sub(p, eye);
-            [dot(d, right), dot(d, up), dot(d, forward)]
-        };
-        let screen = |v: V3| [cx + focal * v[0] / v[2], cy - focal * v[1] / v[2]];
         // A soft key light from the upper left, in front of the geometry.
         let light = normalize(add(
             add(scale(right, -0.45), scale(up, 0.8)),
             scale(forward, -0.55),
         ));
+        Some(View {
+            eye,
+            right,
+            up,
+            forward,
+            focal,
+            near: distance * 0.02,
+            cx: width / 2.0,
+            cy: height / 2.0,
+            center: target,
+            radius,
+            light,
+        })
+    }
+
+    /// The camera framed on this geometry, for the GPU renderer.
+    pub fn camera_frame(&self, camera: Camera, width: f32, height: f32) -> Option<CameraFrame> {
+        let view = self.view_for(camera, width, height)?;
+        Some(CameraFrame {
+            eye: view.eye,
+            right: view.right,
+            up: view.up,
+            forward: view.forward,
+            focal: view.focal,
+            near: view.near,
+            center: view.center,
+            radius: view.radius,
+        })
+    }
+
+    pub fn face_views(&self) -> impl Iterator<Item = FaceView<'_>> {
+        self.faces.iter().map(|f| FaceView {
+            corners: &f.v[..f.n as usize],
+            normal: f.normal,
+            normals: f.normals.as_ref().map(|n| &n[..f.n as usize]),
+            color: f.color,
+            two_sided: f.two_sided,
+            material: f.material,
+        })
+    }
+
+    /// Lines: ends, color, width in pixels.
+    pub fn line_views(&self) -> impl Iterator<Item = (V3, V3, Color, f32)> + '_ {
+        self.lines.iter().map(|l| (l.a, l.b, l.color, l.width))
+    }
+
+    /// Points: center, radius in pixels, color.
+    pub fn point_views(&self) -> impl Iterator<Item = (V3, f32, Color)> + '_ {
+        self.points.iter().map(|p| (p.at, p.radius, p.color))
+    }
+
+    /// Frame the geometry, orbit to `camera`, light, cull, and depth-sort.
+    pub fn project(&self, camera: Camera, width: f32, height: f32) -> Projection {
+        let Some(setup) = self.view_for(camera, width, height) else {
+            return Projection::default();
+        };
+        let (eye, near, radius, light) = (setup.eye, setup.near, setup.radius, setup.light);
+        let view = |p: V3| setup.view(p);
+        let screen = |v: V3| setup.screen(v);
 
         let mut sorted: Vec<(f32, Prim)> = Vec::with_capacity(self.faces.len() + self.items());
         for face in &self.faces {
@@ -398,6 +560,38 @@ fn v3(value: Value, what: &str) -> mlua::Result<V3> {
     }
 }
 
+/// A primitive's material options: roughness, metal, glow, glass (true or
+/// 0-1), ior, dispersion.
+fn material_of(options: &Table) -> mlua::Result<Material> {
+    let mut m = Material::default();
+    let number = |key: &str| options.raw_get::<Option<f32>>(key);
+    if let Some(v) = number("roughness")? {
+        m.roughness = v.clamp(0.02, 1.0);
+    }
+    if let Some(v) = number("metal")? {
+        m.metalness = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = number("glow")? {
+        m.glow = v.clamp(0.0, 8.0);
+    }
+    match options.raw_get::<Value>("glass")? {
+        Value::Boolean(true) => {
+            m.glass = 1.0;
+            m.roughness = m.roughness.min(0.08);
+        }
+        Value::Integer(n) => m.glass = (n as f32).clamp(0.0, 1.0),
+        Value::Number(n) => m.glass = (n as f32).clamp(0.0, 1.0),
+        _ => {}
+    }
+    if let Some(v) = number("ior")? {
+        m.ior = v.clamp(1.0, 3.0);
+    }
+    if let Some(v) = number("dispersion")? {
+        m.dispersion = v.clamp(0.0, 1.0);
+    }
+    Ok(m)
+}
+
 fn color_of(options: &Table, default: Token) -> mlua::Result<Color> {
     Ok(parse_color(options.raw_get::<Value>("color")?)
         .map_err(|e| lua_error(e.to_string()))?
@@ -441,6 +635,7 @@ impl UserData for Scene {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("box", |_, s, o: Table| {
+            s.material = material_of(&o)?;
             let at = v3(o.raw_get("at")?, "box at")?;
             let size = match o.raw_get::<Value>("size")? {
                 Value::Nil => [1.0; 3],
@@ -515,6 +710,7 @@ impl UserData for Scene {
             Ok(())
         });
         methods.add_method_mut("sphere", |_, s, o: Table| {
+            s.material = material_of(&o)?;
             let at = v3(o.raw_get("at")?, "sphere at")?;
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let color = color_of(&o, Token::Accent)?;
@@ -535,7 +731,6 @@ impl UserData for Scene {
             for j in 0..lat {
                 for i in 0..lon {
                     let quad = [p(i, j), p(i + 1, j), p(i + 1, j + 1), p(i, j + 1)];
-                    let mid = scale(quad.iter().fold([0.0; 3], |a, v| add(a, *v)), 0.25);
                     let corners: Vec<V3> = if j == 0 {
                         vec![quad[0], quad[2], quad[3]]
                     } else if j == lat - 1 {
@@ -543,12 +738,14 @@ impl UserData for Scene {
                     } else {
                         quad.to_vec()
                     };
-                    s.face(&corners, color, Some(sub(mid, at)), false)?;
+                    let normals: Vec<V3> = corners.iter().map(|c| sub(*c, at)).collect();
+                    s.smooth_face(&corners, &normals, color)?;
                 }
             }
             Ok(())
         });
         methods.add_method_mut("cylinder", |_, s, o: Table| {
+            s.material = material_of(&o)?;
             let at = v3(o.raw_get("at")?, "cylinder at")?;
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let h = o.raw_get::<Option<f32>>("height")?.unwrap_or(1.0);
@@ -563,8 +760,11 @@ impl UserData for Scene {
             };
             for i in 0..n {
                 let quad = [ring(i, 0.0), ring(i + 1, 0.0), ring(i + 1, h), ring(i, h)];
-                let mid = scale(add(quad[0], quad[2]), 0.5);
-                s.face(&quad, color, Some(sub(mid, [at[0], mid[1], at[2]])), false)?;
+                let normals: Vec<V3> = quad
+                    .iter()
+                    .map(|c| [c[0] - at[0], 0.0, c[2] - at[2]])
+                    .collect();
+                s.smooth_face(&quad, &normals, color)?;
             }
             let top: Vec<V3> = (0..n).map(|i| ring(i, h)).collect();
             let bottom: Vec<V3> = (0..n).map(|i| ring(i, 0.0)).collect();
@@ -573,6 +773,7 @@ impl UserData for Scene {
         });
         // A height field: y = f(x, z) over a grid, or `values` rows.
         methods.add_method_mut("surface", |_, s, o: Table| {
+            s.material = material_of(&o)?;
             let range = |key: &str| -> mlua::Result<(f32, f32)> {
                 match o.raw_get::<Option<Table>>(key)? {
                     Some(t) => Ok((t.raw_get::<f32>(1)?, t.raw_get::<f32>(2)?)),
@@ -653,6 +854,7 @@ impl UserData for Scene {
             Ok(())
         });
         methods.add_method_mut("mesh", |_, s, o: Table| {
+            s.material = material_of(&o)?;
             let color = color_of(&o, Token::Accent)?;
             let vertices: Vec<V3> = o
                 .raw_get::<Table>("vertices")?

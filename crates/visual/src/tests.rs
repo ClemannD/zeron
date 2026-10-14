@@ -276,3 +276,64 @@ fn ticks_are_round() {
     assert_eq!(nice_ticks(0.0, 0.9, 4), [0.0, 0.2, 0.4, 0.6, 0.8]);
     assert_eq!(nice_ticks(5.0, 5.0, 4), [5.0]);
 }
+
+#[test]
+fn shaders_bind_state_as_inputs_and_fail_with_their_line() {
+    let report = check(
+        r#"
+        local s = ui.state { speed = 1 }
+        return function()
+          return ui.column {
+            ui.slider { label = "Speed", value = s.speed, min = 0, max = 4, on_change = function(v) s.speed = v end },
+            ui.shader { height = 240, orbit = true, inputs = { speed = s.speed }, code = [[
+              void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+                vec2 uv = fragCoord / iResolution.xy;
+                fragColor = vec4(uv, 0.5 + 0.5 * sin(iTime * speed + iCamera.x), 1.0);
+              }
+            ]] },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
+    assert!(report.interactions >= 1);
+
+    let err = check(
+        r#"
+        return function()
+          return ui.shader { height = 200, code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = vec4(missing, 1.0);
+}
+          ]] }
+        end
+        "#,
+        1,
+    )
+    .unwrap_err();
+    // Lua drops the newline after `[[`, so mainImage is line 1.
+    assert!(err.message.contains("shader line 2:"), "{}", err.message);
+}
+
+#[test]
+fn shaders_default_to_light_and_keep_the_old_transparent_flag() {
+    use crate::shader::Blend;
+    let blend_of = |props: &str| {
+        let mut visual = Visual::load(
+            &format!(
+                "return function() return ui.shader {{ height = 100, {props} code = [[void mainImage(out vec4 c, in vec2 p) {{ c = vec4(1.0); }}]] }} end"
+            ),
+            1,
+        )
+        .unwrap();
+        match visual.render().unwrap().kind {
+            NodeKind::Shader(shader) => shader.blend,
+            _ => unreachable!(),
+        }
+    };
+    assert_eq!(blend_of(""), Blend::Light);
+    assert_eq!(blend_of("transparent = true,"), Blend::Alpha);
+    assert_eq!(blend_of("transparent = false,"), Blend::Opaque);
+    assert_eq!(blend_of("blend = \"opaque\","), Blend::Opaque);
+}

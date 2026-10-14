@@ -56,6 +56,7 @@ pub enum NodeKind {
     Chart(Box<Chart>),
     Canvas(Canvas),
     Scene(SceneNode),
+    Shader(ShaderNode),
     Button {
         label: String,
         on_click: HandlerId,
@@ -237,6 +238,30 @@ pub struct SceneNode {
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
+}
+
+/// A fragment shader the desktop runs on the GPU (see [`crate::shader`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderNode {
+    pub height: f32,
+    /// GLSL defining `mainImage`: the image pass.
+    pub code: String,
+    /// Buffer passes, run in order before the image (`iChannel0`-`3`).
+    pub buffers: Vec<String>,
+    /// Named number inputs, in slot order.
+    pub inputs: Vec<(String, f32)>,
+    /// Advance `iTime` every frame (on by default).
+    pub animate: bool,
+    /// Dragging orbits `iCamera` (otherwise it only moves `iMouse`).
+    pub orbit: bool,
+    pub spin: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub zoom: f32,
+    /// How the output sits on the chat.
+    pub blend: crate::shader::Blend,
+    /// Bloom strength on bright output (0 off).
+    pub bloom: f32,
 }
 
 pub const MIN_HEIGHT: f32 = 40.0;
@@ -451,6 +476,98 @@ impl Parser {
                     yaw: yaw as f32,
                     pitch: (pitch as f32).clamp(-1.5, 1.5),
                     zoom: (zoom as f32).clamp(0.2, 5.0),
+                })
+            }
+            "shader" => {
+                props.allow(&[
+                    "height",
+                    "code",
+                    "inputs",
+                    "animate",
+                    "orbit",
+                    "spin",
+                    "camera",
+                    "blend",
+                    "bloom",
+                    "buffers",
+                    // Before `blend`: true kept the alpha, false was opaque.
+                    "transparent",
+                ])?;
+                let code = match props.table.raw_get::<Value>("code")? {
+                    Value::String(code) => code.to_string_lossy(),
+                    Value::Nil => {
+                        return Err(props.error(
+                            "needs code: GLSL defining void mainImage(out vec4 fragColor, in \
+                             vec2 fragCoord)",
+                        ));
+                    }
+                    _ => return Err(props.error("'code' must be a string of GLSL")),
+                };
+                let mut buffers = Vec::new();
+                if let Some(table) = props.get::<Option<Table>>("buffers")? {
+                    for value in table.sequence_values::<Value>() {
+                        match value? {
+                            Value::String(code) => buffers.push(code.to_string_lossy()),
+                            _ => return Err(props.error("'buffers' is a list of GLSL strings")),
+                        }
+                    }
+                }
+                if buffers.len() > crate::shader::MAX_BUFFERS {
+                    return Err(props.error(&format!(
+                        "takes at most {} buffers",
+                        crate::shader::MAX_BUFFERS
+                    )));
+                }
+                let blend = match (props.string("blend")?, props.bool("transparent")?) {
+                    (Some(name), _) => crate::shader::Blend::parse(&name).ok_or_else(|| {
+                        props.error("'blend' is \"alpha\", \"light\", or \"opaque\"")
+                    })?,
+                    (None, Some(true)) => crate::shader::Blend::Alpha,
+                    (None, Some(false)) => crate::shader::Blend::Opaque,
+                    (None, None) => crate::shader::Blend::default(),
+                };
+                let mut inputs = Vec::new();
+                if let Some(table) = props.get::<Option<Table>>("inputs")? {
+                    for pair in table.pairs::<String, f64>() {
+                        let (name, value) =
+                            pair.map_err(|_| props.error("'inputs' maps names to numbers"))?;
+                        if !crate::shader::valid_input_name(&name) {
+                            return Err(props.error(&format!(
+                                "input '{name}' is not a usable GLSL name"
+                            )));
+                        }
+                        inputs.push((name, value as f32));
+                    }
+                }
+                if inputs.len() > crate::shader::MAX_INPUTS {
+                    return Err(props.error(&format!(
+                        "takes at most {} inputs",
+                        crate::shader::MAX_INPUTS
+                    )));
+                }
+                // Slots follow the names, so a shader compiled for one set of
+                // values serves every other.
+                inputs.sort_by(|a, b| a.0.cmp(&b.0));
+                let camera: Option<Table> = props.get("camera")?;
+                let (mut yaw, mut pitch, mut zoom) = (0.0, 0.0, 1.0);
+                if let Some(camera) = camera {
+                    yaw = camera.get::<Option<f64>>("yaw")?.unwrap_or(yaw);
+                    pitch = camera.get::<Option<f64>>("pitch")?.unwrap_or(pitch);
+                    zoom = camera.get::<Option<f64>>("zoom")?.unwrap_or(zoom);
+                }
+                NodeKind::Shader(ShaderNode {
+                    height: props.height()?,
+                    code,
+                    buffers,
+                    inputs,
+                    animate: props.bool("animate")?.unwrap_or(true),
+                    orbit: props.bool("orbit")?.unwrap_or(false),
+                    spin: props.number("spin")?.unwrap_or(0.0).clamp(-3.0, 3.0) as f32,
+                    yaw: yaw as f32,
+                    pitch: (pitch as f32).clamp(-1.5, 1.5),
+                    zoom: (zoom as f32).clamp(0.2, 5.0),
+                    blend,
+                    bloom: props.number("bloom")?.unwrap_or(0.0).clamp(0.0, 3.0) as f32,
                 })
             }
             "button" => {

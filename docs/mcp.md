@@ -175,7 +175,7 @@ inline in the calling chat, above the agent's final reply. A visual is a Luau
 script, not a web page. The script builds its data and state once and returns a
 view function; the view returns a tree of `ui.*` nodes (rows, columns, grids,
 text, stats, tables, charts, tabs, toggles, sliders, buttons, links, 2D
-canvases, and 3D scenes). Controls call the script's handlers, and Zeron renders
+canvases, 3D scenes, and GPU shaders). Controls call the script's handlers, and Zeron renders
 the view again.
 
 `crates/visual` (`zeron-visual`) is the runtime. Scripts run in a Luau sandbox
@@ -189,9 +189,19 @@ are theme tokens (`text`, `muted`, `faint`, `accent`, `on-accent`, `success`,
 `warning`, `danger`, `border`, `chart1`…`chart6`), text sizes are steps on the
 transcript's type scale, the font is always the interface font, and layout nodes
 have no fill, border, shadow, padding, or font props; using one is an error that
-names the rule. 3D scenes are projected in the runtime: Zeron frames an orbit
-camera on the geometry, lights faces with one soft light, culls and depth-sorts
-them, and hands the desktop 2D polygons.
+names the rule. 3D scenes are rendered in the runtime (`raster.rs`): Zeron
+frames an orbit camera on the geometry, clips faces to the near plane, and
+rasterizes them with a depth buffer (smooth-shaded curved solids, a sky/key/fill
+light rig, depth-edge outlines, supersampled at rest), in parallel row bands,
+into one transparent image. `ui.shader` takes Shadertoy-style GLSL
+(`mainImage`, `iResolution`, `iTime`, `iMouse`, plus `iCamera` for an orbit
+camera, named float inputs bound to the script's state, `iNoise`, and up to four
+Shadertoy-style buffer passes read as `iChannel0`-`3`, with feedback from their
+own previous frame); `zeron_visual::shader` wraps each pass in a GLSL 4.50
+program and validates it with naga, so a compile error reaches the agent with
+its pass and line. A shader composites onto the chat by `blend` (`alpha`,
+`light` for emitted light where black is clear, or `opaque`) with optional
+bloom, so it never sits in a black box.
 
 The engine runs every script before showing it (`zeron_visual::check`: setup,
 the first render, every canvas and scene draw, then each tab, toggle, slider
@@ -205,8 +215,10 @@ clients see an empty part.
 
 The desktop (`crates/ui/src/visuals.rs`) renders the tree with the transcript's
 own GPUI elements: markdown's table treatment, the settings tab, switch, and
-button idioms, and canvases and scenes painted as GPUI paths and shaped text in
-theme colors. Nothing foreign is hosted, so a visual scrolls, clips, blurs under
+button idioms, canvases as GPUI paths and shaped text in theme colors, and
+scenes and shaders as images. Shaders run offscreen on the GPU through wgpu
+(`crates/visual-gpu`, one shared device, pipelines cached by source) and are
+read back like a scene's image. Nothing foreign is hosted, so a visual scrolls, clips, blurs under
 the glass composer, and takes input like any other row, identically on Linux,
 macOS, and Windows, and it follows theme, appearance, and text-size changes
 without rerunning the script.

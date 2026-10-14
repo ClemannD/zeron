@@ -26,6 +26,7 @@ for _, kind in
 		"chart",
 		"canvas",
 		"scene",
+		"shader",
 		"button",
 		"tabs",
 		"toggle",

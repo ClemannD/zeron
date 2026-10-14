@@ -19,7 +19,9 @@
 
 mod draw;
 mod node;
+mod raster;
 mod scene;
+pub mod shader;
 mod style;
 
 use std::cell::{Cell, RefCell};
@@ -31,9 +33,11 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 pub use draw::{DrawCmd, DrawText, Pointer};
 pub use node::{
     Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
+    ShaderNode,
     Series, Span, Stack, Table_ as TableNode, Text,
 };
-pub use scene::{Camera, Prim, Projection, Scene};
+pub use raster::{Quality, Raster, RasterLabel};
+pub use scene::{Camera, CameraFrame, FaceView, Material, Prim, Projection, Scene, V3};
 pub use style::{Align, CHART_SERIES, Color, Justify, TOKEN_NAMES, TextSize, Token, Weight};
 
 /// Largest script `show_visual` accepts.
@@ -427,6 +431,15 @@ fn exercise_draws(
                      s:line, s:point)",
                 ));
             }
+        }
+        NodeKind::Shader(shader) => {
+            let names: Vec<String> = shader.inputs.iter().map(|(n, _)| n.clone()).collect();
+            for (i, buffer) in shader.buffers.iter().enumerate() {
+                crate::shader::validate(buffer, &names).map_err(|e| {
+                    VisualError::script(format!("in shader buffer {}: {e}", i + 1))
+                })?;
+            }
+            crate::shader::validate(&shader.code, &names).map_err(VisualError::script)?;
         }
         _ => {}
     }
