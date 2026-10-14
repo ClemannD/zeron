@@ -17,7 +17,10 @@
 //! app. `math.random` is seeded from the visual's id before every call, so a
 //! script's random data is the same on every render and every device.
 
+pub mod assets;
 mod draw;
+pub mod image;
+mod model;
 mod node;
 mod raster;
 mod scene;
@@ -30,14 +33,17 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 
+pub use assets::Assets;
 pub use draw::{DrawCmd, DrawText, Pointer};
 pub use node::{
     Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
-    ShaderNode,
-    Series, Span, Stack, Table_ as TableNode, Text,
+    Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
 };
 pub use raster::{Quality, Raster, RasterLabel};
-pub use scene::{Camera, CameraFrame, FaceView, Material, Prim, Projection, Scene, V3};
+pub use scene::{
+    Camera, CameraFrame, Environment, FaceView, Material, Prim, Projection, Scene, Sprite,
+    TextureData, TextureSource, V3,
+};
 pub use style::{Align, CHART_SERIES, Color, Justify, TOKEN_NAMES, TextSize, Token, Weight};
 
 /// Largest script `show_visual` accepts.
@@ -105,6 +111,14 @@ pub enum HandlerArg {
     Point(f32, f32),
 }
 
+/// One run of a canvas's draw function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasDrawing {
+    pub commands: Vec<DrawCmd>,
+    /// The drawing read `g.pointer`, so it responds to where the pointer is.
+    pub reads_pointer: bool,
+}
+
 /// One visual's live program.
 pub struct Visual {
     lua: Lua,
@@ -114,6 +128,7 @@ pub struct Visual {
     seed: i64,
     deadline: Rc<Cell<Option<Instant>>>,
     logs: Rc<RefCell<Vec<String>>>,
+    assets: Assets,
 }
 
 const MAX_LOG_LINES: usize = 200;
@@ -232,7 +247,18 @@ impl Visual {
             seed,
             deadline,
             logs,
+            assets: Assets::default(),
         })
+    }
+
+    /// Give the script its asset files (textures, models).
+    pub fn with_assets(mut self, assets: Assets) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn assets(&self) -> &Assets {
+        &self.assets
     }
 
     fn budgeted<R>(
@@ -288,6 +314,21 @@ impl Visual {
         time: f64,
         pointer: Option<Pointer>,
     ) -> Result<Vec<DrawCmd>, VisualError> {
+        Ok(self
+            .draw_canvas_traced(id, width, height, time, pointer)?
+            .commands)
+    }
+
+    /// [`Visual::draw_canvas`], also reporting whether the drawing read the
+    /// pointer.
+    pub fn draw_canvas_traced(
+        &mut self,
+        id: HandlerId,
+        width: f32,
+        height: f32,
+        time: f64,
+        pointer: Option<Pointer>,
+    ) -> Result<CanvasDrawing, VisualError> {
         let draw = self.handler(id)?.clone();
         let graphics = self
             .lua
@@ -295,13 +336,19 @@ impl Visual {
         self.budgeted(DRAW_BUDGET, || {
             draw.call::<()>((&graphics, width, height, time))
         })?;
-        Ok(graphics.take::<draw::Graphics>()?.commands)
+        let graphics = graphics.take::<draw::Graphics>()?;
+        Ok(CanvasDrawing {
+            reads_pointer: graphics.read_pointer.get(),
+            commands: graphics.commands,
+        })
     }
 
     /// Run a scene's draw function.
     pub fn draw_scene(&mut self, id: HandlerId, time: f64) -> Result<Scene, VisualError> {
         let draw = self.handler(id)?.clone();
-        let scene = self.lua.create_userdata(Scene::new(time))?;
+        let scene = self
+            .lua
+            .create_userdata(Scene::with_assets(time, self.assets.clone()))?;
         self.budgeted(DRAW_BUDGET, || draw.call::<()>((&scene, time)))?;
         Ok(scene.take::<Scene>()?)
     }
@@ -358,7 +405,12 @@ pub struct Report {
 /// once with a render after each. The first failure comes back with where
 /// it happened, so the agent can fix the script before the reader sees it.
 pub fn check(source: &str, seed: u64) -> Result<Report, VisualError> {
-    let mut visual = Visual::load(source, seed)?;
+    check_with_assets(source, seed, Assets::default())
+}
+
+/// [`check`] for a script shipped with asset files.
+pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Report, VisualError> {
+    let mut visual = Visual::load(source, seed)?.with_assets(assets);
     let tree = visual.render()?;
     let mut report = Report::default();
     exercise_draws(&mut visual, &tree, &mut report)?;
@@ -425,21 +477,40 @@ fn exercise_draws(
                 )
                 .prims
                 .is_empty()
+                && drawn.sprites().is_empty()
             {
                 return Err(VisualError::script(
                     "a scene draw added no geometry (use s:box, s:sphere, s:surface, s:mesh, \
-                     s:line, s:point)",
+                     s:line, s:point, s:model, s:sprite)",
                 ));
+            }
+            for texture in drawn.textures() {
+                if let TextureData::Encoded(bytes) = &texture.data {
+                    crate::image::dimensions(bytes).map_err(|e| {
+                        VisualError::script(format!(
+                            "in a scene draw: {}: {e}",
+                            texture.key.trim_start_matches("asset:")
+                        ))
+                    })?;
+                }
             }
         }
         NodeKind::Shader(shader) => {
             let names: Vec<String> = shader.inputs.iter().map(|(n, _)| n.clone()).collect();
             for (i, buffer) in shader.buffers.iter().enumerate() {
-                crate::shader::validate(buffer, &names).map_err(|e| {
-                    VisualError::script(format!("in shader buffer {}: {e}", i + 1))
-                })?;
+                crate::shader::validate(buffer, &names)
+                    .map_err(|e| VisualError::script(format!("in shader buffer {}: {e}", i + 1)))?;
             }
             crate::shader::validate(&shader.code, &names).map_err(VisualError::script)?;
+            for name in &shader.textures {
+                visual
+                    .assets
+                    .require(name)
+                    .and_then(|bytes| {
+                        crate::image::dimensions(&bytes).map_err(|e| format!("'{name}': {e}"))
+                    })
+                    .map_err(|e| VisualError::script(format!("shader textures: {e}")))?;
+            }
         }
         _ => {}
     }

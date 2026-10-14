@@ -58,6 +58,7 @@ fn main() {
         inputs: &names,
         blend,
         bloom,
+        textures: &[],
     };
     let frame = render_shader(&spec, &uniforms, w, h, &mut None).expect("render");
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();

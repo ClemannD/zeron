@@ -12,3 +12,7 @@ zeron-visual.workspace = true
 wgpu = { version = "29", features = ["glsl"] }
 pollster = "0.4"
 tracing.workspace = true
+
+[dev-dependencies]
+# Test textures and environment maps.
+image = { version = "0.25.10", default-features = false, features = ["png"] }

@@ -18,6 +18,9 @@
 //! current frame, and a pass sees its own previous frame (feedback: trails,
 //! simulations, accumulation). `iChannelResolution[i]` is each channel's
 //! size, and `iNoise` is a tiling 256x256 texture of independent random RGBA.
+//!
+//! Image assets shipped with the visual (`textures = { "rock.jpg" }`) are
+//! `iTexture0`-`iTexture3`, repeating, with mipmaps.
 
 /// At most this many named inputs (four vec4 slots).
 pub const MAX_INPUTS: usize = 16;
@@ -25,6 +28,8 @@ pub const MAX_INPUTS: usize = 16;
 pub const MAX_SHADER_BYTES: usize = 64 * 1024;
 /// Buffer passes before the image pass.
 pub const MAX_BUFFERS: usize = 4;
+/// Image assets a shader may sample.
+pub const MAX_TEXTURES: usize = 4;
 
 /// How a shader's output sits on the chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -104,12 +109,20 @@ pub fn program(code: &str, inputs: &[String]) -> (String, usize) {
          layout(set = 0, binding = 5) uniform texture2D zeron_noise;\n\
          layout(set = 0, binding = 6) uniform sampler zeron_clamp;\n\
          layout(set = 0, binding = 7) uniform sampler zeron_repeat;\n\
+         layout(set = 0, binding = 8) uniform texture2D zeron_texture0;\n\
+         layout(set = 0, binding = 9) uniform texture2D zeron_texture1;\n\
+         layout(set = 0, binding = 10) uniform texture2D zeron_texture2;\n\
+         layout(set = 0, binding = 11) uniform texture2D zeron_texture3;\n\
          layout(location = 0) out vec4 zeron_color;\n\
          #define iChannel0 sampler2D(zeron_channel0, zeron_clamp)\n\
          #define iChannel1 sampler2D(zeron_channel1, zeron_clamp)\n\
          #define iChannel2 sampler2D(zeron_channel2, zeron_clamp)\n\
          #define iChannel3 sampler2D(zeron_channel3, zeron_clamp)\n\
          #define iNoise sampler2D(zeron_noise, zeron_repeat)\n\
+         #define iTexture0 sampler2D(zeron_texture0, zeron_repeat)\n\
+         #define iTexture1 sampler2D(zeron_texture1, zeron_repeat)\n\
+         #define iTexture2 sampler2D(zeron_texture2, zeron_repeat)\n\
+         #define iTexture3 sampler2D(zeron_texture3, zeron_repeat)\n\
          #define iResolution (zeron_resolution.xyz)\n\
          #define iTime (zeron_time.x)\n\
          #define iTimeDelta (zeron_time.y)\n\
@@ -117,7 +130,10 @@ pub fn program(code: &str, inputs: &[String]) -> (String, usize) {
     );
     for (i, name) in inputs.iter().enumerate().take(MAX_INPUTS) {
         let lane = ["x", "y", "z", "w"][i % 4];
-        header.push_str(&format!("#define {name} (zeron_inputs[{}].{lane})\n", i / 4));
+        header.push_str(&format!(
+            "#define {name} (zeron_inputs[{}].{lane})\n",
+            i / 4
+        ));
     }
     let lines = header.lines().count();
     // Shadertoy sources often carry an ES precision statement; GLSL 4.50
@@ -169,6 +185,10 @@ pub fn valid_input_name(name: &str) -> bool {
                 | "iChannel3"
                 | "iChannelResolution"
                 | "iNoise"
+                | "iTexture0"
+                | "iTexture1"
+                | "iTexture2"
+                | "iTexture3"
                 | "main"
         )
 }

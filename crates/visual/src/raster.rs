@@ -147,7 +147,15 @@ impl Scene {
         let bias = view.radius * 2e-3;
         let mut lines: Vec<[Sample; 3]> = Vec::new();
         for line in &self.lines {
-            line_tris(&grid, &view, line.a, line.b, line.width, rgba(line.color), &mut lines);
+            line_tris(
+                &grid,
+                &view,
+                line.a,
+                line.b,
+                line.width,
+                rgba(line.color),
+                &mut lines,
+            );
         }
         let (hints, labels) = self.annotations(camera, width, height);
         let mut dots = Vec::new();
@@ -607,8 +615,9 @@ fn resolve(grid: &Grid, color: &[[f32; 4]], width: usize, height: usize, ss: usi
                         if alpha <= 0.0 {
                             continue;
                         }
-                        let straight =
-                            |ch: usize| ((sum[ch] / n / alpha).clamp(0.0, 1.0) * 255.0).round() as u8;
+                        let straight = |ch: usize| {
+                            ((sum[ch] / n / alpha).clamp(0.0, 1.0) * 255.0).round() as u8
+                        };
                         let o = x * 4;
                         row[o] = straight(2);
                         row[o + 1] = straight(1);
@@ -655,8 +664,18 @@ mod tests {
     fn nearer_surfaces_hide_farther_ones_whatever_their_order() {
         for near_first in [true, false] {
             let mut s = Scene::default();
-            let far = [[-2., -2., -1.], [2., -2., -1.], [2., 2., -1.], [-2., 2., -1.]];
-            let near = [[-0.5, -0.5, 1.], [0.5, -0.5, 1.], [0.5, 0.5, 1.], [-0.5, 0.5, 1.]];
+            let far = [
+                [-2., -2., -1.],
+                [2., -2., -1.],
+                [2., 2., -1.],
+                [-2., 2., -1.],
+            ];
+            let near = [
+                [-0.5, -0.5, 1.],
+                [0.5, -0.5, 1.],
+                [0.5, 0.5, 1.],
+                [-0.5, 0.5, 1.],
+            ];
             let faces = [(near, 0), (far, 1)];
             let order: Vec<_> = if near_first {
                 faces.to_vec()
@@ -664,14 +683,25 @@ mod tests {
                 faces.iter().rev().copied().collect()
             };
             for (quad, chart) in order {
-                s.face(&quad, Color::token(Token::Chart(chart)), Some([0., 0., 1.]), true)
-                    .unwrap();
+                s.face(
+                    &quad,
+                    Color::token(Token::Chart(chart)),
+                    Some([0., 0., 1.]),
+                    true,
+                )
+                .unwrap();
             }
             let raster = s.render(camera(), 200.0, 200.0, 1.0, Quality::Draft, &colors);
             let center = pixel(&raster, 100, 100);
-            assert!(center[0] > 100 && center[2] < 60, "near red wins: {center:?}");
+            assert!(
+                center[0] > 100 && center[2] < 60,
+                "near red wins: {center:?}"
+            );
             let corner = pixel(&raster, 100, 30);
-            assert!(corner[2] > 100 && corner[0] < 60, "far blue shows around it: {corner:?}");
+            assert!(
+                corner[2] > 100 && corner[0] < 60,
+                "far blue shows around it: {corner:?}"
+            );
             // Nothing outside the geometry: transparent.
             assert_eq!(pixel(&raster, 1, 1)[3], 0);
         }
@@ -681,9 +711,19 @@ mod tests {
     fn faces_crossing_the_camera_are_clipped_not_dropped() {
         let mut s = Scene::default();
         // A long floor that runs from far away to behind the camera.
-        let floor = [[-1., -1., -40.], [1., -1., -40.], [1., -1., 40.], [-1., -1., 40.]];
-        s.face(&floor, Color::token(Token::Chart(0)), Some([0., 1., 0.]), true)
-            .unwrap();
+        let floor = [
+            [-1., -1., -40.],
+            [1., -1., -40.],
+            [1., -1., 40.],
+            [-1., -1., 40.],
+        ];
+        s.face(
+            &floor,
+            Color::token(Token::Chart(0)),
+            Some([0., 1., 0.]),
+            true,
+        )
+        .unwrap();
         // A marker the camera frames itself on, near the middle.
         s.face(
             &[[-0.2, 0., 0.], [0.2, 0., 0.], [0., 0.3, 0.]],
@@ -733,11 +773,24 @@ mod timing {
     fn timing_a_furnished_room() {
         let mut s = Scene::default();
         let quad = |s: &mut Scene, q: [V3; 4], c: u8| {
-            s.face(&q, Color::token(Token::Chart(c)), None, true).unwrap();
+            s.face(&q, Color::token(Token::Chart(c)), None, true)
+                .unwrap();
         };
-        quad(&mut s, [[-4., 0., -3.], [4., 0., -3.], [4., 0., 3.], [-4., 0., 3.]], 0);
-        quad(&mut s, [[-4., 0., -3.], [4., 0., -3.], [4., 3., -3.], [-4., 3., -3.]], 1);
-        quad(&mut s, [[-4., 0., -3.], [-4., 0., 3.], [-4., 3., 3.], [-4., 3., -3.]], 2);
+        quad(
+            &mut s,
+            [[-4., 0., -3.], [4., 0., -3.], [4., 0., 3.], [-4., 0., 3.]],
+            0,
+        );
+        quad(
+            &mut s,
+            [[-4., 0., -3.], [4., 0., -3.], [4., 3., -3.], [-4., 3., -3.]],
+            1,
+        );
+        quad(
+            &mut s,
+            [[-4., 0., -3.], [-4., 0., 3.], [-4., 3., 3.], [-4., 3., -3.]],
+            2,
+        );
         // Spheres stand in for plants and lamps: smooth, many faces.
         for k in 0..8 {
             let at = [-3.0 + k as f32 * 0.8, 0.6, 1.0];
@@ -747,16 +800,25 @@ mod timing {
                     let p = |i: u32, j: u32| {
                         let t = std::f32::consts::TAU * i as f32 / lon as f32;
                         let f = std::f32::consts::PI * j as f32 / lat as f32;
-                        [at[0] + 0.4 * f.sin() * t.cos(), at[1] + 0.4 * f.cos(), at[2] + 0.4 * f.sin() * t.sin()]
+                        [
+                            at[0] + 0.4 * f.sin() * t.cos(),
+                            at[1] + 0.4 * f.cos(),
+                            at[2] + 0.4 * f.sin() * t.sin(),
+                        ]
                     };
                     let q = [p(i, j), p(i + 1, j), p(i + 1, j + 1), p(i, j + 1)];
                     let n: Vec<V3> = q.iter().map(|c| sub(*c, at)).collect();
-                    s.smooth_face(&q, &n, Color::token(Token::Chart(3))).unwrap();
+                    s.smooth_face(&q, &n, Color::token(Token::Chart(3)))
+                        .unwrap();
                 }
             }
         }
         let colors = |_: Color| [0.6, 0.6, 0.6, 1.0];
-        let camera = Camera { yaw: 0.7, pitch: 0.4, zoom: 1.0 };
+        let camera = Camera {
+            yaw: 0.7,
+            pitch: 0.4,
+            zoom: 1.0,
+        };
         for quality in [Quality::Draft, Quality::Final] {
             let start = std::time::Instant::now();
             let raster = s.render(camera, 736.0, 420.0, 2.0, quality, &colors);

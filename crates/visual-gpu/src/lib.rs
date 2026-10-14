@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 mod scene;
 mod shader;
+mod textures;
 
 pub use scene::render_scene;
 pub use shader::{ShaderSpec, ShaderState, render_shader};
@@ -28,19 +29,47 @@ pub(crate) struct Gpu {
     pub(crate) queue: wgpu::Queue,
     pub(crate) shaders: OnceLock<shader::Pipelines>,
     pub(crate) scene: OnceLock<scene::Pipelines>,
+    pub(crate) textures: textures::Textures,
 }
 
 /// The shared device, made on first use; `None` without a usable adapter.
 pub(crate) fn gpu() -> Option<&'static Gpu> {
-    static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
-    GPU.get_or_init(|| match pollster::block_on(Gpu::new()) {
-        Ok(gpu) => Some(gpu),
-        Err(error) => {
-            tracing::warn!(%error, "visual GPU unavailable");
-            None
-        }
+    device().as_ref().ok()
+}
+
+fn device() -> &'static Result<Gpu, String> {
+    static GPU: OnceLock<Result<Gpu, String>> = OnceLock::new();
+    GPU.get_or_init(|| {
+        pollster::block_on(Gpu::new())
+            .inspect_err(|error| tracing::warn!(%error, "visual GPU unavailable"))
     })
-    .as_ref()
+}
+
+/// Run `f`, catching every error wgpu reports while it runs (validation,
+/// internal, out of memory) as this call's error.
+pub(crate) fn guarded<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Result<T, String> {
+    let scopes = [
+        wgpu::ErrorFilter::OutOfMemory,
+        wgpu::ErrorFilter::Internal,
+        wgpu::ErrorFilter::Validation,
+    ]
+    .map(|filter| device.push_error_scope(filter));
+    let out = f();
+    let mut error = None;
+    for scope in scopes.into_iter().rev() {
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            error.get_or_insert_with(|| e.to_string());
+        }
+    }
+    match error {
+        Some(error) => Err(error),
+        None => Ok(out),
+    }
+}
+
+/// Why visuals can't use the GPU here, if they can't.
+pub fn unavailable_reason() -> Option<String> {
+    device().as_ref().err().cloned()
 }
 
 /// Whether visuals can render on the GPU here.
@@ -50,6 +79,23 @@ pub fn available() -> bool {
 
 /// The target every visual renders into before readback.
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// WGSL for the final passes: how much of a pixel survives near the frame's
+/// edges, so light running off a visual fades out instead of stopping at a
+/// hard line. The ramp is 15% of the shorter side, eased at both ends
+/// (smootherstep) so neither the start nor the end of the fade shows.
+pub(crate) const EDGE_FADE: &str = r#"
+fn edge_ease(d: f32, width: f32) -> f32 {
+    let t = clamp(d / width, 0.0, 1.0);
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn edge_fade(pixel: vec2<f32>, size: vec2<f32>) -> f32 {
+    let width = max(0.15 * min(size.x, size.y), 1.0);
+    let d = min(pixel, size - pixel);
+    return edge_ease(d.x, width) * edge_ease(d.y, width);
+}
+"#;
 
 impl Gpu {
     async fn new() -> Result<Self, String> {
@@ -71,19 +117,29 @@ impl Gpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("zeron visuals"),
+                // What this adapter has, not wgpu's defaults: some devices
+                // (the iOS simulator) fall short of a default limit the
+                // renderers never come near.
+                required_limits: adapter.limits(),
                 ..Default::default()
             })
             .await
             .map_err(|e| e.to_string())?;
+        // wgpu panics on an error nothing catches; a visual's mistake (or a
+        // lost device) must cost that visual, not the app.
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            tracing::warn!(%error, "visual GPU error");
+        }));
         Ok(Self {
             device,
             queue,
             shaders: OnceLock::new(),
             scene: OnceLock::new(),
+            textures: Default::default(),
         })
     }
 
-/// Read a rendered texture back as straight-alpha BGRA.
+    /// Read a rendered texture back as straight-alpha BGRA.
     pub(crate) fn read_back(
         &self,
         mut encoder: wgpu::CommandEncoder,

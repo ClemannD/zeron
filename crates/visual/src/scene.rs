@@ -5,13 +5,16 @@
 //! other vector shape, so a 3D view stays transparent over glass and uses the
 //! theme's colors.
 
+use std::sync::Arc;
+
 use mlua::{Function, Table, UserData, UserDataMethods, Value};
 
 use crate::draw::lua_error;
 use crate::node::{parse_color, value_text};
 use crate::style::{Color, TextSize, Token};
 
-pub const MAX_FACES: usize = 30_000;
+/// Faces a scene may draw (glTF models bring many).
+pub const MAX_FACES: usize = 500_000;
 const MAX_ITEMS: usize = 20_000;
 
 pub type V3 = [f32; 3];
@@ -30,6 +33,76 @@ pub(crate) struct Face {
     /// and meshes light both sides.
     pub(crate) two_sided: bool,
     pub(crate) material: Material,
+    /// Texture coordinates per corner, for a textured face.
+    pub(crate) uvs: Option<[[f32; 2]; 4]>,
+    /// Index into the scene's textures.
+    pub(crate) texture: Option<u32>,
+}
+
+/// An image a scene samples: an asset still encoded (PNG, JPEG, HDR), or
+/// pixels a model brought already decoded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextureData {
+    Encoded(Arc<[u8]>),
+    Rgba {
+        width: u32,
+        height: u32,
+        pixels: Arc<[u8]>,
+    },
+}
+
+/// One texture a scene uses; `key` names it stably across frames (so a
+/// renderer decodes and uploads it once).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextureSource {
+    pub key: String,
+    pub data: TextureData,
+}
+
+/// An environment map: an equirectangular image the scene reflects and
+/// glass shows when nothing stands behind it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Environment {
+    pub texture: u32,
+    pub intensity: f32,
+    /// Whether the scene stands in front of the map (else the chat shows
+    /// behind it, and the map only lights and reflects).
+    pub background: bool,
+}
+
+/// A camera-facing image (a flare, a glint, a soft glow), drawn as added
+/// light.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sprite {
+    pub at: V3,
+    /// Pixels across.
+    pub size: f32,
+    pub texture: Option<u32>,
+    pub color: Color,
+    pub glow: f32,
+}
+
+/// The degrees `{x, y, z}` (or one number, about y) as a rotation, applied
+/// about x, then y, then z.
+fn rotation_of(value: Value) -> mlua::Result<[V3; 3]> {
+    let [x, y, z] = match value {
+        Value::Nil => return Ok([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        Value::Integer(n) => [0.0, n as f32, 0.0],
+        Value::Number(n) => [0.0, n as f32, 0.0],
+        other => v3(other, "rotate")?,
+    }
+    .map(f32::to_radians);
+    let (sx, cx, sy, cy, sz, cz) = (x.sin(), x.cos(), y.sin(), y.cos(), z.sin(), z.cos());
+    // Rows of Rz * Ry * Rx.
+    Ok([
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ])
+}
+
+fn rotate(m: &[V3; 3], v: V3) -> V3 {
+    [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
 }
 
 /// How a surface takes light. `glass` lets light through (refracting by
@@ -70,6 +143,8 @@ pub struct FaceView<'a> {
     pub color: Color,
     pub two_sided: bool,
     pub material: Material,
+    pub uvs: Option<&'a [[f32; 2]]>,
+    pub texture: Option<u32>,
 }
 
 /// The framed orbit camera, for a renderer that does its own projection.
@@ -122,6 +197,12 @@ pub struct Scene {
     pub time: f64,
     /// The material the primitive being added gives its faces.
     pub(crate) material: Material,
+    /// The texture the primitive being added gives its faces.
+    pub(crate) texture: Option<u32>,
+    pub(crate) textures: Vec<TextureSource>,
+    pub(crate) environment: Option<Environment>,
+    pub(crate) sprites: Vec<Sprite>,
+    pub(crate) assets: crate::assets::Assets,
 }
 
 /// The camera a scene is seen through: framed on its geometry and orbited.
@@ -237,6 +318,68 @@ impl Scene {
         }
     }
 
+    /// A scene whose draw may use `assets` (textures, models).
+    pub fn with_assets(time: f64, assets: crate::assets::Assets) -> Self {
+        Self {
+            time,
+            assets,
+            ..Default::default()
+        }
+    }
+
+    /// The texture keyed `key`, registered once; its index.
+    fn texture_index(&mut self, key: String, data: impl FnOnce() -> TextureData) -> u32 {
+        if let Some(i) = self.textures.iter().position(|t| t.key == key) {
+            return i as u32;
+        }
+        self.textures.push(TextureSource { key, data: data() });
+        (self.textures.len() - 1) as u32
+    }
+
+    /// The asset `name` as a texture.
+    fn asset_texture(&mut self, name: &str) -> mlua::Result<u32> {
+        let bytes = self.assets.require(name).map_err(lua_error)?;
+        Ok(self.texture_index(format!("asset:{name}"), || TextureData::Encoded(bytes)))
+    }
+
+    /// The asset `name` parsed as a glTF model, once per visual.
+    fn model(&self, name: &str) -> mlua::Result<Arc<crate::model::Model>> {
+        let bytes = self.assets.require(name).map_err(lua_error)?;
+        let mut models = self
+            .assets
+            .models
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(model) = models.get(name) {
+            return Ok(model.clone());
+        }
+        let model = crate::model::parse_shared(&bytes)
+            .map_err(|e| lua_error(format!("model '{name}': {e}")))?;
+        models.insert(name.to_owned(), model.clone());
+        Ok(model)
+    }
+
+    /// Give the face just added its texture coordinates.
+    fn uv_last(&mut self, uvs: &[[f32; 2]]) {
+        if let Some(face) = self.faces.last_mut() {
+            let mut out = [[0.0; 2]; 4];
+            out[..uvs.len().min(4)].copy_from_slice(&uvs[..uvs.len().min(4)]);
+            face.uvs = Some(out);
+        }
+    }
+
+    pub fn textures(&self) -> &[TextureSource] {
+        &self.textures
+    }
+
+    pub fn environment(&self) -> Option<Environment> {
+        self.environment
+    }
+
+    pub fn sprites(&self) -> &[Sprite] {
+        &self.sprites
+    }
+
     pub(crate) fn face(
         &mut self,
         corners: &[V3],
@@ -278,12 +421,19 @@ impl Scene {
             color,
             two_sided,
             material: self.material,
+            uvs: None,
+            texture: self.texture,
         });
         Ok(())
     }
 
     /// A face of a curved solid, shaded from the surface's own normals.
-    pub(crate) fn smooth_face(&mut self, corners: &[V3], normals: &[V3], color: Color) -> mlua::Result<()> {
+    pub(crate) fn smooth_face(
+        &mut self,
+        corners: &[V3],
+        normals: &[V3],
+        color: Color,
+    ) -> mlua::Result<()> {
         let outward = normals.iter().fold([0.0; 3], |acc, n| add(acc, *n));
         self.face(corners, color, Some(outward), false)?;
         let mut n = [[0.0; 3]; 4];
@@ -321,7 +471,7 @@ impl Scene {
     }
 
     fn items(&self) -> usize {
-        self.lines.len() + self.points.len() + self.labels.len()
+        self.lines.len() + self.points.len() + self.labels.len() + self.sprites.len()
     }
 
     fn check_items(&self) -> mlua::Result<()> {
@@ -440,6 +590,8 @@ impl Scene {
             color: f.color,
             two_sided: f.two_sided,
             material: f.material,
+            uvs: f.uvs.as_ref().map(|uv| &uv[..f.n as usize]),
+            texture: f.texture,
         })
     }
 
@@ -563,7 +715,11 @@ fn v3(value: Value, what: &str) -> mlua::Result<V3> {
 /// A primitive's material options: roughness, metal, glow, glass (true or
 /// 0-1), ior, dispersion.
 fn material_of(options: &Table) -> mlua::Result<Material> {
-    let mut m = Material::default();
+    material_over(Material::default(), options)
+}
+
+/// `base` with whichever material options `options` sets.
+fn material_over(mut m: Material, options: &Table) -> mlua::Result<Material> {
     let number = |key: &str| options.raw_get::<Option<f32>>(key);
     if let Some(v) = number("roughness")? {
         m.roughness = v.clamp(0.02, 1.0);
@@ -592,10 +748,37 @@ fn material_of(options: &Table) -> mlua::Result<Material> {
     Ok(m)
 }
 
+/// A primitive's `texture = "asset name"`, registered with the scene.
+fn texture_of(scene: &mut Scene, options: &Table) -> mlua::Result<Option<u32>> {
+    match options.raw_get::<Option<String>>("texture")? {
+        Some(name) => scene.asset_texture(&name).map(Some),
+        None => Ok(None),
+    }
+}
+
 fn color_of(options: &Table, default: Token) -> mlua::Result<Color> {
-    Ok(parse_color(options.raw_get::<Value>("color")?)
-        .map_err(|e| lua_error(e.to_string()))?
-        .unwrap_or(Color::token(default)))
+    Ok(scene_color(options.raw_get::<Value>("color")?)?.unwrap_or(Color::token(default)))
+}
+
+/// A scene color: a theme token like everywhere else, or, for physical
+/// materials, `"#rrggbb"`.
+pub(crate) fn scene_color(value: Value) -> mlua::Result<Option<Color>> {
+    if let Value::String(s) = &value {
+        let text = s.to_string_lossy();
+        if let Some(hex) = text.strip_prefix('#') {
+            let rgb = match hex.len() {
+                6 => u32::from_str_radix(hex, 16).ok(),
+                3 => u32::from_str_radix(hex, 16).ok().map(|v| {
+                    let (r, g, b) = ((v >> 8) & 0xf, (v >> 4) & 0xf, v & 0xf);
+                    ((r * 17) << 16) | ((g * 17) << 8) | (b * 17)
+                }),
+                _ => None,
+            }
+            .ok_or_else(|| lua_error(format!("'{text}' is not a #rrggbb color")))?;
+            return Ok(Some(Color::token(Token::Rgb(rgb))));
+        }
+    }
+    parse_color(value).map_err(|e| lua_error(e.to_string()))
 }
 
 /// A ramp through `colors` (a list of tokens) at `t` in 0..1.
@@ -636,6 +819,7 @@ impl UserData for Scene {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("box", |_, s, o: Table| {
             s.material = material_of(&o)?;
+            s.texture = texture_of(s, &o)?;
             let at = v3(o.raw_get("at")?, "box at")?;
             let size = match o.raw_get::<Value>("size")? {
                 Value::Nil => [1.0; 3],
@@ -706,11 +890,13 @@ impl UserData for Scene {
             ];
             for (quad, outward) in quads {
                 s.face(&quad, color, Some(outward), false)?;
+                s.uv_last(&[[0., 1.], [1., 1.], [1., 0.], [0., 0.]]);
             }
             Ok(())
         });
         methods.add_method_mut("sphere", |_, s, o: Table| {
             s.material = material_of(&o)?;
+            s.texture = texture_of(s, &o)?;
             let at = v3(o.raw_get("at")?, "sphere at")?;
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let color = color_of(&o, Token::Accent)?;
@@ -740,12 +926,22 @@ impl UserData for Scene {
                     };
                     let normals: Vec<V3> = corners.iter().map(|c| sub(*c, at)).collect();
                     s.smooth_face(&corners, &normals, color)?;
+                    let uv = |i: u32, j: u32| [i as f32 / lon as f32, j as f32 / lat as f32];
+                    let uvq = [uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)];
+                    if j == 0 {
+                        s.uv_last(&[uvq[0], uvq[2], uvq[3]]);
+                    } else if j == lat - 1 {
+                        s.uv_last(&[uvq[0], uvq[1], uvq[2]]);
+                    } else {
+                        s.uv_last(&uvq);
+                    }
                 }
             }
             Ok(())
         });
         methods.add_method_mut("cylinder", |_, s, o: Table| {
             s.material = material_of(&o)?;
+            s.texture = texture_of(s, &o)?;
             let at = v3(o.raw_get("at")?, "cylinder at")?;
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let h = o.raw_get::<Option<f32>>("height")?.unwrap_or(1.0);
@@ -765,7 +961,10 @@ impl UserData for Scene {
                     .map(|c| [c[0] - at[0], 0.0, c[2] - at[2]])
                     .collect();
                 s.smooth_face(&quad, &normals, color)?;
+                let (u0, u1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+                s.uv_last(&[[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]]);
             }
+            s.texture = None;
             let top: Vec<V3> = (0..n).map(|i| ring(i, h)).collect();
             let bottom: Vec<V3> = (0..n).map(|i| ring(i, 0.0)).collect();
             s.polygon(&top, color, Some([0.0, h.signum(), 0.0]), false)?;
@@ -774,6 +973,7 @@ impl UserData for Scene {
         // A height field: y = f(x, z) over a grid, or `values` rows.
         methods.add_method_mut("surface", |_, s, o: Table| {
             s.material = material_of(&o)?;
+            s.texture = texture_of(s, &o)?;
             let range = |key: &str| -> mlua::Result<(f32, f32)> {
                 match o.raw_get::<Option<Table>>(key)? {
                     Some(t) => Ok((t.raw_get::<f32>(1)?, t.raw_get::<f32>(2)?)),
@@ -848,6 +1048,15 @@ impl UserData for Scene {
                         }
                     } else {
                         s.face(&quad, color, Some([0.0, 1.0, 0.0]), true)?;
+                        let (u0, u1) = (
+                            i as f32 / (cols - 1) as f32,
+                            (i + 1) as f32 / (cols - 1) as f32,
+                        );
+                        let (v0, v1) = (
+                            j as f32 / (rows - 1) as f32,
+                            (j + 1) as f32 / (rows - 1) as f32,
+                        );
+                        s.uv_last(&[[u0, v0], [u1, v0], [u1, v1], [u0, v1]]);
                     }
                 }
             }
@@ -855,24 +1064,51 @@ impl UserData for Scene {
         });
         methods.add_method_mut("mesh", |_, s, o: Table| {
             s.material = material_of(&o)?;
+            s.texture = texture_of(s, &o)?;
             let color = color_of(&o, Token::Accent)?;
             let vertices: Vec<V3> = o
                 .raw_get::<Table>("vertices")?
                 .sequence_values::<Value>()
                 .map(|v| v.and_then(|v| v3(v, "mesh vertex")))
                 .collect::<mlua::Result<_>>()?;
+            let uvs: Option<Vec<[f32; 2]>> = match o.raw_get::<Option<Table>>("uvs")? {
+                Some(list) => Some(
+                    list.sequence_values::<Table>()
+                        .map(|uv| {
+                            let uv = uv?;
+                            Ok([uv.raw_get::<f32>(1)?, uv.raw_get::<f32>(2)?])
+                        })
+                        .collect::<mlua::Result<_>>()?,
+                ),
+                None => None,
+            };
             for face in o.raw_get::<Table>("faces")?.sequence_values::<Table>() {
-                let corners: Vec<V3> = face?
+                let indices: Vec<usize> = face?
                     .sequence_values::<usize>()
-                    .map(|i| {
-                        i.and_then(|i| {
-                            vertices.get(i.wrapping_sub(1)).copied().ok_or_else(|| {
-                                lua_error(format!("mesh face index {i} is out of range"))
-                            })
+                    .collect::<mlua::Result<_>>()?;
+                let corners: Vec<V3> = indices
+                    .iter()
+                    .map(|&i| {
+                        vertices.get(i.wrapping_sub(1)).copied().ok_or_else(|| {
+                            lua_error(format!("mesh face index {i} is out of range"))
                         })
                     })
                     .collect::<mlua::Result<_>>()?;
-                s.polygon(&corners, color, None, true)?;
+                match &uvs {
+                    Some(uvs) if corners.len() >= 3 => {
+                        let uv = |i: usize| {
+                            uvs.get(indices[i].wrapping_sub(1))
+                                .copied()
+                                .unwrap_or([0.0; 2])
+                        };
+                        // Fan it, so every triangle keeps its own coordinates.
+                        for k in 1..corners.len() - 1 {
+                            s.face(&[corners[0], corners[k], corners[k + 1]], color, None, true)?;
+                            s.uv_last(&[uv(0), uv(k), uv(k + 1)]);
+                        }
+                    }
+                    _ => s.polygon(&corners, color, None, true)?,
+                }
             }
             Ok(())
         });
@@ -967,6 +1203,134 @@ impl UserData for Scene {
                 Ok(())
             },
         );
+        // A glTF model from the visual's assets: placed at `at`, turned by
+        // `rotate` (degrees), scaled by `scale`, or centered and sized so its
+        // longest side is `fit`. Its own materials and textures apply; any
+        // material option or `color` given here overrides them.
+        methods.add_method_mut("model", |_, s, o: Table| {
+            let name = o
+                .raw_get::<Option<String>>("asset")?
+                .ok_or_else(|| lua_error("s:model needs asset = \"name.glb\""))?;
+            let model = s.model(&name)?;
+            let at = match o.raw_get::<Value>("at")? {
+                Value::Nil => [0.0; 3],
+                other => v3(other, "model at")?,
+            };
+            let mut size = match o.raw_get::<Value>("scale")? {
+                Value::Nil => [1.0; 3],
+                Value::Integer(n) => [n as f32; 3],
+                Value::Number(n) => [n as f32; 3],
+                other => v3(other, "model scale")?,
+            };
+            let (lo, hi) = model.bounds;
+            let mut origin = [0.0; 3];
+            if let Some(fit) = o.raw_get::<Option<f32>>("fit")? {
+                let extent = (0..3).map(|i| hi[i] - lo[i]).fold(1e-6f32, f32::max);
+                size = scale(size, fit.abs() / extent);
+                origin = scale(add(lo, hi), 0.5);
+            }
+            let turn = rotation_of(o.raw_get("rotate")?)?;
+            let color = scene_color(o.raw_get::<Value>("color")?)?;
+            let texture = texture_of(s, &o)?;
+            let place = |p: V3| {
+                let p = sub(p, origin);
+                add(
+                    at,
+                    rotate(&turn, [p[0] * size[0], p[1] * size[1], p[2] * size[2]]),
+                )
+            };
+            // Normals scale inversely, so a squashed model still shades right.
+            let orient = |n: V3| {
+                rotate(
+                    &turn,
+                    normalize([n[0] / size[0], n[1] / size[1], n[2] / size[2]]),
+                )
+            };
+            let mut images: Vec<Option<u32>> = vec![None; model.images.len()];
+            for tri in &model.triangles {
+                let source = &model.materials[tri.material];
+                s.material = material_over(source.material, &o)?;
+                s.texture = texture.or_else(|| {
+                    let image = source.texture.filter(|i| *i < images.len())?;
+                    Some(*images[image].get_or_insert_with(|| {
+                        let data = model.images[image].clone();
+                        s.texture_index(format!("model:{name}:{image}"), || data)
+                    }))
+                });
+                if tri.uvs.is_none() {
+                    s.texture = None;
+                }
+                let color = color.unwrap_or(Color {
+                    token: Token::Rgb(source.rgb),
+                    mix: None,
+                    alpha: source.alpha,
+                });
+                let corners = tri.positions.map(place);
+                match tri.normals {
+                    Some(normals) => s.smooth_face(&corners, &normals.map(orient), color)?,
+                    None => s.face(&corners, color, None, source.double_sided)?,
+                }
+                if let Some(face) = s.faces.last_mut() {
+                    face.two_sided = source.double_sided;
+                }
+                if let Some(uvs) = tri.uvs {
+                    s.uv_last(&uvs);
+                }
+            }
+            s.texture = None;
+            Ok(())
+        });
+        // An environment map (an equirectangular image asset, ideally HDR):
+        // what metal and glass reflect, and the light around the scene.
+        methods.add_method_mut("environment", |_, s, o: Table| {
+            let name = o
+                .raw_get::<Option<String>>("asset")?
+                .ok_or_else(|| lua_error("s:environment needs asset = \"name.hdr\""))?;
+            let texture = s.asset_texture(&name)?;
+            s.environment = Some(Environment {
+                texture,
+                intensity: o
+                    .raw_get::<Option<f32>>("intensity")?
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 16.0),
+                background: o.raw_get::<Option<bool>>("background")?.unwrap_or(false),
+            });
+            Ok(())
+        });
+        // A camera-facing glow (a flare, a glint), `size` pixels across: an
+        // image asset, or a soft round light without one.
+        methods.add_method_mut("sprite", |_, s, (at, o): (Value, Option<Table>)| {
+            s.check_items()?;
+            let (at, o) = options_form(at, o)?;
+            let at = v3(at, "sprite")?;
+            let sprite = match o {
+                Some(o) => Sprite {
+                    at,
+                    size: o
+                        .raw_get::<Option<f32>>("size")?
+                        .unwrap_or(48.0)
+                        .clamp(1.0, 2048.0),
+                    texture: texture_of(s, &o)?.or(match o.raw_get::<Option<String>>("asset")? {
+                        Some(name) => Some(s.asset_texture(&name)?),
+                        None => None,
+                    }),
+                    color: color_of(&o, Token::Accent)?,
+                    glow: o
+                        .raw_get::<Option<f32>>("glow")?
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 16.0),
+                },
+                None => Sprite {
+                    at,
+                    size: 48.0,
+                    texture: None,
+                    color: Color::token(Token::Accent),
+                    glow: 1.0,
+                },
+            };
+            s.sprites.push(sprite);
+            Ok(())
+        });
         // A floor grid on y = 0 in hairlines.
         methods.add_method_mut("grid", |_, s, o: Option<Table>| {
             let (size, step, y) = match &o {

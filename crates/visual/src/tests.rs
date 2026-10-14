@@ -337,3 +337,105 @@ fn shaders_default_to_light_and_keep_the_old_transparent_flag() {
     assert_eq!(blend_of("transparent = false,"), Blend::Opaque);
     assert_eq!(blend_of("blend = \"opaque\","), Blend::Opaque);
 }
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    ::image::RgbaImage::from_fn(width, height, |x, y| {
+        ::image::Rgba([(x * 30) as u8, (y * 30) as u8, 200, 255])
+    })
+    .write_to(
+        &mut std::io::Cursor::new(&mut out),
+        ::image::ImageFormat::Png,
+    )
+    .unwrap();
+    out
+}
+
+#[test]
+fn scenes_place_models_textures_environments_and_sprites_from_assets() {
+    let assets = Assets::new(
+        [
+            (
+                "tri.glb".to_owned(),
+                crate::model::tests::triangle_glb().into(),
+            ),
+            ("wood.png".to_owned(), png(4, 4).into()),
+            ("sky.png".to_owned(), png(8, 4).into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let source = r##"
+        return ui.scene { height = 300, draw = function(s)
+          s:environment { asset = "sky.png", intensity = 1.5 }
+          s:model { asset = "tri.glb", fit = 1, rotate = { 0, 90, 0 } }
+          s:model { asset = "tri.glb", at = { 3, 0, 0 }, color = "#00ff00", metal = 1 }
+          s:box { at = { 0, -1, 0 }, texture = "wood.png" }
+          s:sprite { at = { 0, 2, 0 }, size = 64, color = "#ffeedd", glow = 2 }
+        end }
+    "##;
+    let mut visual = Visual::load(source, 1).unwrap().with_assets(assets.clone());
+    let tree = visual.render().unwrap();
+    let NodeKind::Scene(node) = &tree.kind else {
+        panic!()
+    };
+    let scene = visual.draw_scene(node.draw, 0.0).unwrap();
+    assert_eq!(scene.face_count(), 2 + 6);
+    assert_eq!(scene.textures().len(), 2);
+    assert_eq!(scene.environment().map(|e| e.intensity), Some(1.5));
+    assert_eq!(scene.sprites().len(), 1);
+    let faces: Vec<FaceView> = scene.face_views().collect();
+    // `fit` centers the model and sizes its longest side; the rotation turns
+    // the triangle's plane from z = 0 onto x = 0.
+    let fitted = &faces[0];
+    for corner in fitted.corners {
+        assert!(corner[0].abs() < 1e-5, "{corner:?}");
+        assert!(corner[1].abs() <= 0.5 + 1e-5 && corner[2].abs() <= 0.5 + 1e-5);
+    }
+    assert_eq!(fitted.color.token, Token::Rgb(0xff0000));
+    assert!(fitted.two_sided);
+    assert_eq!(faces[1].color.token, Token::Rgb(0x00ff00));
+    assert_eq!(faces[1].material.metalness, 1.0);
+    assert_eq!(faces[1].material.roughness, 0.25);
+    let boxed = &faces[2];
+    assert_eq!(boxed.texture, Some(1));
+    assert_eq!(boxed.uvs.map(|uv| uv.len()), Some(4));
+    // The model is parsed once per visual, however often the scene draws.
+    visual.draw_scene(node.draw, 1.0).unwrap();
+    assert_eq!(assets.models.lock().unwrap().len(), 1);
+    check_with_assets(source, 1, assets).unwrap();
+}
+
+#[test]
+fn missing_and_broken_assets_fail_the_check_with_their_names() {
+    let script =
+        |body: &str| format!("return ui.scene {{ height = 200, draw = function(s) {body} end }}");
+    let error = check(&script(r#"s:model { asset = "prism.glb" }"#), 1).unwrap_err();
+    assert!(
+        error.message.contains("no asset named 'prism.glb'"),
+        "{}",
+        error.message
+    );
+    let assets = Assets::new(
+        [
+            ("bad.png".to_owned(), b"nope".to_vec().into()),
+            ("bad.glb".to_owned(), b"nope".to_vec().into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let error = check_with_assets(
+        &script(r#"s:box { at = {0,0,0}, texture = "bad.png" }"#),
+        1,
+        assets.clone(),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("bad.png"), "{}", error.message);
+    let error =
+        check_with_assets(&script(r#"s:model { asset = "bad.glb" }"#), 1, assets).unwrap_err();
+    assert!(
+        error.message.contains("model 'bad.glb'"),
+        "{}",
+        error.message
+    );
+}

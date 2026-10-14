@@ -419,6 +419,27 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
 /// script Zeron runs in a sandbox and renders natively.
 pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
 pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+/// Files a visual may ship with (models, textures, environment maps).
+pub const VISUAL_MAX_ASSETS: usize = 16;
+pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
+pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
+
+// The MCP server sends a visual to the engine in one WebSocket message, its
+// assets base64-encoded; that message must fit the engine's 16 MiB frame
+// (tungstenite's default), with room for the script escaped as JSON.
+const _: () = assert!(
+    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
+);
+
+/// Whether `name` can name a visual's asset: a plain file name.
+pub fn valid_visual_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
 
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and

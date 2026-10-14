@@ -57,6 +57,9 @@ pub struct Graphics {
     pub time: f64,
     pub pointer: Option<Pointer>,
     pub commands: Vec<DrawCmd>,
+    /// The draw function looked at `pointer`: a touch host lets such a
+    /// canvas take drags instead of scrolling past it.
+    pub read_pointer: std::cell::Cell<bool>,
     points: usize,
 }
 
@@ -68,6 +71,7 @@ impl Graphics {
             time,
             pointer,
             commands: Vec::new(),
+            read_pointer: std::cell::Cell::new(false),
             points: 0,
         }
     }
@@ -244,15 +248,18 @@ impl UserData for Graphics {
         fields.add_field_method_get("width", |_, g| Ok(g.width));
         fields.add_field_method_get("height", |_, g| Ok(g.height));
         fields.add_field_method_get("time", |_, g| Ok(g.time));
-        fields.add_field_method_get("pointer", |lua, g| match g.pointer {
-            Some(p) => {
-                let t = lua.create_table()?;
-                t.set("x", p.x)?;
-                t.set("y", p.y)?;
-                t.set("down", p.down)?;
-                Ok(Value::Table(t))
+        fields.add_field_method_get("pointer", |lua, g| {
+            g.read_pointer.set(true);
+            match g.pointer {
+                Some(p) => {
+                    let t = lua.create_table()?;
+                    t.set("x", p.x)?;
+                    t.set("y", p.y)?;
+                    t.set("down", p.down)?;
+                    Ok(Value::Table(t))
+                }
+                None => Ok(Value::Nil),
             }
-            None => Ok(Value::Nil),
         });
     }
 

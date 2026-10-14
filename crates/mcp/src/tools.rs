@@ -235,7 +235,12 @@ fn catalog() -> Vec<ToolDef> {
                     "type": "string",
                     "description": "The Luau visual script: setup at the top level, ending with `return function() return ui.column { ... } end`."
                 },
-                "title": { "type": "string", "description": "Short name for the visual." }
+                "title": { "type": "string", "description": "Short name for the visual." },
+                "assets": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Files the script uses, by the name it uses them: { \"prism.glb\": \"models/prism.glb\", \"sky.hdr\": \"/tmp/sky.hdr\" }. Paths are on this machine, relative to your working directory. glTF models (.glb, or .gltf with everything embedded), PNG, JPEG, WebP, and Radiance .hdr images; at most 16 files, 8 MB each, 10 MB together."
+                }
             },
             "required": ["script", "title"]
         }),
@@ -319,14 +324,27 @@ f = function(x, z) return y end or values = { { ... } }, detail = 32, colors = {
 (a ramp by height), wire = bool }, s:mesh { vertices = { { x, y, z }, ... }, faces = { { 1, 2, 3 }, ... }, \
 color }, s:line(a, b, { color, width }), s:path(points, { color, width }), s:point(at, { radius, \
 color, hint = \"shown on hover\" }), s:label(at, text, { color, size }), s:grid { size = 10, step = 1 }, \
-s:axes { size = 1, labels = { \"x\", \"y\", \"z\" } }.\n\
+s:axes { size = 1, labels = { \"x\", \"y\", \"z\" } }. Physical colors may be \"#rrggbb\" in scenes \
+(a material's own color: gold, glass, wood), and only there.\n\
+- Assets: pass real files in show_visual's assets (name -> path) and scripts use them by name. \
+s:model { asset = \"prism.glb\", at, rotate = { x, y, z } degrees, scale, fit = 2 (center it and size \
+its longest side), color and material props override the model's own } draws a glTF model with its \
+materials and textures. Solids take texture = \"wood.jpg\" (multiplied by color; mesh takes uvs = { { u, v \
+}, ... } per vertex). s:environment { asset = \"studio.hdr\", intensity = 1, background = false } lights \
+the scene from an equirectangular image (an HDR is best) that metal and glass reflect and glass bends; \
+background = true also draws it behind the scene. s:sprite { at, size = 48 (pixels), color, glow = 1, \
+asset = \"flare.png\" } adds a camera-facing light (a flare or glint; a soft round glow without an \
+asset) that blooms. ui.shader takes textures = { \"rock.jpg\", ... } as iTexture0-iTexture3 \
+(repeating, mipmapped). Find or make assets with your own tools (download, convert KTX2 or EXR to PNG \
+or HDR) before calling.\n\
 - ui.shader { height = 360, code = [[ GLSL ]], buffers = { [[ GLSL ]], ... }, inputs = { speed = \
 s.speed }, blend = \"alpha|light|opaque\", bloom = 0-3, orbit = bool, spin, camera = { yaw, pitch, \
 zoom }, animate = true }: GPU shaders for what geometry can't express: raymarched SDFs and \
 fractals, light and optics (beams, refraction, dispersion), volumes, fluids, particles, generative \
 art. Write each pass as on Shadertoy: void mainImage(out vec4 fragColor, in vec2 fragCoord), with \
-iResolution (vec3, pixels), iTime, iTimeDelta, iFrame, iMouse (pixels from the bottom-left; xy while \
-pressed, zw where pressed), iCamera (vec4 yaw, pitch, zoom, 0; orbit = true lets the reader drag \
+iResolution (vec3: width and height in pixels, then the display's pixel density), iTime, \
+iTimeDelta, iFrame, iMouse (pixels from the bottom-left; xy where the pointer is, zw where it went \
+down while it's held, negative otherwise), iCamera (vec4 yaw, pitch, zoom, 0; orbit = true lets the reader drag \
 it), every inputs name as a float (bind them to state so sliders and toggles drive the shader), \
 iNoise (a tiling 256x256 random RGBA texture), and iChannel0-iChannel3 with iChannelResolution: \
 buffers run first, in order, each into a float texture that every pass reads as iChannel<i> (an \
@@ -336,13 +354,16 @@ background, vignette, or floor color. By default (blend = \"light\") the output 
 brightness is opacity and black is clear, right for beams, glows, sparks, and light through glass. \
 For solid shaded objects (fractals, SDF bodies) set blend = \"alpha\" and write alpha 0 where the ray \
 misses. bloom = 0.6-1.5 adds a soft glow around bright light. \
+The width varies with the reader (a phone is about 350px wide, often narrower than the shader is \
+tall): scale the scene by min(iResolution.x, iResolution.y), not one axis, and keep the subject \
+centered with room on both sides, so it fits and stays centered at any aspect. \
 GLSL errors come back with the pass and line number.\n\
 - Helpers: ui.scale(d0, d1, r0, r1) returns a mapping function; ui.ticks(lo, hi, n); ui.fmt(n, { unit, \
 prefix, decimals }) groups digits; ui.map(list, function(v, i) end); ui.range(a, b, step); ui.clamp; \
 ui.lerp; ui.series(i) is \"chart<i>\"; ui.color(token, alpha); ui.mix(a, b, t). print(...) output comes \
 back to you.\n\
 \n\
-Colors are theme tokens, never hex or color names: text; muted (labels, axes, captions); faint \
+Colors are theme tokens, never hex or color names (except scene materials): text; muted (labels, axes, captions); faint \
 (tertiary notes); accent (the one thing to notice); on-accent (text on an accent mark); success, \
 warning, danger (status only); border (hairlines, gridlines); chart1, chart2, chart3, chart4, \
 chart5, chart6 (series, in order; \
@@ -358,12 +379,82 @@ notes, lg and xl for headings, 2xl for a headline figure. The width is the reply
 as narrow as 360px), so lay out fluidly with grow, wrap, and grid, and give charts, canvases, and \
 scenes heights of 160-420px.";
 
+/// Read `show_visual`'s asset files (paths relative to the agent's working
+/// directory), base64-encoded by name for the engine.
+async fn read_visual_assets(
+    assets: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<serde_json::Map<String, Value>> {
+    use base64::Engine as _;
+    use zeron_proto::{
+        VISUAL_MAX_ASSET_BYTES as MAX_ASSET_BYTES, VISUAL_MAX_ASSETS as MAX_ASSETS,
+        VISUAL_MAX_TOTAL_ASSET_BYTES as MAX_TOTAL_ASSET_BYTES,
+        valid_visual_asset_name as valid_name,
+    };
+    anyhow::ensure!(
+        assets.len() <= MAX_ASSETS,
+        "a visual takes at most {MAX_ASSETS} assets"
+    );
+    let mut out = serde_json::Map::new();
+    let mut total = 0;
+    let mut seen = std::collections::HashSet::new();
+    for (name, path) in assets {
+        anyhow::ensure!(
+            valid_name(name),
+            "asset name '{name}' must be a plain file name (letters, digits, '.', '-', '_')"
+        );
+        // Stored as files, and file systems often ignore case.
+        anyhow::ensure!(
+            seen.insert(name.to_ascii_lowercase()),
+            "asset names must differ by more than case ('{name}')"
+        );
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .with_context(|| format!("asset '{name}': can't read {path}"))?;
+        anyhow::ensure!(metadata.is_file(), "asset '{name}': {path} is not a file");
+        anyhow::ensure!(
+            metadata.len() <= MAX_ASSET_BYTES as u64,
+            "asset '{name}' is over {} MB",
+            MAX_ASSET_BYTES / (1024 * 1024)
+        );
+        // Bounded however the file changes (or lies about its size).
+        let mut bytes = Vec::new();
+        {
+            use tokio::io::AsyncReadExt as _;
+            tokio::fs::File::open(path)
+                .await
+                .with_context(|| format!("asset '{name}': can't read {path}"))?
+                .take(MAX_ASSET_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .with_context(|| format!("asset '{name}': can't read {path}"))?;
+        }
+        anyhow::ensure!(
+            bytes.len() <= MAX_ASSET_BYTES,
+            "asset '{name}' is over {} MB",
+            MAX_ASSET_BYTES / (1024 * 1024)
+        );
+        total += bytes.len();
+        anyhow::ensure!(
+            total <= MAX_TOTAL_ASSET_BYTES,
+            "a visual's assets total at most {} MB",
+            MAX_TOTAL_ASSET_BYTES / (1024 * 1024)
+        );
+        out.insert(
+            name.clone(),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+    }
+    Ok(out)
+}
+
 // ---- argument shapes ---------------------------------------------------------
 
 #[derive(Deserialize)]
 struct ShowVisualArgs {
     script: String,
     title: String,
+    #[serde(default)]
+    assets: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -1122,6 +1213,7 @@ impl Tools {
             .chat_id
             .clone()
             .context("show_visual only works from an agent Zeron launched in a chat")?;
+        let assets = read_visual_assets(&args.assets).await?;
         let shown = self
             .zeron
             .call(
@@ -1130,6 +1222,7 @@ impl Tools {
                     "chatId": chat_id,
                     "title": args.title,
                     "script": args.script,
+                    "assets": assets,
                 }),
             )
             .await?;

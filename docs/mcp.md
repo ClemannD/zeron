@@ -125,7 +125,7 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
-| `show_visual`      | `PublishVisual {chatId, title, script}` (origin chat only)       |
+| `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
@@ -189,11 +189,14 @@ are theme tokens (`text`, `muted`, `faint`, `accent`, `on-accent`, `success`,
 `warning`, `danger`, `border`, `chart1`…`chart6`), text sizes are steps on the
 transcript's type scale, the font is always the interface font, and layout nodes
 have no fill, border, shadow, padding, or font props; using one is an error that
-names the rule. 3D scenes are rendered in the runtime (`raster.rs`): Zeron
-frames an orbit camera on the geometry, clips faces to the near plane, and
-rasterizes them with a depth buffer (smooth-shaded curved solids, a sky/key/fill
-light rig, depth-edge outlines, supersampled at rest), in parallel row bands,
-into one transparent image. `ui.shader` takes Shadertoy-style GLSL
+names the rule. 3D scenes render on the GPU (`zeron-visual-gpu`: physically
+based materials, shadows, glass with dispersion, glTF models, textures,
+environment maps, sprites and bloom), with the runtime's software rasterizer
+(`raster.rs`) as the fallback where there's no GPU: Zeron frames an orbit
+camera on the geometry and draws it into one transparent image. A visual's
+files (`assets`: at most 16, 8 MB each, 10 MB together) are stored beside its
+script as `{id}-asset-{name}` with an `{id}-assets.json` list, and travel to
+other devices like attachments. `ui.shader` takes Shadertoy-style GLSL
 (`mainImage`, `iResolution`, `iTime`, `iMouse`, plus `iCamera` for an orbit
 camera, named float inputs bound to the script's state, `iNoise`, and up to four
 Shadertoy-style buffer passes read as `iChannel0`-`3`, with feedback from their

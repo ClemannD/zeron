@@ -26,6 +26,9 @@ pub enum Token {
     Border,
     /// Categorical series colors, `chart1` … `chart6` (0-based here).
     Chart(u8),
+    /// A physical color (`0xRRGGBB`): only 3D scenes take these, for the
+    /// materials of real objects (wood, foliage, a model's own paint).
+    Rgb(u32),
 }
 
 pub const CHART_SERIES: u8 = 6;

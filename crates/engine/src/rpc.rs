@@ -502,6 +502,10 @@ struct ReadAttachmentChunkParams {
 }
 
 const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
+const _: () = assert!(zeron_proto::VISUAL_MAX_ASSETS == zeron_visual::assets::MAX_ASSETS);
+const _: () = assert!(zeron_proto::VISUAL_MAX_ASSET_BYTES == zeron_visual::assets::MAX_ASSET_BYTES);
+const _: () =
+    assert!(zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +513,57 @@ struct PublishVisualParams {
     chat_id: String,
     title: String,
     script: String,
+    /// Files the script uses, base64 by name.
+    #[serde(default)]
+    assets: std::collections::BTreeMap<String, String>,
+}
+
+fn no_turn_for_visual() -> RpcError {
+    RpcError::Failed(
+        "This chat has no running turn on this device; show_visual only works from inside a turn.".into(),
+    )
+}
+
+/// Decode and bound a visual's assets.
+fn decode_visual_assets(
+    assets: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(String, Vec<u8>)>, RpcError> {
+    use base64::Engine as _;
+    use zeron_visual::assets::{MAX_ASSET_BYTES, MAX_ASSETS, MAX_TOTAL_ASSET_BYTES, valid_name};
+    if assets.len() > MAX_ASSETS {
+        return Err(RpcError::BadParams(format!(
+            "a visual takes at most {MAX_ASSETS} assets"
+        )));
+    }
+    let mut total = 0;
+    let mut out = Vec::with_capacity(assets.len());
+    let mut seen = std::collections::HashSet::new();
+    for (name, data) in assets {
+        if !valid_name(name) {
+            return Err(RpcError::BadParams(format!(
+                "asset name '{name}' must be a plain file name"
+            )));
+        }
+        // Stored as files, and file systems often ignore case.
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(RpcError::BadParams(format!(
+                "asset names must differ by more than case ('{name}')"
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| RpcError::BadParams(format!("asset '{name}' is not base64: {e}")))?;
+        total += bytes.len();
+        if bytes.len() > MAX_ASSET_BYTES || total > MAX_TOTAL_ASSET_BYTES {
+            return Err(RpcError::BadParams(format!(
+                "asset '{name}' is too large ({} MB each, {} MB together)",
+                MAX_ASSET_BYTES / (1024 * 1024),
+                MAX_TOTAL_ASSET_BYTES / (1024 * 1024)
+            )));
+        }
+        out.push((name.clone(), bytes));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -3718,19 +3773,39 @@ impl RpcService for EngineRpc {
                         zeron_proto::VISUAL_MAX_BYTES
                     )));
                 }
+                // Before decoding and storing anything (checked again below).
+                if !self.sessions.has_run(&p.chat_id) {
+                    return Err(no_turn_for_visual());
+                }
                 let id = format!("v:{}", crate::new_id());
+                let assets = decode_visual_assets(&p.assets)?;
                 // Run the script the way the desktop will (setup, render,
                 // every draw, every control) before anyone sees it, so the
                 // agent gets its errors with line numbers and can fix them.
                 let uploads = self.uploads.clone();
                 let (stored_id, script) = (id.clone(), p.script);
                 let (path, report) = tokio::task::spawn_blocking(move || {
-                    let checked = zeron_visual::check(&script, zeron_visual::seed_for(&stored_id));
+                    let files = zeron_visual::Assets::new(
+                        assets
+                            .iter()
+                            .map(|(name, bytes)| (name.clone(), bytes.as_slice().into()))
+                            .collect(),
+                    );
+                    let checked = zeron_visual::check_with_assets(
+                        &script,
+                        zeron_visual::seed_for(&stored_id),
+                        files,
+                    );
                     let report = checked
                         .map_err(|e| RpcError::BadParams(format!("visual script failed: {e}")))?;
-                    let path = uploads
-                        .store_visual(&stored_id, &script)
+                    // Assets first: a script is only ever found with its files.
+                    uploads
+                        .store_visual_assets(&stored_id, &assets)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let path = uploads.store_visual(&stored_id, &script).map_err(|e| {
+                        uploads.remove_visual(&stored_id);
+                        RpcError::Failed(e.to_string())
+                    })?;
                     Ok::<_, RpcError>((path, report))
                 })
                 .await
@@ -3741,12 +3816,8 @@ impl RpcService for EngineRpc {
                     title: title.clone(),
                 };
                 if !self.sessions.inject_event(&p.chat_id, event) {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(RpcError::Failed(
-                        "This chat has no running turn on this device; show_visual only works \
-                         from inside a turn."
-                            .into(),
-                    ));
+                    self.uploads.remove_visual(&id);
+                    return Err(no_turn_for_visual());
                 }
                 RpcReply::value(&serde_json::json!({
                     "id": id,

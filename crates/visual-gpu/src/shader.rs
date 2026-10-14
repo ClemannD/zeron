@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use zeron_visual::shader::{Blend, MAX_BUFFERS, ShaderUniforms};
 
-use crate::{FORMAT, Frame, gpu};
+use crate::{EDGE_FADE, FORMAT, Frame, gpu};
 
 /// Passes render in float, so feedback buffers keep precision and values
 /// above 1 survive to the bloom.
@@ -22,6 +22,8 @@ pub struct ShaderSpec<'a> {
     pub inputs: &'a [String],
     pub blend: Blend,
     pub bloom: f32,
+    /// Images sampled as `iTexture0`-`3`.
+    pub textures: &'a [zeron_visual::TextureData],
 }
 
 /// One shader's textures between frames: each buffer's previous and
@@ -52,7 +54,8 @@ pub(crate) struct Pipelines {
     passes: Mutex<HashMap<String, Result<Arc<wgpu::RenderPipeline>, String>>>,
 }
 
-const FULLSCREEN: &str = "@vertex fn main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+const FULLSCREEN: &str =
+    "@vertex fn main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }";
@@ -102,16 +105,22 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     let c = textureSampleLevel(source, source_sampler, uv, 0.0);
     let g = textureSampleLevel(glow, source_sampler, uv, 0.0).rgb * post.x;
     let rgb = clamp(c.rgb + g, vec3<f32>(0.0), vec3<f32>(1.0));
+    // An opaque shader is a deliberate box; the others fade at the edges.
     if (post.y > 1.5) {
         return vec4<f32>(rgb, 1.0);
     }
+    let fade = edge_fade(i.clip.xy, vec2<f32>(textureDimensions(source)));
     if (post.y > 0.5) {
         let a = max(rgb.r, max(rgb.g, rgb.b));
         if (a <= 0.0001) { return vec4<f32>(0.0); }
-        return vec4<f32>(rgb / a, a);
+        return vec4<f32>(rgb / a, a * fade);
     }
+    // The shader's color is straight over its alpha; the glow is light over
+    // nothing. Add them premultiplied, then return straight alpha.
     let a = clamp(c.a + luma(g), 0.0, 1.0);
-    return vec4<f32>(rgb, a);
+    if (a <= 0.0001) { return vec4<f32>(0.0); }
+    let straight = clamp((clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * c.a + g) / a, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(straight, a * fade);
 }
 "#;
 
@@ -154,6 +163,10 @@ impl Pipelines {
                 texture_entry(5),
                 sampler_entry(6),
                 sampler_entry(7),
+                texture_entry(8),
+                texture_entry(9),
+                texture_entry(10),
+                texture_entry(11),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -181,7 +194,7 @@ impl Pipelines {
         });
         let post = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader post"),
-            source: wgpu::ShaderSource::Wgsl(POST.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{EDGE_FADE}{POST}").into()),
         });
         let post_pipeline = |label: &str, entry: &str, format| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -217,6 +230,8 @@ impl Pipelines {
                 address_mode_v: address,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
+                // Image textures have mips; channels and noise have one level.
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             })
         };
@@ -286,49 +301,53 @@ impl Pipelines {
     }
 
     /// The pipeline for one complete fragment program, compiled once.
-    fn pass(&self, device: &wgpu::Device, program: &str) -> Result<Arc<wgpu::RenderPipeline>, String> {
+    fn pass(
+        &self,
+        device: &wgpu::Device,
+        program: &str,
+    ) -> Result<Arc<wgpu::RenderPipeline>, String> {
         let mut passes = self.passes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = passes.get(program) {
             return cached.clone();
         }
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("visual shader"),
-            source: wgpu::ShaderSource::Glsl {
-                shader: program.into(),
-                stage: wgpu::naga::ShaderStage::Fragment,
-                defines: &[],
-            },
+        let compiled = crate::guarded(device, || {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visual shader"),
+                source: wgpu::ShaderSource::Glsl {
+                    shader: program.into(),
+                    stage: wgpu::naga::ShaderStage::Fragment,
+                    defines: &[],
+                },
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("visual shader"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &self.fullscreen,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("visual shader"),
-            layout: Some(&self.pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &self.fullscreen,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let result = match pollster::block_on(scope.pop()) {
-            Some(error) => Err(format!("shader: {error}")),
-            None => Ok(Arc::new(pipeline)),
-        };
+        let result = compiled
+            .map(Arc::new)
+            .map_err(|error| format!("shader: {error}"));
         // Keep the cache bounded; a session rarely holds more than a few.
         if passes.len() > 64 {
             passes.clear();
@@ -338,7 +357,12 @@ impl Pipelines {
     }
 }
 
-fn texture(device: &wgpu::Device, label: &str, size: (u32, u32), format: wgpu::TextureFormat) -> wgpu::Texture {
+fn texture(
+    device: &wgpu::Device,
+    label: &str,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -390,15 +414,28 @@ pub fn render_shader(
     height: u32,
     state: &mut Option<ShaderState>,
 ) -> Result<Frame, String> {
-    let gpu = gpu().ok_or("this device has no GPU for shaders")?;
+    let gpu = gpu().ok_or_else(|| {
+        format!(
+            "this device has no GPU for shaders ({})",
+            crate::unavailable_reason().unwrap_or_default()
+        )
+    })?;
     let width = width.clamp(1, 8192);
     let height = height.clamp(1, 8192);
     let buffers = spec.buffers.len().min(MAX_BUFFERS);
     let device = &gpu.device;
-    let pipelines = gpu.shaders.get_or_init(|| Pipelines::new(device, &gpu.queue));
+    let pipelines = gpu
+        .shaders
+        .get_or_init(|| Pipelines::new(device, &gpu.queue));
     // Compile every pass first, so an error leaves the state untouched.
     let mut programs = Vec::with_capacity(buffers + 1);
-    for code in spec.buffers.iter().take(buffers).map(String::as_str).chain([spec.image]) {
+    for code in spec
+        .buffers
+        .iter()
+        .take(buffers)
+        .map(String::as_str)
+        .chain([spec.image])
+    {
         let (program, _) = zeron_visual::shader::program(code, spec.inputs);
         programs.push(pipelines.pass(device, &program)?);
     }
@@ -423,6 +460,18 @@ pub fn render_shader(
     let view = |t: &wgpu::Texture| t.create_view(&Default::default());
     let empty = view(&pipelines.empty);
     let noise = view(&pipelines.noise);
+    let images: Vec<wgpu::TextureView> = (0..zeron_visual::shader::MAX_TEXTURES)
+        .map(|i| {
+            spec.textures
+                .get(i)
+                .and_then(|data| {
+                    gpu.textures
+                        .get(device, &gpu.queue, data, crate::textures::Space::Raw)
+                        .ok()
+                })
+                .map_or_else(|| empty.clone(), |loaded| loaded.view)
+        })
+        .collect();
     // Channel `j` as pass `pass` sees it: an earlier buffer's frame from
     // this frame, its own and later ones' from the last.
     let channel = |pass: usize, j: usize| -> wgpu::TextureView {
@@ -470,6 +519,22 @@ pub fn render_shader(
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::Sampler(&pipelines.repeat),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&images[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&images[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&images[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&images[3]),
                 },
             ],
         });
@@ -618,12 +683,18 @@ mod tests {
             inputs: &[],
             blend,
             bloom: 0.0,
+            textures: &[],
         }
     }
 
     fn px(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
         let o = ((y * frame.width + x) * 4) as usize;
-        [frame.bgra[o + 2], frame.bgra[o + 1], frame.bgra[o], frame.bgra[o + 3]]
+        [
+            frame.bgra[o + 2],
+            frame.bgra[o + 1],
+            frame.bgra[o],
+            frame.bgra[o + 3],
+        ]
     }
 
     #[test]
@@ -640,13 +711,83 @@ mod tests {
             ..Default::default()
         };
         uniforms.time[0] = 0.5;
-        let frame =
-            render_shader(&spec(code, &[], Blend::Opaque), &uniforms, 64, 32, &mut None).unwrap();
+        let frame = render_shader(
+            &spec(code, &[], Blend::Opaque),
+            &uniforms,
+            64,
+            32,
+            &mut None,
+        )
+        .unwrap();
         // Red grows to the right; green grows upward (Shadertoy's origin is
         // bottom-left), so the top row is the greenest.
         assert!(px(&frame, 60, 16)[0] > px(&frame, 4, 16)[0]);
         assert!(px(&frame, 32, 2)[1] > px(&frame, 32, 29)[1]);
-        assert!((i32::from(px(&frame, 32, 16)[2]) - 128).abs() < 3, "iTime reaches the shader");
+        assert!(
+            (i32::from(px(&frame, 32, 16)[2]) - 128).abs() < 3,
+            "iTime reaches the shader"
+        );
+    }
+
+    #[test]
+    fn image_textures_are_sampled_as_stored() {
+        if !crate::available() {
+            return;
+        }
+        let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+            fragColor = texture(iTexture0, fragCoord / iResolution.xy);\n\
+        }";
+        // Left texel red, right texel a mid blue (stored values, not sRGB).
+        let textures = [zeron_visual::TextureData::Rgba {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 255, 0, 0, 128, 255].into(),
+        }];
+        let spec = ShaderSpec {
+            textures: &textures,
+            ..spec(code, &[], Blend::Opaque)
+        };
+        let uniforms = ShaderUniforms {
+            resolution: [64.0, 16.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let frame = render_shader(&spec, &uniforms, 64, 16, &mut None).unwrap();
+        // At the texel centers (it repeats, so edges blend with the far side).
+        let left = px(&frame, 16, 8);
+        assert!(left[0] > 245 && left[2] < 8, "{left:?}");
+        let right = px(&frame, 48, 8);
+        assert!(
+            right[0] < 8 && (i32::from(right[2]) - 128).abs() < 6,
+            "{right:?}"
+        );
+    }
+
+    #[test]
+    fn image_textures_show_upright_as_on_shadertoy() {
+        if !crate::available() {
+            return;
+        }
+        let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+            fragColor = texture(iTexture0, fragCoord / iResolution.xy);\n\
+        }";
+        // Top texel red, bottom texel blue, as an image stores them.
+        let textures = [zeron_visual::TextureData::Rgba {
+            width: 1,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255].into(),
+        }];
+        let spec = ShaderSpec {
+            textures: &textures,
+            ..spec(code, &[], Blend::Opaque)
+        };
+        let uniforms = ShaderUniforms {
+            resolution: [16.0, 64.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let frame = render_shader(&spec, &uniforms, 16, 64, &mut None).unwrap();
+        let (top, bottom) = (px(&frame, 8, 16), px(&frame, 8, 48));
+        assert!(top[0] > 245 && top[2] < 8, "{top:?}");
+        assert!(bottom[2] > 245 && bottom[0] < 8, "{bottom:?}");
     }
 
     #[test]
@@ -670,17 +811,47 @@ mod tests {
     }
 
     #[test]
+    fn light_fades_out_toward_the_edges_unless_opaque() {
+        if !crate::available() {
+            return;
+        }
+        // White everywhere, like a beam running off the frame.
+        let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+            fragColor = vec4(1.0);\n\
+        }";
+        let uniforms = ShaderUniforms {
+            resolution: [200.0, 100.0, 1.0, 0.0],
+            ..Default::default()
+        };
+        let render =
+            |blend| render_shader(&spec(code, &[], blend), &uniforms, 200, 100, &mut None).unwrap();
+        let light = render(Blend::Light);
+        // The ramp is 15 px (15% of 100): clear at the edge, solid inside,
+        // rising steadily in between.
+        let row: Vec<u8> = (0..20).map(|x| px(&light, x, 50)[3]).collect();
+        assert!(row[0] < 3, "{row:?}");
+        assert_eq!(row[16], 255, "{row:?}");
+        assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
+        assert!(px(&light, 100, 0)[3] < 3, "the top fades too");
+        assert!(px(&light, 199, 99)[3] < 3, "and the corners");
+        let opaque = render(Blend::Opaque);
+        assert_eq!(px(&opaque, 0, 0)[3], 255, "an opaque shader keeps its box");
+    }
+
+    #[test]
     fn a_buffer_reads_its_own_previous_frame() {
         if !crate::available() {
             return;
         }
         // Buffer A counts frames by adding 0.25 to what it wrote last time;
         // the image shows it.
-        let buffer = vec!["void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+        let buffer = vec![
+            "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
             vec4 last = texture(iChannel0, fragCoord / iResolution.xy);\n\
             fragColor = vec4(last.r + 0.25, 0.0, 0.0, 1.0);\n\
         }"
-        .to_owned()];
+            .to_owned(),
+        ];
         let image = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
             fragColor = vec4(texture(iChannel0, fragCoord / iResolution.xy).r, 0.0, 0.0, 1.0);\n\
         }";
@@ -691,12 +862,24 @@ mod tests {
         let mut state = None;
         let mut reds = Vec::new();
         for _ in 0..3 {
-            let frame = render_shader(&spec(image, &buffer, Blend::Opaque), &uniforms, 16, 16, &mut state)
-                .unwrap();
+            let frame = render_shader(
+                &spec(image, &buffer, Blend::Opaque),
+                &uniforms,
+                16,
+                16,
+                &mut state,
+            )
+            .unwrap();
             reds.push(px(&frame, 8, 8)[0]);
         }
-        assert!(reds[0] < reds[1] && reds[1] < reds[2], "accumulates: {reds:?}");
-        assert!((i32::from(reds[2]) - 191).abs() < 4, "0.75 after three frames: {reds:?}");
+        assert!(
+            reds[0] < reds[1] && reds[1] < reds[2],
+            "accumulates: {reds:?}"
+        );
+        assert!(
+            (i32::from(reds[2]) - 191).abs() < 4,
+            "0.75 after three frames: {reds:?}"
+        );
     }
 
     #[test]

@@ -67,6 +67,8 @@ struct Local {
     /// The pointer over a canvas, chart, or scene, in window coordinates.
     pointers: HashMap<SharedString, Point<Pixels>>,
     pressed: Option<SharedString>,
+    /// Where the pointer went down on a shader, while it's held (iMouse.zw).
+    presses: HashMap<SharedString, Point<Pixels>>,
     /// Where each chart's plot was painted, for hover hit-testing.
     charts: HashMap<SharedString, ChartGeometry>,
     cameras: HashMap<SharedString, Orbit>,
@@ -158,21 +160,56 @@ impl VisualFrame {
         target_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Its drawings leave every window's sprite atlas with it.
+        cx.on_release(|this, cx| {
+            let images = this.local.borrow_mut().prune(None);
+            free_images(images, cx);
+        })
+        .detach();
         let mut tasks = Vec::new();
         let load = match engine {
             Some(engine) => {
                 tasks.push(cx.spawn(async move |this, cx| {
-                    let script = crate::attachments::read_attachment_bytes(
-                        &engine,
-                        cx.background_executor(),
-                        target_device_id.as_deref(),
-                        &path,
-                        None,
-                    )
-                    .await
-                    .and_then(|(_, _, bytes)| String::from_utf8(bytes).ok());
+                    let read = |path: String| {
+                        let (engine, target) = (engine.clone(), target_device_id.clone());
+                        let executor = cx.background_executor().clone();
+                        async move {
+                            crate::attachments::read_attachment_bytes(
+                                &engine,
+                                &executor,
+                                target.as_deref(),
+                                &path,
+                                None,
+                            )
+                            .await
+                            .map(|(_, _, bytes)| bytes)
+                        }
+                    };
+                    let script = read(path.clone())
+                        .await
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
+                    // Its files sit beside it, listed in `{id}-assets.json`
+                    // (absent for a visual without any).
+                    let mut files = HashMap::new();
+                    if script.is_some()
+                        && let Some(stem) = path.strip_suffix("-visual.luau")
+                        && let Some(names) = read(format!("{stem}-assets.json"))
+                            .await
+                            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+                    {
+                        for name in names
+                            .into_iter()
+                            .filter(|name| zeron_visual::assets::valid_name(name))
+                            .take(zeron_visual::assets::MAX_ASSETS)
+                        {
+                            if let Some(bytes) = read(format!("{stem}-asset-{name}")).await {
+                                files.insert(name, Arc::<[u8]>::from(bytes));
+                            }
+                        }
+                    }
+                    let assets = zeron_visual::Assets::new(files);
                     let _ = this.update(cx, |this, cx| match script {
-                        Some(script) => this.start(&script, cx),
+                        Some(script) => this.start(&script, assets, cx),
                         None => {
                             this.load = Load::Failed("Visual unavailable".into());
                             cx.notify();
@@ -204,13 +241,14 @@ impl VisualFrame {
 
     /// Run a script's setup and first render (the engine already ran the
     /// same script before publishing it, so failures here are rare).
-    fn start(&mut self, script: &str, cx: &mut Context<Self>) {
+    fn start(&mut self, script: &str, assets: zeron_visual::Assets, cx: &mut Context<Self>) {
         // The row id ends with the part's visual id, which the engine
         // seeded its check with: the reader sees the same random data.
         let visual_id = self.id.rsplit('#').next().unwrap_or(&self.id);
         let seed = zeron_visual::seed_for(visual_id);
         match zeron_visual::Visual::load(script, seed) {
             Ok(visual) => {
+                let visual = visual.with_assets(assets);
                 self.runtime = Some(Rc::new(RefCell::new(visual)));
                 self.load = Load::Ready;
                 self.rerender(cx);
@@ -231,6 +269,13 @@ impl VisualFrame {
         match rendered {
             Ok(tree) => {
                 let changed = self.tree.as_deref() != Some(&tree);
+                if changed {
+                    // Nodes that left the tree take their drawings with them.
+                    let mut keep = std::collections::HashSet::new();
+                    Self::node_keys(&tree, &self.id, &mut keep);
+                    let images = self.local.borrow_mut().prune(Some(&keep));
+                    free_images(images, cx);
+                }
                 self.tree = Some(Rc::new(tree));
                 self.generation += 1;
                 self.error = None;
@@ -364,6 +409,7 @@ impl Palette {
             Token::Danger => self.danger,
             Token::Border => self.border,
             Token::Chart(i) => self.chart[usize::from(i) % 6],
+            Token::Rgb(rgb) => gpui::rgb(rgb).into(),
         }
     }
 
@@ -476,7 +522,65 @@ fn status_line(message: SharedString, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+impl Local {
+    /// Forget the drawings of nodes not in `keep` (all of them, without
+    /// one), returning their images to free.
+    fn prune(
+        &mut self,
+        keep: Option<&std::collections::HashSet<SharedString>>,
+    ) -> Vec<Arc<gpui::RenderImage>> {
+        let kept = |key: &SharedString| keep.is_some_and(|keep| keep.contains(key));
+        let mut images = Vec::new();
+        self.shaders.retain(|key, cache| {
+            kept(key) || {
+                images.push(cache.image.clone());
+                false
+            }
+        });
+        self.scenes.retain(|key, cache| {
+            kept(key) || {
+                images.extend(cache.image.as_ref().map(|(_, image)| image.image.clone()));
+                false
+            }
+        });
+        self.canvases.retain(|key, _| kept(key));
+        self.cameras.retain(|key, _| kept(key));
+        images
+    }
+}
+
+fn free_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut App) {
+    if !images.is_empty() {
+        cx.defer(move |cx| {
+            for image in images {
+                cx.drop_image(image, None);
+            }
+        });
+    }
+}
+
 impl VisualFrame {
+    /// Every node's key, as [`VisualFrame::node`] walks the tree from `path`.
+    fn node_keys(node: &Node, path: &str, out: &mut std::collections::HashSet<SharedString>) {
+        out.insert(Self::key(node, path));
+        let children: &[Node] = match &node.kind {
+            NodeKind::Stack(stack) => &stack.children,
+            NodeKind::Grid { children, .. } => children,
+            NodeKind::Table(table) => {
+                for (r, row) in table.rows.iter().enumerate() {
+                    for (c, cell) in row.iter().enumerate() {
+                        Self::node_keys(cell, &format!("{path}.{r}.{c}"), out);
+                    }
+                }
+                &[]
+            }
+            _ => &[],
+        };
+        for (ix, child) in children.iter().enumerate() {
+            Self::node_keys(child, &format!("{path}.{ix}"), out);
+        }
+    }
+
     fn key(node: &Node, path: &str) -> SharedString {
         match &node.key {
             Some(key) => format!("key:{key}").into(),
@@ -1479,6 +1583,32 @@ impl VisualFrame {
             .w_full()
             .h(px(node.height));
         el = self.pointer_tracking(el, &key, cx);
+        let (down_key, up_key, out_key) = (key.clone(), key.clone(), key.clone());
+        el = el
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.local
+                        .borrow_mut()
+                        .presses
+                        .insert(down_key.clone(), event.position);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
+                    this.local.borrow_mut().presses.remove(&up_key);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
+                    this.local.borrow_mut().presses.remove(&out_key);
+                    cx.notify();
+                }),
+            );
         if node.orbit {
             el = self.orbit_handlers(el, &key, spin, cx);
         }
@@ -1487,6 +1617,17 @@ impl VisualFrame {
         for (i, (_, value)) in node.inputs.iter().enumerate() {
             inputs[i / 4][i % 4] = *value;
         }
+        let assets = self
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.borrow().assets().clone())
+            .unwrap_or_default();
+        let textures: Vec<zeron_visual::TextureData> = node
+            .textures
+            .iter()
+            // A missing one keeps its slot (and samples as clear).
+            .map(|name| zeron_visual::TextureData::Encoded(assets.get(name).unwrap_or_else(|| Arc::from([]))))
+            .collect();
         let (code, buffers, blend, bloom, zoom) = (
             node.code.clone(),
             node.buffers.clone(),
@@ -1497,7 +1638,6 @@ impl VisualFrame {
         // Buffers evolve every frame, so a shader with any keeps running.
         let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
         let (local, time) = (self.local.clone(), self.time());
-        let drag = orbit.drag;
         el.child(
             canvas(
                 move |bounds, window, _| {
@@ -1510,15 +1650,16 @@ impl VisualFrame {
                         (f32::from(bounds.size.height) * scale).round().max(1.0) as u32,
                     );
                     let mut state = local.borrow_mut();
-                    // Shadertoy's mouse: pixels from the bottom-left; xy while
-                    // pressed and zw where it went down (negative after).
+                    // Shadertoy's mouse: pixels from the bottom-left; xy where
+                    // the pointer is, zw where it went down while it's held
+                    // (negative otherwise).
                     let device = |p: Point<Pixels>| {
                         let at = p - bounds.origin;
                         [f32::from(at.x) * scale, size.1 as f32 - f32::from(at.y) * scale]
                     };
-                    let mouse = match (drag, state.pointers.get(&key)) {
-                        (Some((start, _, _)), Some(now)) => {
-                            let ([x, y], [sx, sy]) = (device(*now), device(start));
+                    let mouse = match (state.presses.get(&key), state.pointers.get(&key)) {
+                        (Some(start), Some(now)) => {
+                            let ([x, y], [sx, sy]) = (device(*now), device(*start));
                             [x, y, sx, sy]
                         }
                         (None, Some(now)) => {
@@ -1529,10 +1670,11 @@ impl VisualFrame {
                     };
                     let buffers_run = !buffers.is_empty();
                     let previous = state.shaders.get(&key);
+                    // A still shader keeps the time it first showed.
                     let shown_time = if animate {
                         time
                     } else {
-                        previous.map_or(0.0, |p| p.last_time)
+                        previous.map_or(0.0, |p| f64::from(p.uniforms.time[0]))
                     };
                     let frame = previous.map_or(0, |p| p.frame + 1);
                     let delta = previous.map_or(0.0, |p| (time - p.last_time).max(0.0));
@@ -1563,6 +1705,7 @@ impl VisualFrame {
                             inputs: &names,
                             blend,
                             bloom,
+                            textures: &textures,
                         },
                         &uniforms,
                         size.0,
@@ -1721,7 +1864,9 @@ impl VisualFrame {
                         .get(&key)
                         .and_then(|c| c.final_cost)
                         .is_some_and(|cost| cost < std::time::Duration::from_millis(8));
-                    let quality = if (moving || dragging) && !cheap {
+                    // Quality only steers the software renderer; on the GPU
+                    // a finished drag mustn't render the same frame again.
+                    let quality = if (moving || dragging) && !cheap && !zeron_visual_gpu::available() {
                         zeron_visual::Quality::Draft
                     } else {
                         zeron_visual::Quality::Final

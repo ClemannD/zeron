@@ -262,6 +262,8 @@ pub struct ShaderNode {
     pub blend: crate::shader::Blend,
     /// Bloom strength on bright output (0 off).
     pub bloom: f32,
+    /// Image assets every pass samples as `iTexture0`-`3`.
+    pub textures: Vec<String>,
 }
 
 pub const MIN_HEIGHT: f32 = 40.0;
@@ -490,6 +492,7 @@ impl Parser {
                     "blend",
                     "bloom",
                     "buffers",
+                    "textures",
                     // Before `blend`: true kept the alpha, false was opaque.
                     "transparent",
                 ])?;
@@ -518,6 +521,21 @@ impl Parser {
                         crate::shader::MAX_BUFFERS
                     )));
                 }
+                let mut textures = Vec::new();
+                if let Some(table) = props.get::<Option<Table>>("textures")? {
+                    for value in table.sequence_values::<Value>() {
+                        match value? {
+                            Value::String(name) => textures.push(name.to_string_lossy()),
+                            _ => return Err(props.error("'textures' is a list of asset names")),
+                        }
+                    }
+                }
+                if textures.len() > crate::shader::MAX_TEXTURES {
+                    return Err(props.error(&format!(
+                        "takes at most {} textures",
+                        crate::shader::MAX_TEXTURES
+                    )));
+                }
                 let blend = match (props.string("blend")?, props.bool("transparent")?) {
                     (Some(name), _) => crate::shader::Blend::parse(&name).ok_or_else(|| {
                         props.error("'blend' is \"alpha\", \"light\", or \"opaque\"")
@@ -532,9 +550,9 @@ impl Parser {
                         let (name, value) =
                             pair.map_err(|_| props.error("'inputs' maps names to numbers"))?;
                         if !crate::shader::valid_input_name(&name) {
-                            return Err(props.error(&format!(
-                                "input '{name}' is not a usable GLSL name"
-                            )));
+                            return Err(
+                                props.error(&format!("input '{name}' is not a usable GLSL name"))
+                            );
                         }
                         inputs.push((name, value as f32));
                     }
@@ -568,6 +586,7 @@ impl Parser {
                     zoom: (zoom as f32).clamp(0.2, 5.0),
                     blend,
                     bloom: props.number("bloom")?.unwrap_or(0.0).clamp(0.0, 3.0) as f32,
+                    textures,
                 })
             }
             "button" => {
