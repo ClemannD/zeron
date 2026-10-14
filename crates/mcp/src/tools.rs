@@ -259,39 +259,45 @@ text reply; call it before writing that reply. Use it when a visual says more th
 reader already sees the page, so the reply should not announce, locate, or restate it: add only \
 what the page doesn't say.\n\
 \n\
+Style: the page is part of your reply, not a widget. Lay content directly on the chat the way \
+Zeron's own transcript does, with type, spacing, and alignment:\n\
+- No cards, tiles, boxed panels, or bordered or filled containers around anything: not around a \
+chart, a stat, a table, or the page. No outer padding, banner title, or badge chrome.\n\
+- Stats are a row of plain figures, a large number over a short var(--muted-foreground) label, \
+separated by space; at most a 1px var(--border) rule between groups.\n\
+- A chart is its title as a plain heading, an inline legend, and the plot; no frame around it. \
+Tables have no outer border: a var(--muted-foreground) header row and 1px var(--border) row rules.\n\
+- Separate sections with whitespace (24-32px) or a single 1px var(--border) rule.\n\
+\n\
 Surface: the page is transparent and sits directly on the chat. With Zeron's frosted glass the \
 chat is translucent over the user's wallpaper; with opaque surfaces it is a solid fill; either can \
 be light or dark. One page must read well on all four, so:\n\
-- Never paint html, body, or a full-width wrapper, and use no page-wide gradients or color blocks: \
-on glass they show as a slab.\n\
-- Panels use the translucent fills var(--card) or var(--card-strong), a 1px var(--border) hairline, \
-var(--radius) corners, and at least 12px padding. Never use opaque white, black, or grey fills, \
-box-shadows, or backdrop filters. Tint a highlighted panel with var(--accent-surface).\n\
+- Never paint a background: not html, body, a wrapper, or a section; no gradients, color blocks, \
+box-shadows, or backdrop filters. The only fill is var(--hover) under a row the pointer is over.\n\
 - Data marks (bars, lines, dots, swatches) use solid var(--chart-1) … var(--chart-6) at full \
 opacity, in that order; translucent marks wash out on glass. Use var(--accent) for the one thing to \
-notice, var(--success) / var(--warning) / var(--danger) only for status, gridlines and axes in \
-var(--border), and keep data labels outside colored marks.\n\
+notice, var(--success) / var(--warning) / var(--danger) only for status text and marks, gridlines \
+and axes in var(--border), and keep data labels outside colored marks.\n\
 - Text is var(--foreground); labels, axes, and captions var(--muted-foreground); tertiary notes \
 var(--faint-foreground). Never hard-code a text or fill color, and never assume a dark or light \
-background. Text on an var(--accent) fill uses var(--accent-foreground).\n\
-- Type inherits var(--font-sans) at 14px; titles 14-15px semibold, never larger than 18px; labels \
-11-12px; numbers in tables and labels use font-variant-numeric: tabular-nums; code uses \
+background. Text on an var(--accent) mark uses var(--accent-foreground).\n\
+- Type inherits var(--font-sans) at 14px; titles 14-15px semibold, never larger than 18px; stat \
+figures up to 24px; labels 11-12px; numbers use font-variant-numeric: tabular-nums; code uses \
 var(--font-mono). No web fonts, icon fonts, or emoji icons.\n\
 \n\
 Layout: the frame is borderless, as wide as the reply column (about 720px, as narrow as 360px), and \
 Zeron fits its height to the page. Make it fluid: no fixed pixel widths over 320px, SVG with a \
-viewBox at width:100%, no horizontal scrolling, and no outer padding, card, border, or banner title; \
-the page is part of your reply. Give charts fixed pixel heights (160-360px), keep the page under \
-about 900px tall, and avoid 100vh or height:100% on html/body. Links open the way chat links do.\n\
+viewBox at width:100%, and no horizontal scrolling. Give charts fixed pixel heights (160-360px), \
+keep the page under about 900px tall, and avoid 100vh or height:100% on html/body. Links open the \
+way chat links do.\n\
 \n\
 Theme: Zeron injects its active theme as CSS custom properties on :root and they follow the user's \
-settings: --foreground, --muted-foreground, --faint-foreground, --card, --card-strong, \
---card-foreground, --hover (pointer-over fill), --border, --border-strong, --accent, \
---accent-foreground, --accent-surface, --danger, --warning, --success, --code-background, \
---code-foreground, --chart-1 … --chart-6, --radius, --font-sans, --font-mono, \
---surface-treatment, and --background, which is transparent: there is no opaque page color, so \
-don't rely on masking what is behind an element. html carries data-surface (glass or opaque) and \
-data-appearance (light or dark) for the rare case the variables are not enough.";
+settings: --foreground, --muted-foreground, --faint-foreground, --hover, --border, --border-strong, \
+--accent, --accent-foreground, --danger, --warning, --success, --code-background, \
+--code-foreground, --chart-1 … --chart-6, --radius (bar and mark corners), --font-sans, \
+--font-mono, --surface-treatment, and --background, which is transparent: there is no page color to \
+paint or mask with. html carries data-surface (glass or opaque) and data-appearance (light or dark) \
+for the rare case the variables are not enough.";
 
 // ---- argument shapes ---------------------------------------------------------
 

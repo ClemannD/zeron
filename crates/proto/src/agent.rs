@@ -424,19 +424,16 @@ pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
 /// The CSS custom properties every visual page gets on `:root`. `show_visual`'s
 /// description promises them and the desktop UI defines them; both test
 /// against this list.
-pub const VISUAL_THEME_VARIABLES: [&str; 23] = [
+pub const VISUAL_THEME_VARIABLES: [&str; 20] = [
     "--background",
     "--foreground",
     "--muted-foreground",
     "--faint-foreground",
-    "--card",
-    "--card-strong",
     "--hover",
     "--border",
     "--border-strong",
     "--accent",
     "--accent-foreground",
-    "--accent-surface",
     "--danger",
     "--warning",
     "--success",

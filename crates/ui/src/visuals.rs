@@ -308,23 +308,20 @@ fn chart_series(theme: &Theme) -> Vec<String> {
 pub fn theme_css(theme: &Theme) -> String {
     let chart = chart_series(theme);
     // The page sits directly on the chat, which is translucent over the
-    // desktop with frosted glass and solid otherwise. Every fill here is
-    // therefore a translucent ink, like Zeron's own plates, so one page reads
-    // the same on both; there is no opaque page color to paint.
+    // desktop with frosted glass and solid otherwise. Content lays out on it
+    // the way the transcript does, with type, spacing, and hairlines rather
+    // than cards, so there is no panel fill to offer and no opaque page color
+    // to paint; the one fill is a translucent hover wash.
     let mut variables = vec![
         ("--background", "transparent".to_owned()),
         ("--foreground", css_color(theme.text)),
         ("--muted-foreground", css_color(theme.text_muted)),
         ("--faint-foreground", css_color(theme.text_faint)),
-        ("--card", css_color(theme.ink(0.045))),
-        ("--card-strong", css_color(theme.ink(0.08))),
-        ("--card-foreground", css_color(theme.text)),
         ("--hover", css_color(theme.wash(0.08))),
         ("--border", css_color(theme.border)),
         ("--border-strong", css_color(theme.border_strong)),
         ("--accent", css_color(theme.accent_strong)),
         ("--accent-foreground", css_color(theme.on_accent)),
-        ("--accent-surface", css_color(theme.accent_wash)),
         ("--danger", css_color(theme.danger)),
         ("--warning", css_color(theme.warning)),
         ("--success", css_color(theme.success)),
@@ -912,6 +909,8 @@ mod tests {
                 assert!(css.contains(&format!("{name}:")), "{name}");
             }
             assert!(css.contains("--background:transparent;"));
+            // Pages lay out on the chat; no panel fill invites a card.
+            assert!(!css.contains("--card"));
         }
     }
 
