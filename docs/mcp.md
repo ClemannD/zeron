@@ -171,7 +171,7 @@ done (this was the one bug the first live run found).
 
 `show_visual` is listed only when `ZERON_CHAT_ID` is set: it shows a
 self-contained HTML page (chart, table, diagram, mockup) inline in the calling
-chat, above the agent's final reply, like T3 Code's `html_render`. The engine
+chat, above the agent's final reply. The engine
 stores the page in uploads (`{id}-visual.html`) and folds a `visual` doc part
 into the chat's live turn through the run's engine event channel; with no live
 turn on this device the call fails and nothing is stored. The doc carries only
@@ -180,7 +180,11 @@ like any attachment; old clients see an empty part.
 
 The desktop UI (`crates/ui/src/visuals.rs`) serves each page from a private
 loopback server under an unguessable token, injecting the active theme as CSS
-custom properties. On Linux the page renders inline in the browser pane's
+custom properties. The page is transparent over a chat that may be frosted
+glass or opaque, so every fill variable is a translucent ink like Zeron's own
+plates (`--background` is `transparent`), `html` carries `data-surface` and
+`data-appearance`, and the tool description spells out the surface rules
+(no page backgrounds or opaque fills, full-opacity chart marks, themed text). On Linux the page renders inline in the browser pane's
 offscreen WebKit helper and GPUI composites its frames, so it scrolls, clips
 and blurs under the composer like any row; it reports its content height and
 link clicks back over the same server. macOS and Windows host pages as native

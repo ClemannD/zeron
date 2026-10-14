@@ -259,20 +259,39 @@ text reply; call it before writing that reply. Use it when a visual says more th
 reader already sees the page, so the reply should not announce, locate, or restate it: add only \
 what the page doesn't say.\n\
 \n\
-Layout: the frame is borderless and transparent, so the chat shows through: leave html, body, and \
-the outermost element with no background. It is as wide as the reply column (about 720px, narrower \
-in a tight window), and Zeron fits its height to the page. Use a fluid width (no fixed pixel widths \
-wider than 320px) with no outer padding, card, border, or banner title; the page is part of your \
-reply. Give charts fixed pixel heights. Avoid 100vh or height:100% on html/body. Links open the way \
-chat links do.\n\
+Surface: the page is transparent and sits directly on the chat. With Zeron's frosted glass the \
+chat is translucent over the user's wallpaper; with opaque surfaces it is a solid fill; either can \
+be light or dark. One page must read well on all four, so:\n\
+- Never paint html, body, or a full-width wrapper, and use no page-wide gradients or color blocks: \
+on glass they show as a slab.\n\
+- Panels use the translucent fills var(--card) or var(--card-strong), a 1px var(--border) hairline, \
+var(--radius) corners, and at least 12px padding. Never use opaque white, black, or grey fills, \
+box-shadows, or backdrop filters. Tint a highlighted panel with var(--accent-surface).\n\
+- Data marks (bars, lines, dots, swatches) use solid var(--chart-1) … var(--chart-6) at full \
+opacity, in that order; translucent marks wash out on glass. Use var(--accent) for the one thing to \
+notice, var(--success) / var(--warning) / var(--danger) only for status, gridlines and axes in \
+var(--border), and keep data labels outside colored marks.\n\
+- Text is var(--foreground); labels, axes, and captions var(--muted-foreground); tertiary notes \
+var(--faint-foreground). Never hard-code a text or fill color, and never assume a dark or light \
+background. Text on an var(--accent) fill uses var(--accent-foreground).\n\
+- Type inherits var(--font-sans) at 14px; titles 14-15px semibold, never larger than 18px; labels \
+11-12px; numbers in tables and labels use font-variant-numeric: tabular-nums; code uses \
+var(--font-mono). No web fonts, icon fonts, or emoji icons.\n\
 \n\
-Theme: Zeron injects its active theme as CSS custom properties on :root, and the base stylesheet \
-already sets text color and font from them: --background (the chat's own fill, for elements that \
-must mask what is behind them), --foreground, --muted-foreground, --faint-foreground, --card, --card-foreground, \
---border, --accent, --accent-foreground (text on --accent), --danger, --warning, --success, \
---code-background, --code-foreground, --chart-1 … --chart-6 (categorical series), --radius, \
---font-sans, --font-mono. Style with these instead of fixed colors so the page follows light and \
-dark mode.";
+Layout: the frame is borderless, as wide as the reply column (about 720px, as narrow as 360px), and \
+Zeron fits its height to the page. Make it fluid: no fixed pixel widths over 320px, SVG with a \
+viewBox at width:100%, no horizontal scrolling, and no outer padding, card, border, or banner title; \
+the page is part of your reply. Give charts fixed pixel heights (160-360px), keep the page under \
+about 900px tall, and avoid 100vh or height:100% on html/body. Links open the way chat links do.\n\
+\n\
+Theme: Zeron injects its active theme as CSS custom properties on :root and they follow the user's \
+settings: --foreground, --muted-foreground, --faint-foreground, --card, --card-strong, \
+--card-foreground, --hover (pointer-over fill), --border, --border-strong, --accent, \
+--accent-foreground, --accent-surface, --danger, --warning, --success, --code-background, \
+--code-foreground, --chart-1 … --chart-6, --radius, --font-sans, --font-mono, \
+--surface-treatment, and --background, which is transparent: there is no opaque page color, so \
+don't rely on masking what is behind an element. html carries data-surface (glass or opaque) and \
+data-appearance (light or dark) for the rare case the variables are not enough.";
 
 // ---- argument shapes ---------------------------------------------------------
 
@@ -1511,6 +1530,9 @@ mod tests {
             },
         );
         assert!(inside.has("show_visual"));
+        for name in zeron_proto::VISUAL_THEME_VARIABLES {
+            assert!(SHOW_VISUAL_DESCRIPTION.contains(name), "{name}");
+        }
         let shown = inside
             .call(
                 "show_visual",

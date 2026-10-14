@@ -264,32 +264,76 @@ fn css_font(family: &str, fallback: &str) -> String {
     )
 }
 
+/// Categorical chart colors: the theme's accent, then the five fixed hues
+/// that sit farthest from it, so no two series read alike whatever the
+/// accent. Solid at full opacity, deeper on light and brighter on dark, so
+/// they hold on glass and opaque surfaces alike.
+fn chart_series(theme: &Theme) -> Vec<String> {
+    // (hue in turns, light tone, dark tone): teal, amber, rose, violet, lime, sky.
+    const FIXED: [(f32, &str, &str); 6] = [
+        (0.486, "#0d9488", "#2dd4bf"),
+        (0.106, "#d97706", "#fbbf24"),
+        (0.964, "#e11d48", "#fb7185"),
+        (0.728, "#7c3aed", "#a78bfa"),
+        (0.236, "#65a30d", "#a3e635"),
+        (0.553, "#0284c7", "#38bdf8"),
+    ];
+    let accent = theme.accent_strong;
+    let distance = |hue: f32| {
+        let d = (hue - accent.h).rem_euclid(1.0);
+        d.min(1.0 - d)
+    };
+    // A grey accent has no hue to collide with; drop the last fixed color.
+    let closest = if accent.s < 0.15 {
+        FIXED.len() - 1
+    } else {
+        (0..FIXED.len())
+            .min_by(|a, b| distance(FIXED[*a].0).total_cmp(&distance(FIXED[*b].0)))
+            .unwrap_or(0)
+    };
+    let light = theme.appearance.is_light();
+    std::iter::once(css_color(accent))
+        .chain(
+            FIXED
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| *ix != closest)
+                .map(|(_, (_, l, d))| if light { l } else { d }.to_string()),
+        )
+        .collect()
+}
+
 /// The theme a page styles against, as `:root` custom properties. The names
 /// are the ones `show_visual`'s description promises agents.
 pub fn theme_css(theme: &Theme) -> String {
-    let chart = [
-        theme.accent,
-        theme.syntax.function,
-        theme.syntax.string,
-        theme.syntax.keyword,
-        theme.syntax.number,
-        theme.syntax.type_name,
-    ];
+    let chart = chart_series(theme);
+    // The page sits directly on the chat, which is translucent over the
+    // desktop with frosted glass and solid otherwise. Every fill here is
+    // therefore a translucent ink, like Zeron's own plates, so one page reads
+    // the same on both; there is no opaque page color to paint.
     let mut variables = vec![
-        ("--background", css_color(theme.glass())),
+        ("--background", "transparent".to_owned()),
         ("--foreground", css_color(theme.text)),
         ("--muted-foreground", css_color(theme.text_muted)),
         ("--faint-foreground", css_color(theme.text_faint)),
-        ("--card", css_color(theme.surface_card)),
+        ("--card", css_color(theme.ink(0.045))),
+        ("--card-strong", css_color(theme.ink(0.08))),
         ("--card-foreground", css_color(theme.text)),
+        ("--hover", css_color(theme.wash(0.08))),
         ("--border", css_color(theme.border)),
+        ("--border-strong", css_color(theme.border_strong)),
         ("--accent", css_color(theme.accent_strong)),
         ("--accent-foreground", css_color(theme.on_accent)),
+        ("--accent-surface", css_color(theme.accent_wash)),
         ("--danger", css_color(theme.danger)),
         ("--warning", css_color(theme.warning)),
         ("--success", css_color(theme.success)),
         ("--code-background", css_color(theme.code_wash)),
         ("--code-foreground", css_color(theme.code_text)),
+        (
+            "--surface-treatment",
+            if theme.is_glass() { "glass" } else { "opaque" }.to_owned(),
+        ),
         ("--radius", "10px".to_owned()),
         (
             "--font-sans",
@@ -314,11 +358,7 @@ pub fn theme_css(theme: &Theme) -> String {
         "--chart-5",
         "--chart-6",
     ];
-    variables.extend(
-        chart_names
-            .into_iter()
-            .zip(chart.into_iter().map(css_color)),
-    );
+    variables.extend(chart_names.into_iter().zip(chart));
     let scheme = if theme.appearance.is_light() {
         "light"
     } else {
@@ -344,10 +384,12 @@ font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothi
 scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}\
 code,kbd,pre,samp{font-family:var(--font-mono)}";
 
-// Reports the content height (measured as the frame needs it: the document's
+// Marks `html` with `data-surface` (glass/opaque) and `data-appearance`
+// (light/dark) for pages that adapt beyond the variables, reports the content
+// height (measured as the frame needs it: the document's
 // own height unless it overflows) and hands link clicks to Zeron, both as
 // same-origin requests to the page's own server path.
-const BOOTSTRAP_SCRIPT: &str = r##"(function(){var h=0,n=0;function z(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(!v||v===h)return;h=v;fetch("size?h="+v+"&s="+(++n),{cache:"no-store"}).catch(function(){});}if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);document.addEventListener("click",function(e){var l=e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}),u;if(!l)return;try{u=new URL(l.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol)||u.href.split("#")[0]===location.href.split("#")[0])return;e.preventDefault();fetch("open?u="+encodeURIComponent(u.href),{cache:"no-store"}).catch(function(){});},true);})();"##;
+const BOOTSTRAP_SCRIPT: &str = r##"(function(){var d=document.documentElement,c=getComputedStyle(d);d.dataset.surface=c.getPropertyValue("--surface-treatment").trim();d.dataset.appearance=c.getPropertyValue("color-scheme").trim();var h=0,n=0;function z(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(!v||v===h)return;h=v;fetch("size?h="+v+"&s="+(++n),{cache:"no-store"}).catch(function(){});}if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);document.addEventListener("click",function(e){var l=e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}),u;if(!l)return;try{u=new URL(l.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol)||u.href.split("#")[0]===location.href.split("#")[0])return;e.preventDefault();fetch("open?u="+encodeURIComponent(u.href),{cache:"no-store"}).catch(function(){});},true);})();"##;
 
 /// Put the theme and bootstrap at the start of the document head, so the
 /// page's own styles and scripts come after (and override) them.
@@ -864,28 +906,25 @@ mod tests {
 
     #[test]
     fn theme_css_defines_every_promised_variable() {
-        let css = theme_css(&Theme::dark());
-        for name in [
-            "--background",
-            "--foreground",
-            "--muted-foreground",
-            "--faint-foreground",
-            "--card",
-            "--card-foreground",
-            "--border",
-            "--accent",
-            "--accent-foreground",
-            "--danger",
-            "--warning",
-            "--success",
-            "--code-background",
-            "--code-foreground",
-            "--chart-6",
-            "--radius",
-            "--font-sans",
-            "--font-mono",
-        ] {
-            assert!(css.contains(&format!("{name}:")), "{name}");
+        for theme in [Theme::dark(), Theme::light()] {
+            let css = theme_css(&theme);
+            for name in zeron_proto::VISUAL_THEME_VARIABLES {
+                assert!(css.contains(&format!("{name}:")), "{name}");
+            }
+            assert!(css.contains("--background:transparent;"));
         }
+    }
+
+    #[test]
+    fn chart_series_drops_the_fixed_hue_nearest_the_accent() {
+        let mut theme = Theme::light();
+        // A violet accent: the fixed violet goes, the other five stay.
+        theme.accent_strong = gpui::hsla(0.72, 0.8, 0.55, 1.0);
+        let series = chart_series(&theme);
+        assert_eq!(series.len(), 6);
+        assert!(!series.contains(&"#7c3aed".to_owned()));
+        assert!(series.contains(&"#0d9488".to_owned()));
+        theme.accent_strong = gpui::hsla(0.49, 0.8, 0.4, 1.0);
+        assert!(!chart_series(&theme).contains(&"#0d9488".to_owned()));
     }
 }

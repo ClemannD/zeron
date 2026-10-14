@@ -421,6 +421,34 @@ pub const VISUAL_MAX_HEIGHT: u32 = 2000;
 pub const VISUAL_DEFAULT_HEIGHT: u32 = 360;
 pub const VISUAL_MAX_BYTES: usize = 512 * 1024;
 pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+/// The CSS custom properties every visual page gets on `:root`. `show_visual`'s
+/// description promises them and the desktop UI defines them; both test
+/// against this list.
+pub const VISUAL_THEME_VARIABLES: [&str; 23] = [
+    "--background",
+    "--foreground",
+    "--muted-foreground",
+    "--faint-foreground",
+    "--card",
+    "--card-strong",
+    "--hover",
+    "--border",
+    "--border-strong",
+    "--accent",
+    "--accent-foreground",
+    "--accent-surface",
+    "--danger",
+    "--warning",
+    "--success",
+    "--code-background",
+    "--code-foreground",
+    "--chart-1",
+    "--chart-6",
+    "--radius",
+    "--font-sans",
+    "--font-mono",
+    "--surface-treatment",
+];
 
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
