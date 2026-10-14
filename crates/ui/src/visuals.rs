@@ -156,6 +156,18 @@ fn respond(request_line: &str, host_ok: bool, pages: &Mutex<Pages>) -> Vec<u8> {
         return reply(400, "text/plain", "");
     };
     let mut segments = url.path().trim_start_matches('/').split('/');
+    // The bundled interface fonts, shared by every page (`/fonts/{ix}.ttf`).
+    if let Some(ix) = url
+        .path()
+        .strip_prefix("/fonts/")
+        .and_then(|name| name.strip_suffix(".ttf"))
+        .and_then(|ix| ix.parse::<usize>().ok())
+    {
+        return match crate::typography::bundled_web_fonts().nth(ix) {
+            Some((_, _, _, bytes)) => reply_bytes(200, "font/ttf", "max-age=31536000", bytes),
+            None => reply(404, "text/plain", ""),
+        };
+    }
     let (Some("v"), Some(token), rest) = (segments.next(), segments.next(), segments.next()) else {
         return reply(404, "text/plain", "");
     };
@@ -204,6 +216,10 @@ fn respond(request_line: &str, host_ok: bool, pages: &Mutex<Pages>) -> Vec<u8> {
 }
 
 fn reply(status: u16, content_type: &str, body: &str) -> Vec<u8> {
+    reply_bytes(status, content_type, "no-store", body.as_bytes())
+}
+
+fn reply_bytes(status: u16, content_type: &str, cache: &str, body: &[u8]) -> Vec<u8> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -212,12 +228,14 @@ fn reply(status: u16, content_type: &str, body: &str) -> Vec<u8> {
         405 => "Method Not Allowed",
         _ => "Not Found",
     };
-    format!(
+    let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+         Cache-Control: {cache}\r\nConnection: close\r\n\r\n",
         body.len()
     )
-    .into_bytes()
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
 }
 
 /// Serve `html` until the returned handle drops. Signals from the page arrive
@@ -265,6 +283,10 @@ fn css_color(color: gpui::Hsla) -> String {
 }
 
 fn css_font(family: &str, fallback: &str) -> String {
+    // GPUI's name for the platform UI face.
+    if family == ".SystemUIFont" {
+        return fallback.to_owned();
+    }
     format!(
         "\"{}\", {fallback}",
         family.replace(['"', '\\', ';', '<', '>'], "")
@@ -310,9 +332,30 @@ fn chart_series(theme: &Theme) -> Vec<String> {
         .collect()
 }
 
+/// The transcript's type scale at the 16px design base: (variable, size,
+/// line height). Pages are laid out at this base and zoomed as a whole by the
+/// user's interface size over 16, the way rem-based interface text scales.
+const TYPE_SCALE: [(&str, f32, f32); 6] = [
+    ("--font-size-xs", 11.0, 16.0),
+    ("--font-size-sm", 12.0, 18.0),
+    ("--font-size", 14.0, 22.0),
+    ("--font-size-lg", 15.0, 22.0),
+    ("--font-size-xl", 16.0, 24.0),
+    ("--font-size-2xl", 19.0, 27.0),
+];
+
+/// The page zoom that makes a page's 16px design base render at the user's
+/// interface size.
+fn page_zoom(cx: &App) -> f32 {
+    crate::typography::font_size(cx).pixels() / 16.0
+}
+
 /// The theme a page styles against, as `:root` custom properties. The names
-/// are the ones `show_visual`'s description promises agents.
-pub fn theme_css(theme: &Theme) -> String {
+/// are the ones `show_visual`'s description promises agents. `zoom` is the
+/// page zoom ([`page_zoom`]); sizes are design pixels, except that code keeps
+/// its absolute size, as it does in the transcript.
+pub fn theme_css(theme: &Theme, zoom: f32) -> String {
+    let px = |size: f32| format!("{}px", (size * 100.0).round() / 100.0);
     let chart = chart_series(theme);
     // The page sits directly on the chat, which is translucent over the
     // desktop with frosted glass and solid otherwise. Content lays out on it
@@ -344,7 +387,7 @@ pub fn theme_css(theme: &Theme) -> String {
             "--font-sans",
             css_font(
                 &theme.font_sans,
-                "-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif",
+                "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
             ),
         ),
         (
@@ -355,6 +398,12 @@ pub fn theme_css(theme: &Theme) -> String {
             ),
         ),
     ];
+    for (name, size, _) in TYPE_SCALE {
+        variables.push((name, px(size)));
+    }
+    variables.push(("--line-height", px(22.0)));
+    variables.push(("--font-size-code", px(theme.code_font_size / zoom)));
+    variables.push(("--zoom", format!("{zoom}")));
     let chart_names = [
         "--chart-1",
         "--chart-2",
@@ -377,24 +426,39 @@ pub fn theme_css(theme: &Theme) -> String {
         css.push(';');
     }
     css.push('}');
+    for (ix, (family, weight, italic, _)) in crate::typography::bundled_web_fonts().enumerate() {
+        let style = if italic { "italic" } else { "normal" };
+        css.push_str(&format!(
+            "@font-face{{font-family:\"{family}\";font-weight:{weight};font-style:{style};\
+             font-display:block;src:url(/fonts/{ix}.ttf) format(\"truetype\")}}"
+        ));
+    }
     css.push_str(BASE_CSS);
     css
 }
 
 // The page is transparent: the chat shows through wherever it paints no
 // background of its own. The frame scrolls nothing; a scrollbar inside a reply
-// reads as a box within the chat, so it stays hidden.
+// reads as a box within the chat, so it stays hidden. Text always uses the
+// theme's families: the rules are `!important` (a page's own font-family
+// cannot win) and zero-specificity (:where), so the mono rule after the sans
+// one decides inside code. 1rem is the transcript's body size.
 const BASE_CSS: &str = "html{background:transparent;color:var(--foreground);\
-font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;\
-scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}\
-code,kbd,pre,samp{font-family:var(--font-mono)}";
+font-size:var(--font-size)!important;line-height:var(--line-height);\
+-webkit-font-smoothing:antialiased;scrollbar-width:none}html::-webkit-scrollbar{display:none}\
+body{margin:0}:where(html,body,body *){font-family:var(--font-sans)!important}\
+:where(code,pre,kbd,samp,code *,pre *,kbd *,samp *){font-family:var(--font-mono)!important}";
 
 // Marks `html` with `data-surface` (glass/opaque) and `data-appearance`
-// (light/dark) for pages that adapt beyond the variables, reports the content
+// (light/dark) for pages that adapt beyond the variables, snaps every text
+// run onto the type scale whenever the page changes (code takes the code
+// size; SVG text is judged by its rendered size, so a scaled viewBox still
+// lands on the scale, after undoing WebKit's zoom-divided SVG font sizes),
+// reports the content
 // height (measured as the frame needs it: the document's
 // own height unless it overflows) and hands link clicks to Zeron, both as
 // same-origin requests to the page's own server path.
-const BOOTSTRAP_SCRIPT: &str = r##"(function(){var d=document.documentElement,c=getComputedStyle(d);d.dataset.surface=c.getPropertyValue("--surface-treatment").trim();d.dataset.appearance=c.getPropertyValue("color-scheme").trim();var h=0,n=0;function z(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(!v||v===h)return;h=v;fetch("size?h="+v+"&s="+(++n),{cache:"no-store"}).catch(function(){});}if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);document.addEventListener("click",function(e){var l=e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}),u;if(!l)return;try{u=new URL(l.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol)||u.href.split("#")[0]===location.href.split("#")[0])return;e.preventDefault();fetch("open?u="+encodeURIComponent(u.href),{cache:"no-store"}).catch(function(){});},true);})();"##;
+const BOOTSTRAP_SCRIPT: &str = r##"(function(){var d=document.documentElement,c=getComputedStyle(d);d.dataset.surface=c.getPropertyValue("--surface-treatment").trim();d.dataset.appearance=c.getPropertyValue("color-scheme").trim();function q(k){return parseFloat(c.getPropertyValue(k));}var S=["--font-size-xs","--font-size-sm","--font-size","--font-size-lg","--font-size-xl","--font-size-2xl"].map(q),C=q("--font-size-code"),Z=q("--zoom")||1,Q=0,P=0;function step(r){return S.reduce(function(a,b){return Math.abs(b-r)<Math.abs(a-r)?b:a;});}function svgq(){if(!Q){var n="http://www.w3.org/2000/svg",g=document.createElementNS(n,"svg"),t=document.createElementNS(n,"text");g.setAttribute("style","position:absolute;width:0;height:0;overflow:hidden");t.setAttribute("font-size","100");g.appendChild(t);document.body.appendChild(g);Q=100/parseFloat(getComputedStyle(t).fontSize)||1;g.remove();}return Q;}function snap(){P=0;if(!document.body)return;var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),seen=new Set(),t;while(t=w.nextNode()){var e=t.parentElement;if(!e||seen.has(e)||!t.nodeValue.trim())continue;seen.add(e);var f=parseFloat(getComputedStyle(e).fontSize),k=1,m=e instanceof SVGElement&&e.getScreenCTM&&e.getScreenCTM();if(m){k=Math.hypot(m.a,m.b)||1;f*=svgq();}var r=f*k,g=e.closest("code,pre,kbd,samp")?C:step(r);if(g&&Math.abs(r-g)>0.5)e.style.setProperty("font-size",g/k+"px","important");}}function later(){if(!P)P=requestAnimationFrame(snap);}document.addEventListener("DOMContentLoaded",function(){snap();new MutationObserver(later).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:["style","class","font-size","transform","viewBox"]});});window.addEventListener("load",snap);window.addEventListener("resize",later);var h=0,n=0;function z(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(!v||v===h)return;h=v;fetch("size?h="+Math.ceil(v*Z)+"&s="+(++n),{cache:"no-store"}).catch(function(){});}if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);document.addEventListener("click",function(e){var l=e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}),u;if(!l)return;try{u=new URL(l.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol)||u.href.split("#")[0]===location.href.split("#")[0])return;e.preventDefault();fetch("open?u="+encodeURIComponent(u.href),{cache:"no-store"}).catch(function(){});},true);})();"##;
 
 // Tells Zeron when the page is changing, at most every 250ms, so a platform
 // that composites snapshots (macOS) takes frames only while there is something
@@ -685,7 +749,11 @@ impl VisualFrame {
                 self.theme_css = current_theme_css(cx);
                 // A reload restarts the page's report sequence.
                 self.height_seq = 0;
-                surface.update(cx, |surface, cx| surface.navigate(&url, window, cx));
+                let zoom = page_zoom(cx);
+                surface.update(cx, |surface, cx| {
+                    surface.set_page_zoom(zoom);
+                    surface.navigate(&url, window, cx)
+                });
             }
             return;
         }
@@ -696,6 +764,7 @@ impl VisualFrame {
         let surface = cx.new(|cx| {
             let mut surface = crate::browser::BrowserSurface::new(context, false, window, cx);
             surface.set_inline();
+            surface.set_page_zoom(page_zoom(cx));
             surface.set_presentation(crate::browser::model::Presentation::Live, cx);
             surface.navigate(&url, window, cx);
             surface
@@ -731,6 +800,7 @@ impl VisualFrame {
                 self.theme_css = current_theme_css(cx);
                 // A reload restarts the page's report sequence.
                 self.height_seq = 0;
+                page.set_page_zoom(page_zoom(cx));
                 page.navigate(&url);
                 self.stay_live(Duration::from_secs(3));
             }
@@ -751,6 +821,7 @@ impl VisualFrame {
                     return;
                 }
             };
+        page.set_page_zoom(page_zoom(cx));
         self.page = Some(page);
         self.stay_live(Duration::from_secs(3));
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -864,7 +935,7 @@ fn current_theme_css(cx: &App) -> Arc<str> {
     thread_local! {
         static CACHE: std::cell::RefCell<Option<(u64, Arc<str>)>> = const { std::cell::RefCell::new(None) };
     }
-    let css = theme_css(Theme::of(cx));
+    let css = theme_css(Theme::of(cx), page_zoom(cx));
     let hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1132,7 +1203,7 @@ mod tests {
     #[test]
     fn theme_css_defines_every_promised_variable() {
         for theme in [Theme::dark(), Theme::light()] {
-            let css = theme_css(&theme);
+            let css = theme_css(&theme, 1.0);
             for name in zeron_proto::VISUAL_THEME_VARIABLES {
                 assert!(css.contains(&format!("{name}:")), "{name}");
             }
@@ -1140,6 +1211,26 @@ mod tests {
             // Pages lay out on the chat; no panel fill invites a card.
             assert!(!css.contains("--card"));
         }
+    }
+
+    #[test]
+    fn type_scale_follows_the_interface_size_and_fonts_are_served() {
+        // A 20px interface: design sizes, zoomed 1.25 as a whole; code keeps
+        // its absolute size.
+        let mut theme = Theme::dark();
+        theme.code_font_size = 12.5;
+        let css = theme_css(&theme, 1.25);
+        assert!(css.contains("--font-size:14px;"));
+        assert!(css.contains("--font-size-2xl:19px;"));
+        assert!(css.contains("--zoom:1.25;"));
+        assert!(css.contains("--font-size-code:10px;"));
+        assert!(css.contains("font-family:var(--font-sans)!important"));
+        assert!(css.contains("src:url(/fonts/0.ttf)"));
+        let pages = Mutex::new(Pages::default());
+        let font = respond("GET /fonts/0.ttf HTTP/1.1", true, &pages);
+        assert!(font.starts_with(b"HTTP/1.1 200 OK\r\nContent-Type: font/ttf"));
+        let missing = respond("GET /fonts/99.ttf HTTP/1.1", true, &pages);
+        assert!(missing.starts_with(b"HTTP/1.1 404"));
     }
 
     #[test]

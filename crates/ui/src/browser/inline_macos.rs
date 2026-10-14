@@ -176,6 +176,14 @@ impl InlinePage {
         }
     }
 
+    /// Zoom the whole page, so a page laid out at the 16px design base
+    /// renders at the user's interface size (the snapshot captures it zoomed).
+    pub fn set_page_zoom(&self, zoom: f32) {
+        unsafe {
+            let _: () = msg_send![&*self.host.view, setPageZoom: f64::from(zoom)];
+        }
+    }
+
     pub fn placer(&self) -> PagePlacer {
         PagePlacer(Rc::downgrade(&self.host))
     }

@@ -186,7 +186,14 @@ does: no cards or boxed panels, only type, spacing and hairline rules. The
 variables offer no panel fills (`--background` is `transparent`; the one fill
 is a translucent hover wash), `html` carries `data-surface` and
 `data-appearance`, and the tool description spells out the style and surface
-rules (no containers or backgrounds, full-opacity chart marks, themed text). On Linux the page renders inline in the browser pane's
+rules (no containers or backgrounds, full-opacity chart marks, themed text).
+Type always matches the transcript: the bundled Geist faces are served as web
+fonts, the theme families are applied with `!important`, pages are laid out at
+the transcript's 16px design scale (`--font-size-*`, 1rem = body) and the
+helper zooms the whole page by the user's interface size over 16, the way
+rem-based interface text scales, and the bootstrap snaps every text run onto
+that scale (code onto the code size, SVG text by its rendered size) whenever
+the page changes. On Linux the page renders inline in the browser pane's
 offscreen WebKit helper and GPUI composites its frames, so it scrolls, clips
 and blurs under the composer like any row; it reports its content height and
 link clicks back over the same server. macOS and Windows host pages as native

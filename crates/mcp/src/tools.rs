@@ -263,8 +263,8 @@ Style: the page is part of your reply, not a widget. Lay content directly on the
 Zeron's own transcript does, with type, spacing, and alignment:\n\
 - No cards, tiles, boxed panels, or bordered or filled containers around anything: not around a \
 chart, a stat, a table, or the page. No outer padding, banner title, or badge chrome.\n\
-- Stats are a row of plain figures, a large number over a short var(--muted-foreground) label, \
-separated by space; at most a 1px var(--border) rule between groups.\n\
+- Stats are a row of plain figures, a var(--font-size-2xl) number over a short \
+var(--muted-foreground) label, separated by space; at most a 1px var(--border) rule between groups.\n\
 - A chart is its title as a plain heading, an inline legend, and the plot; no frame around it. \
 Tables have no outer border: a var(--muted-foreground) header row and 1px var(--border) row rules.\n\
 - Separate sections with whitespace (24-32px) or a single 1px var(--border) rule.\n\
@@ -281,9 +281,17 @@ and axes in var(--border), and keep data labels outside colored marks.\n\
 - Text is var(--foreground); labels, axes, and captions var(--muted-foreground); tertiary notes \
 var(--faint-foreground). Never hard-code a text or fill color, and never assume a dark or light \
 background. Text on an var(--accent) mark uses var(--accent-foreground).\n\
-- Type inherits var(--font-sans) at 14px; titles 14-15px semibold, never larger than 18px; stat \
-figures up to 24px; labels 11-12px; numbers use font-variant-numeric: tabular-nums; code uses \
-var(--font-mono). No web fonts, icon fonts, or emoji icons.\n\
+- Type is Zeron's, and Zeron enforces it. Lay the page out at Zeron's default size; Zeron zooms \
+the whole page to the user's text size. Every text element renders in \
+the interface font (var(--font-sans); var(--font-mono) at var(--font-size-code) inside code, pre, \
+kbd, samp), and every text size snaps to the transcript's scale. So never set font-family, and \
+size text only with the scale: var(--font-size-xs) axis ticks and footnotes, var(--font-size-sm) \
+labels and captions, var(--font-size) body (1rem; the default), var(--font-size-lg) section \
+titles, var(--font-size-xl) the page title, var(--font-size-2xl) a headline figure. Use weights \
+400-700 (600 for titles), var(--line-height) for body text, and font-variant-numeric: \
+tabular-nums for numbers. Put text in HTML or SVG, not canvas; if a library draws on canvas, \
+read the family and sizes from getComputedStyle(document.documentElement). No web fonts, icon \
+fonts, or emoji icons.\n\
 \n\
 Layout: the frame is borderless, as wide as the reply column (about 720px, as narrow as 360px), and \
 Zeron fits its height to the page. Make it fluid: no fixed pixel widths over 320px, SVG with a \
@@ -295,7 +303,8 @@ Theme: Zeron injects its active theme as CSS custom properties on :root and they
 settings: --foreground, --muted-foreground, --faint-foreground, --hover, --border, --border-strong, \
 --accent, --accent-foreground, --danger, --warning, --success, --code-background, \
 --code-foreground, --chart-1 … --chart-6, --radius (bar and mark corners), --font-sans, \
---font-mono, --surface-treatment, and --background, which is transparent: there is no page color to \
+--font-mono, --font-size-xs, --font-size-sm, --font-size, --font-size-lg, --font-size-xl, \
+--font-size-2xl, --font-size-code, --line-height, --surface-treatment, and --background, which is transparent: there is no page color to \
 paint or mask with. html carries data-surface (glass or opaque) and data-appearance (light or dark) \
 for the rare case the variables are not enough.";
 

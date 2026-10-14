@@ -48,8 +48,9 @@ If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
 When a chart, table, diagram, or mockup would say more than prose and `show_visual` \
 is available, build a self-contained HTML page and show it with `show_visual` before \
 your final reply. Follow its style rules: lay content directly on the chat with no \
-cards or boxed panels, and style only with the injected theme variables, since the \
-chat may be frosted glass or opaque, light or dark. The reader sees the page above that reply, so don't announce or restate it.";
+cards or boxed panels, size text only with the injected type scale (Zeron renders \
+the interface font at the user's text size), and style only with the injected theme \
+variables, since the chat may be frosted glass or opaque, light or dark. The reader sees the page above that reply, so don't announce or restate it.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

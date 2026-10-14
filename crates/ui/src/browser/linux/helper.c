@@ -24,6 +24,8 @@ typedef struct {
     gchar *error;
     guint width, height;
     double scale;
+    // Page zoom on top of the device scale ("zoom"); 1 for browser tabs.
+    double page_zoom;
     WebKitOptionMenu *options;
     gchar *context_link;
 } Page;
@@ -311,6 +313,7 @@ static Page *new_page(guint id) {
     p->width = 800;
     p->height = 600;
     p->scale = 1;
+    p->page_zoom = 1;
     p->visible = TRUE;
     p->window = gtk_offscreen_window_new();
     // An alpha visual lets a page opt into a transparent background
@@ -527,6 +530,12 @@ static void command(JsonObject *o) {
         const char *url = string(o, "url");
         if (allowed(url))
             webkit_web_view_load_uri(p->web, url);
+    } else if (!strcmp(cmd, "zoom")) {
+        double zoom = number(o, "value");
+        if (zoom >= 0.25 && zoom <= 5) {
+            p->page_zoom = zoom;
+            webkit_web_view_set_zoom_level(p->web, p->scale * zoom);
+        }
     } else if (!strcmp(cmd, "transparent")) {
         GdkRGBA clear = {0, 0, 0, 0};
         webkit_web_view_set_background_color(p->web, &clear);
@@ -597,7 +606,7 @@ static void command(JsonObject *o) {
             p->width = w;
             p->height = h;
             p->scale = scale;
-            webkit_web_view_set_zoom_level(p->web, scale);
+            webkit_web_view_set_zoom_level(p->web, scale * p->page_zoom);
             gtk_window_set_default_size(GTK_WINDOW(p->window), w, h);
             gtk_widget_set_size_request(GTK_WIDGET(p->web), w, h);
             gtk_widget_queue_resize(p->window);

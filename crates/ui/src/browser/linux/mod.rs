@@ -456,6 +456,9 @@ impl super::BrowserSurface {
                     if this.inline {
                         native.command(json!({"cmd":"transparent"}));
                     }
+                    if this.page_zoom != 1.0 {
+                        native.command(json!({"cmd":"zoom","value":this.page_zoom}));
+                    }
                     let result = this
                         .page
                         .url

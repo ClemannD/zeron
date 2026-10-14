@@ -117,6 +117,9 @@ pub struct BrowserSurface {
     /// A page embedded in other content (an agent visual): no toolbar, no
     /// focus grab on load, and wheel scrolling stays with the host.
     inline: bool,
+    /// Whole-page zoom, applied by the native host (Linux), so a page laid
+    /// out at a design size scales the way rem-based interface text does.
+    page_zoom: f32,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
     #[cfg(any(target_os = "macos", windows))]
@@ -201,6 +204,7 @@ impl BrowserSurface {
             fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
             inline: false,
+            page_zoom: 1.0,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(any(target_os = "macos", windows))]
@@ -226,6 +230,18 @@ impl BrowserSurface {
     /// Embed the page in other content instead of a browser tab.
     pub fn set_inline(&mut self) {
         self.inline = true;
+    }
+
+    /// Zoom the whole page (Linux; other hosts keep 100%).
+    pub fn set_page_zoom(&mut self, zoom: f32) {
+        if self.page_zoom == zoom {
+            return;
+        }
+        self.page_zoom = zoom;
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.native {
+            native.command(serde_json::json!({"cmd":"zoom","value":zoom}));
+        }
     }
 
     pub fn title(&self) -> gpui::SharedString {
