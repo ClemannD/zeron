@@ -3,6 +3,8 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) mod inline_macos;
 #[cfg(target_os = "linux")]
 use linux as native;
 #[cfg(target_os = "macos")]

@@ -41,6 +41,9 @@ pub enum VisualSignal {
         seq: u64,
     },
     Open(String),
+    /// The page is changing (animating, mutating, running timers): composited
+    /// platforms keep taking frames for a moment.
+    Active,
 }
 
 #[derive(Default)]
@@ -184,6 +187,10 @@ fn respond(request_line: &str, host_ok: bool, pages: &Mutex<Pages>) -> Vec<u8> {
             }
             reply(204, "text/plain", "")
         }
+        "active" => {
+            let _ = signals.send(VisualSignal::Active);
+            reply(204, "text/plain", "")
+        }
         "open" => {
             if let Some(link) = query("u")
                 && url::Url::parse(&link).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
@@ -318,6 +325,7 @@ pub fn theme_css(theme: &Theme) -> String {
         ("--muted-foreground", css_color(theme.text_muted)),
         ("--faint-foreground", css_color(theme.text_faint)),
         ("--hover", css_color(theme.wash(0.08))),
+        ("--selection", css_color(theme.selection)),
         ("--border", css_color(theme.border)),
         ("--border-strong", css_color(theme.border_strong)),
         ("--accent", css_color(theme.accent_strong)),
@@ -388,6 +396,17 @@ code,kbd,pre,samp{font-family:var(--font-mono)}";
 // same-origin requests to the page's own server path.
 const BOOTSTRAP_SCRIPT: &str = r##"(function(){var d=document.documentElement,c=getComputedStyle(d);d.dataset.surface=c.getPropertyValue("--surface-treatment").trim();d.dataset.appearance=c.getPropertyValue("color-scheme").trim();var h=0,n=0;function z(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(!v||v===h)return;h=v;fetch("size?h="+v+"&s="+(++n),{cache:"no-store"}).catch(function(){});}if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);document.addEventListener("click",function(e){var l=e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}),u;if(!l)return;try{u=new URL(l.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol)||u.href.split("#")[0]===location.href.split("#")[0])return;e.preventDefault();fetch("open?u="+encodeURIComponent(u.href),{cache:"no-store"}).catch(function(){});},true);})();"##;
 
+// Tells Zeron when the page is changing, at most every 250ms, so a platform
+// that composites snapshots (macOS) takes frames only while there is something
+// new to show: animation frames, DOM and style changes, transitions and CSS
+// animations, timers, and form input.
+const ACTIVITY_SCRIPT: &str = r##"(function(){var t=0;function a(){var n=Date.now();if(n-t<250)return;t=n;fetch("active",{cache:"no-store"}).catch(function(){});}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"##;
+
+// macOS shows a page through WebKit snapshots, which leave out the selection
+// highlight, so the page draws its own: translucent boxes over the selected
+// text, in the theme's selection color, as ordinary (unhittable) content.
+const SELECTION_SCRIPT: &str = r##"(function(){var l=null;function d(){var s=getSelection();if(l){l.remove();l=null;}if(!s||s.isCollapsed||!s.rangeCount)return;var c=getComputedStyle(document.documentElement).getPropertyValue("--selection").trim()||"rgba(0,122,255,.3)";l=document.createElement("div");l.setAttribute("aria-hidden","true");l.style.cssText="position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647";for(var i=0;i<s.rangeCount;i++){var rs=s.getRangeAt(i).getClientRects();for(var j=0;j<rs.length;j++){var r=rs[j];if(!r.width||!r.height)continue;var b=document.createElement("div");b.style.cssText="position:absolute;border-radius:2px;background:"+c+";left:"+(r.left+scrollX)+"px;top:"+(r.top+scrollY)+"px;width:"+r.width+"px;height:"+r.height+"px";l.appendChild(b);}}document.documentElement.appendChild(l);}document.addEventListener("selectionchange",d);window.addEventListener("resize",d);})();"##;
+
 /// Put the theme and bootstrap at the start of the document head, so the
 /// page's own styles and scripts come after (and override) them.
 fn inject_bootstrap(html: &str, theme_css: &str) -> String {
@@ -403,6 +422,10 @@ fn inject_bootstrap(html: &str, theme_css: &str) -> String {
     markup.push_str(theme_css);
     markup.push_str("</style><script>");
     markup.push_str(BOOTSTRAP_SCRIPT);
+    markup.push_str(ACTIVITY_SCRIPT);
+    if cfg!(target_os = "macos") {
+        markup.push_str(SELECTION_SCRIPT);
+    }
     markup.push_str("</script>");
     let tag_end = |open: &str| {
         let start = lower.find(open)?;
@@ -441,11 +464,22 @@ pub struct VisualFrame {
     load: Load,
     signals: Option<UnboundedReceiver<VisualSignal>>,
     link_ui: Option<LinkUi>,
+    /// Where the page may take the pointer, in window pixels: the transcript
+    /// above the chrome it scrolls under.
+    input_area: Option<gpui::Bounds<gpui::Pixels>>,
     theme_css: Arc<str>,
     #[cfg(target_os = "linux")]
     surface: Option<gpui::Entity<crate::browser::BrowserSurface>>,
     #[cfg(target_os = "linux")]
     _surface_events: Option<gpui::Subscription>,
+    #[cfg(target_os = "macos")]
+    page: Option<crate::browser::inline_macos::InlinePage>,
+    /// The page's latest composited frame and its pixels per point.
+    #[cfg(target_os = "macos")]
+    image: Option<(Arc<gpui::RenderImage>, f32)>,
+    /// Frames keep coming until then: the page loaded, resized, or changed.
+    #[cfg(target_os = "macos")]
+    live_until: std::time::Instant,
     /// When this frame last rendered. Pages offscreen for a while release
     /// their engine page and reload when scrolled back.
     last_rendered: std::time::Instant,
@@ -500,11 +534,18 @@ impl VisualFrame {
             load,
             signals: None,
             link_ui: None,
+            input_area: None,
             theme_css: Arc::from(""),
             #[cfg(target_os = "linux")]
             surface: None,
             #[cfg(target_os = "linux")]
             _surface_events: None,
+            #[cfg(target_os = "macos")]
+            page: None,
+            #[cfg(target_os = "macos")]
+            image: None,
+            #[cfg(target_os = "macos")]
+            live_until: std::time::Instant::now(),
             last_rendered: std::time::Instant::now(),
             _tasks: tasks,
         }
@@ -512,6 +553,10 @@ impl VisualFrame {
 
     pub fn set_link_ui(&mut self, link_ui: Option<LinkUi>) {
         self.link_ui = link_ui;
+    }
+
+    pub fn set_input_area(&mut self, area: gpui::Bounds<gpui::Pixels>) {
+        self.input_area = Some(area);
     }
 
     pub fn idle_for(&self) -> Duration {
@@ -526,7 +571,14 @@ impl VisualFrame {
             self._surface_events = None;
             surface.update(cx, |surface, cx| surface.close(cx));
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        if self.page.take().is_some() {
+            tracing::debug!(visual = %self.id, "visual offscreen; released its page");
+            if let Some((image, _)) = self.image.take() {
+                cx.defer(move |cx| gpui::ImageSource::Render(image).evict(None, cx));
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = cx;
     }
 
@@ -535,10 +587,20 @@ impl VisualFrame {
         {
             self.surface.is_some()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.page.is_some()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             false
         }
+    }
+
+    /// Keep taking frames for at least `duration`.
+    #[cfg(target_os = "macos")]
+    fn stay_live(&mut self, duration: Duration) {
+        self.live_until = self.live_until.max(std::time::Instant::now() + duration);
     }
 
     fn url(&self) -> Option<&str> {
@@ -577,6 +639,16 @@ impl VisualFrame {
                 self.height_seq = seq;
                 if self.content_height != Some(height) {
                     self.content_height = Some(height);
+                    // The page reflows to its new height.
+                    #[cfg(target_os = "macos")]
+                    self.stay_live(Duration::from_secs(1));
+                    cx.notify();
+                }
+            }
+            VisualSignal::Active => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.stay_live(Duration::from_millis(700));
                     cx.notify();
                 }
             }
@@ -648,6 +720,136 @@ impl VisualFrame {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl VisualFrame {
+    fn ensure_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(url) = self.url().map(str::to_owned) else {
+            return;
+        };
+        if let Some(page) = &self.page {
+            if self.theme_css != current_theme_css(cx) {
+                self.theme_css = current_theme_css(cx);
+                // A reload restarts the page's report sequence.
+                self.height_seq = 0;
+                page.navigate(&url);
+                self.stay_live(Duration::from_secs(3));
+            }
+            return;
+        }
+        self.theme_css = current_theme_css(cx);
+        self.height_seq = 0;
+        tracing::debug!(visual = %self.id, "loading visual page");
+        let (open_tx, mut opens) = unbounded_channel::<String>();
+        let (page, mut frames) =
+            match crate::browser::inline_macos::InlinePage::new(window, &url, move |url| {
+                let _ = open_tx.send(url);
+            }) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(visual = %self.id, %error, "visual page unavailable");
+                    self.load = Load::Failed;
+                    return;
+                }
+            };
+        self.page = Some(page);
+        self.stay_live(Duration::from_secs(3));
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            while let Some(frame) = frames.recv().await {
+                let updated = this.update_in(cx, |this, window, cx| {
+                    if let Some((previous, _)) = this.image.replace(frame) {
+                        let _ = window.drop_image(previous);
+                    }
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        }));
+        // A page that opens a new window (target=_blank, window.open) asks
+        // for a tab; send it where chat links go.
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            while let Some(url) = opens.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.open_link(url, crate::markdown::links::LinkAction::Primary, window, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// The page as GPUI paints it: its latest frame, with the native page
+    /// placed under it for input.
+    fn page_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let page = self.page.as_ref()?;
+        // Frames follow the page while it changes or has the pointer; an idle
+        // page costs nothing.
+        if page.armed() || std::time::Instant::now() < self.live_until {
+            page.snapshot();
+            window.request_animation_frame();
+        }
+        let placer = page.placer();
+        let image = self.image.clone();
+        let input_area = self.input_area;
+        Some(
+            div()
+                .size_full()
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let mut visible = bounds.intersect(&window.content_mask().bounds);
+                            if let Some(area) = input_area {
+                                visible = visible.intersect(&area);
+                            }
+                            let placer = placer.clone();
+                            window.on_present(move || placer.place(bounds, visible));
+                            if let Some((image, scale)) = &image {
+                                let size = image.size(0);
+                                // A frame keeps its own scale while the page
+                                // reflows; clipping never stretches it.
+                                let viewport = gpui::Bounds::new(
+                                    bounds.origin,
+                                    gpui::size(
+                                        px(size.width.0 as f32 / scale),
+                                        px(size.height.0 as f32 / scale),
+                                    ),
+                                );
+                                let _ = window.paint_image(
+                                    viewport,
+                                    gpui::Corners::default(),
+                                    image.clone(),
+                                    0,
+                                    false,
+                                );
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+                // Over the visual, the page takes the pointer natively; the
+                // page hands it back when the pointer leaves.
+                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                    if event.pressed_button.is_none()
+                        && !cx.has_active_drag()
+                        && let Some(page) = &this.page
+                        && !page.armed()
+                    {
+                        if std::env::var_os("ZERON_VISUAL_DEBUG").is_some() {
+                            tracing::info!(position = ?event.position, "visual input armed");
+                        }
+                        page.set_armed(true);
+                        cx.notify();
+                    }
+                })),
+        )
+    }
+}
+
 /// Visuals share one ephemeral browser context: a page never sees the
 /// browser pane's cookies, and every visual uses the same engine helper.
 #[cfg(target_os = "linux")]
@@ -689,7 +891,7 @@ impl Render for VisualFrame {
         // The page reads the theme when it loads.
         let _ = current_theme_css(cx);
         self.listen(window, cx);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.ensure_page(window, cx);
         let theme = Theme::of(cx).clone();
         let id = self.id.clone();
@@ -708,6 +910,32 @@ impl Render for VisualFrame {
                 .role(gpui::Role::Group)
                 .aria_label(self.title.clone())
                 .child(surface)
+                .when_some(open_url, |el, url| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(8.0))
+                            .right(px(8.0))
+                            .invisible()
+                            .group_hover("visual", |style| style.visible())
+                            .child(open_button(&id, url, &theme, cx)),
+                    )
+                })
+                .into_any_element();
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(page) = self.page_view(window, cx) {
+            let open_url = url.clone();
+            return div()
+                .id(SharedString::from(format!("{id}-visual")))
+                .group("visual")
+                .relative()
+                .w_full()
+                .h(px(self.frame_height()))
+                .role(gpui::Role::Group)
+                .aria_label(self.title.clone())
+                .child(page)
                 .when_some(open_url, |el, url| {
                     el.child(
                         div()
@@ -778,7 +1006,7 @@ fn visual_card(
 ) -> AnyElement {
     let status: SharedString = if failed {
         "Visual unavailable".into()
-    } else if url.is_none() || cfg!(target_os = "linux") {
+    } else if url.is_none() || cfg!(any(target_os = "linux", target_os = "macos")) {
         "Loading visual…".into()
     } else {
         "Open to view this visual".into()

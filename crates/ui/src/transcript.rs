@@ -3379,6 +3379,8 @@ pub struct Transcript {
     visuals: HashMap<SharedString, (Entity<crate::visuals::VisualFrame>, u64)>,
     /// Counts render passes, so a visual knows whether the last pass drew it.
     visual_pass: u64,
+    /// Where an inline visual may take the pointer (see `render_visual`).
+    visual_input_area: gpui::Bounds<Pixels>,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
@@ -3676,6 +3678,7 @@ impl Transcript {
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
             visual_pass: 0,
+            visual_input_area: gpui::Bounds::default(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
@@ -6780,7 +6783,11 @@ impl Transcript {
                 frame
             }
         };
-        frame.update(cx, |frame, _| frame.set_link_ui(link_ui));
+        let input_area = self.visual_input_area;
+        frame.update(cx, |frame, _| {
+            frame.set_link_ui(link_ui);
+            frame.set_input_area(input_area);
+        });
         div().w_full().child(frame).into_any_element()
     }
 
@@ -10214,7 +10221,18 @@ impl Render for Transcript {
         let released_diagrams = {
             let mut diagrams = self.diagrams.borrow_mut();
             let mut released = diagrams.begin_frame(crate::theme::style_generation());
-            let list_width = f32::from(self.list.viewport_bounds().size.width);
+            let viewport = self.list.viewport_bounds();
+            let list_width = f32::from(viewport.size.width);
+            // Where a visual may take the pointer: the viewport above the
+            // chrome the transcript scrolls under (the composer stack). Read
+            // here, outside the list's own row rendering.
+            self.visual_input_area = gpui::Bounds::new(
+                viewport.origin,
+                gpui::size(
+                    viewport.size.width,
+                    (viewport.size.height - px(self.bottom_clearance)).max(px(0.0)),
+                ),
+            );
             let column = if list_width > 0.0 {
                 self.content_width
                     .min((list_width - self.right_reserve).max(1.0))
