@@ -402,7 +402,8 @@ impl AppearancePage {
                 .position(|font| font == math_font)
                 .unwrap_or_default(),
         )
-        .width(128.0)
+        .width(160.0)
+        .menu_width(220.0)
         .on_select(|_, ix, _, cx| {
             crate::settings::set_math_font(MathFont::ALL[ix], cx);
             cx.notify();
@@ -422,7 +423,7 @@ impl AppearancePage {
             }),
             nearest_math_size_ix(math_size),
         )
-        .width(128.0)
+        .width(160.0)
         .on_select(|_, ix, _, cx| {
             crate::settings::set_math_size(MATH_SIZES[ix], cx);
             cx.notify();

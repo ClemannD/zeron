@@ -12551,20 +12551,37 @@ public func FfiConverterTypeFadeEdge_lower(_ value: FadeEdge) -> RustBuffer {
 
 
 /**
- * The face formulas are laid out in. Either paints from the
- * [`math_font_data`] table, so switching never re-registers fonts.
+ * The face formulas are laid out in (STIX Two for what it lacks). Every
+ * face paints from the [`math_font_data`] table, so switching never
+ * re-registers fonts.
  */
 
 public enum MathFace: Equatable, Hashable {
     
     /**
-     * Fira Math: a sans that sits beside Geist (STIX Two for what it lacks).
+     * Fira Math: a sans that sits beside Geist.
      */
     case fira
     /**
-     * STIX Two Math: the classic Times-like TeX look.
+     * STIX Two Math: the Times-like TeX look.
      */
     case stixTwo
+    /**
+     * New Computer Modern Math (Book): the classic LaTeX look.
+     */
+    case computerModern
+    /**
+     * Libertinus Math: a warm book serif.
+     */
+    case libertinus
+    /**
+     * TeX Gyre Pagella Math: Palatino.
+     */
+    case pagella
+    /**
+     * Euler Math: Zapf's upright, hand-drawn math.
+     */
+    case euler
 
 
 
@@ -12590,6 +12607,14 @@ public struct FfiConverterTypeMathFace: FfiConverterRustBuffer {
         
         case 2: return .stixTwo
         
+        case 3: return .computerModern
+        
+        case 4: return .libertinus
+        
+        case 5: return .pagella
+        
+        case 6: return .euler
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -12604,6 +12629,22 @@ public struct FfiConverterTypeMathFace: FfiConverterRustBuffer {
         
         case .stixTwo:
             writeInt(&buf, Int32(2))
+        
+        
+        case .computerModern:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .libertinus:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .pagella:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .euler:
+            writeInt(&buf, Int32(6))
         
         }
     }
@@ -17083,9 +17124,10 @@ public func layoutFixtureMarkdown() -> String  {
 })
 }
 /**
- * The bytes of math font `index` (0 = Fira Math, 1 = STIX Two Math, the
- * same table whichever [`MathFace`] lays formulas out); empty past the end.
- * Glyph ids in [`GlyphPrim`] index these exact files.
+ * The bytes of math font `index` — one per [`MathFace`], in its declaration
+ * order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
+ * lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
+ * these exact files. Hosts load an index when a glyph first names it.
  */
 public func mathFontData(index: UInt8) -> Data  {
     return try!  FfiConverterData.lift(try! rustCall() {
@@ -17221,7 +17263,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_layout_fixture_markdown() != 37734) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_math_font_data() != 13195) {
+    if (uniffi_zeron_mobile_checksum_func_math_font_data() != 16862) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_wallpaper_render() != 28318) {

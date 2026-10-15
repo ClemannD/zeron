@@ -159,23 +159,49 @@ impl NewThreadBackgroundEffect {
     }
 }
 
-/// The face Markdown math is set in. Both are bundled, so the choice never
-/// depends on what the device has installed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// The face Markdown math is set in. Every face is bundled, so the choice
+/// never depends on what the device has installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MathFont {
     #[default]
     Fira,
     StixTwo,
+    ComputerModern,
+    Libertinus,
+    Pagella,
+    Euler,
 }
 
 impl MathFont {
-    pub const ALL: [Self; 2] = [Self::Fira, Self::StixTwo];
+    pub const ALL: [Self; 6] = [
+        Self::Fira,
+        Self::StixTwo,
+        Self::ComputerModern,
+        Self::Libertinus,
+        Self::Pagella,
+        Self::Euler,
+    ];
+
+    /// The name stored in the settings file.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Fira => "fira",
+            Self::StixTwo => "stixTwo",
+            Self::ComputerModern => "computerModern",
+            Self::Libertinus => "libertinus",
+            Self::Pagella => "pagella",
+            Self::Euler => "euler",
+        }
+    }
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Fira => "Fira Math",
             Self::StixTwo => "STIX Two",
+            Self::ComputerModern => "Computer Modern",
+            Self::Libertinus => "Libertinus",
+            Self::Pagella => "Palatino",
+            Self::Euler => "Euler",
         }
     }
 
@@ -183,14 +209,20 @@ impl MathFont {
     pub const fn style(self) -> &'static str {
         match self {
             Self::Fira => "Sans",
-            Self::StixTwo => "Serif",
+            Self::StixTwo | Self::Libertinus | Self::Pagella => "Serif",
+            Self::ComputerModern => "LaTeX",
+            Self::Euler => "Upright",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
             Self::Fira => "A sans face that sits beside the interface font.",
-            Self::StixTwo => "A serif face with the classic TeX look.",
+            Self::StixTwo => "A Times-like serif face with the TeX look.",
+            Self::ComputerModern => "A serif face with the classic LaTeX look.",
+            Self::Libertinus => "A warm serif book face.",
+            Self::Pagella => "A Palatino serif face, from TeX Gyre Pagella.",
+            Self::Euler => "Zapf's upright, hand-drawn math.",
         }
     }
 
@@ -198,7 +230,29 @@ impl MathFont {
         match self {
             Self::Fira => zatex::bundled::Face::Fira,
             Self::StixTwo => zatex::bundled::Face::StixTwo,
+            Self::ComputerModern => zatex::bundled::Face::ComputerModern,
+            Self::Libertinus => zatex::bundled::Face::Libertinus,
+            Self::Pagella => zatex::bundled::Face::Pagella,
+            Self::Euler => zatex::bundled::Face::Euler,
         }
+    }
+}
+
+impl Serialize for MathFont {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+/// A face this build doesn't know (written by a newer one) reads as the
+/// default rather than failing the whole settings file.
+impl<'de> Deserialize<'de> for MathFont {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::ALL
+            .into_iter()
+            .find(|font| stored == font.key())
+            .unwrap_or_default())
     }
 }
 
@@ -3119,6 +3173,51 @@ mod tests {
         assert_eq!(json["mathFont"], "fira");
         assert_eq!(settings.math_size, 100);
         assert_eq!(json["mathSize"], 100);
+    }
+
+    #[test]
+    fn every_math_font_round_trips_through_the_settings_file() {
+        let stored = [
+            "fira",
+            "stixTwo",
+            "computerModern",
+            "libertinus",
+            "pagella",
+            "euler",
+        ];
+        assert_eq!(MathFont::ALL.len(), zatex::bundled::Face::ALL.len());
+        for ((font, key), face) in MathFont::ALL
+            .into_iter()
+            .zip(stored)
+            .zip(zatex::bundled::Face::ALL)
+        {
+            assert_eq!(font.face(), face);
+            let settings = UiSettings {
+                math_font: font,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["mathFont"], key);
+            let decoded: UiSettings = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.math_font, font);
+        }
+    }
+
+    #[test]
+    fn an_unknown_math_font_reads_as_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        for stored in [r#""someFutureFace""#, "3", "null"] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(r#"{{"sidebarWidth":300.0,"mathFont":{stored},"mathSize":150}}"#),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(loaded.math_font, MathFont::Fira, "{stored}");
+            // The rest of the file survives.
+            assert_eq!(loaded.sidebar_width, 300.0);
+            assert_eq!(loaded.math_size, 150);
+        }
     }
 
     #[test]

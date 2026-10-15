@@ -12,7 +12,8 @@ description = "Fast, low-memory LaTeX math layout over any OpenType math font"
 ttf-parser.workspace = true
 
 [features]
-# STIX Two Math and Fira Math compiled in (`zatex::bundled`), ~1 MB.
+# Six math faces compiled in (`zatex::bundled`), ~4 MB of read-only data;
+# a face is only parsed (and its pages touched) once something uses it.
 bundled = []
 
 [dev-dependencies]

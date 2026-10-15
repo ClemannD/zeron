@@ -1,8 +1,8 @@
 import SafariServices
 import UIKit
 
-/// How transcripts show LaTeX math, local to this phone: rendered (in Fira
-/// Math or STIX Two) or as its TeX source.
+/// How transcripts show LaTeX math, local to this phone: rendered (in one of
+/// the core's bundled math faces) or as its TeX source.
 enum MathSettings {
     static let didChange = Notification.Name("ZeronMathSettingsChanged")
 
@@ -15,15 +15,30 @@ enum MathSettings {
         }
     }
 
+    /// Stored by `key`; anything unknown reads as Fira Math.
     static var face: MathFace {
-        get { UserDefaults.standard.string(forKey: "mathFont") == "stixTwo" ? .stixTwo : .fira }
+        get {
+            let stored = UserDefaults.standard.string(forKey: "mathFont")
+            return allFaces.first { key($0) == stored } ?? .fira
+        }
         set {
-            UserDefaults.standard.set(newValue == .stixTwo ? "stixTwo" : "fira", forKey: "mathFont")
+            UserDefaults.standard.set(key(newValue), forKey: "mathFont")
             NotificationCenter.default.post(name: didChange, object: nil)
         }
     }
 
-    static let allFaces: [MathFace] = [.fira, .stixTwo]
+    static let allFaces: [MathFace] = [.fira, .stixTwo, .computerModern, .libertinus, .pagella, .euler]
+
+    private static func key(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "fira"
+        case .stixTwo: "stixTwo"
+        case .computerModern: "computerModern"
+        case .libertinus: "libertinus"
+        case .pagella: "pagella"
+        case .euler: "euler"
+        }
+    }
 
     /// Formula size as a percent of the text around it (the desktop's
     /// options; Rust clamps to 75–200).
@@ -41,13 +56,21 @@ enum MathSettings {
         switch f {
         case .fira: "Fira Math"
         case .stixTwo: "STIX Two"
+        case .computerModern: "Computer Modern"
+        case .libertinus: "Libertinus"
+        case .pagella: "Palatino"
+        case .euler: "Euler"
         }
     }
 
     static func detail(_ f: MathFace) -> String {
         switch f {
         case .fira: "A sans that sits beside the interface font."
-        case .stixTwo: "The classic serif TeX look."
+        case .stixTwo: "A serif with the Times-like TeX look."
+        case .computerModern: "The classic LaTeX look."
+        case .libertinus: "A warm book serif."
+        case .pagella: "TeX Gyre Pagella, a Palatino serif."
+        case .euler: "Zapf's upright, hand-drawn math."
         }
     }
 

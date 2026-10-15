@@ -111,9 +111,10 @@ pub struct GlyphPrim {
     pub start: u32,
 }
 
-/// The bytes of math font `index` (0 = Fira Math, 1 = STIX Two Math, the
-/// same table whichever [`MathFace`] lays formulas out); empty past the end.
-/// Glyph ids in [`GlyphPrim`] index these exact files.
+/// The bytes of math font `index` — one per [`MathFace`], in its declaration
+/// order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
+/// lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
+/// these exact files. Hosts load an index when a glyph first names it.
 #[uniffi::export]
 pub fn math_font_data(index: u8) -> Vec<u8> {
     if index < zatex::bundled::FONTS {
@@ -123,15 +124,24 @@ pub fn math_font_data(index: u8) -> Vec<u8> {
     }
 }
 
-/// The face formulas are laid out in. Either paints from the
-/// [`math_font_data`] table, so switching never re-registers fonts.
+/// The face formulas are laid out in (STIX Two for what it lacks). Every
+/// face paints from the [`math_font_data`] table, so switching never
+/// re-registers fonts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, uniffi::Enum)]
 pub enum MathFace {
-    /// Fira Math: a sans that sits beside Geist (STIX Two for what it lacks).
+    /// Fira Math: a sans that sits beside Geist.
     #[default]
     Fira,
-    /// STIX Two Math: the classic Times-like TeX look.
+    /// STIX Two Math: the Times-like TeX look.
     StixTwo,
+    /// New Computer Modern Math (Book): the classic LaTeX look.
+    ComputerModern,
+    /// Libertinus Math: a warm book serif.
+    Libertinus,
+    /// TeX Gyre Pagella Math: Palatino.
+    Pagella,
+    /// Euler Math: Zapf's upright, hand-drawn math.
+    Euler,
 }
 
 impl From<MathFace> for zatex::bundled::Face {
@@ -139,6 +149,10 @@ impl From<MathFace> for zatex::bundled::Face {
         match face {
             MathFace::Fira => Self::Fira,
             MathFace::StixTwo => Self::StixTwo,
+            MathFace::ComputerModern => Self::ComputerModern,
+            MathFace::Libertinus => Self::Libertinus,
+            MathFace::Pagella => Self::Pagella,
+            MathFace::Euler => Self::Euler,
         }
     }
 }

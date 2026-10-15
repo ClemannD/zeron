@@ -32,15 +32,19 @@ retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
 ## Math fonts
 
-zatex (`crates/zatex`) bundles unmodified math fonts for rendering LaTeX. Each
-is licensed under the SIL Open Font License 1.1; the complete license and
-copyright notice is retained beside each font in `crates/zatex/fonts/`.
+zatex (`crates/zatex`) bundles unmodified math fonts for rendering LaTeX
+(`bundled` feature). Each font's license and copyright notice is retained
+beside it in `crates/zatex/fonts/`: the SIL Open Font License 1.1 (`OFL-*.txt`)
+or the GUST Font License (`GUST-FONT-LICENSE.txt`, LPPL 1.3c).
 
-| Font | Version | Use | Source |
+| Font | Version | License | Source |
 | --- | --- | --- | --- |
-| STIX Two Math | 2.13 | Bundled (`bundled` feature) | https://github.com/stipub/stixfonts |
-| Fira Math | 0.3.4 | Bundled (`bundled` feature) | https://github.com/firamath/firamath |
-| Libertinus Math | 7.051 | Tests only | https://github.com/alerque/libertinus |
+| Fira Math | 0.3.4 | OFL-1.1 | https://github.com/firamath/firamath |
+| STIX Two Math | 2.13 | OFL-1.1 | https://github.com/stipub/stixfonts |
+| New Computer Modern Math (Book) | 8.1.1 | GUST Font License | https://ctan.org/pkg/newcomputermodern |
+| Libertinus Math | 7.051 | OFL-1.1 | https://github.com/alerque/libertinus |
+| TeX Gyre Pagella Math | 1.632 | GUST Font License | https://ctan.org/pkg/tex-gyre-math |
+| Euler Math | 0.75 | OFL-1.1 | https://ctan.org/pkg/euler-math |
 
 ## Bundled theme palette adaptations
 

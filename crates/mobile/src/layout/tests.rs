@@ -685,7 +685,8 @@ fn inline_math_paints_glyphs_and_grows_its_line() {
 }
 
 /// Wrapped paragraphs with formulas measure exactly what they paint, and
-/// every glyph stays inside its row — in either face, at 100% and 150%.
+/// every glyph stays inside its row — in every face at 100%, and in a sans and
+/// a serif at 150%.
 #[test]
 fn math_paint_matches_measure_at_many_widths() {
     let md = concat!(
@@ -704,8 +705,8 @@ fn math_paint_matches_measure_at_many_widths() {
         "- ## Head $\\frac{a^2}{b^2}$ tall\n\n",
         r"~~struck $\frac{x}{y}$ math~~",
     );
-    let settings = [(zatex::bundled::Face::Fira, 100), (zatex::bundled::Face::StixTwo, 100), (zatex::bundled::Face::Fira, 150), (zatex::bundled::Face::StixTwo, 150)];
-    for ((face, size), width) in settings.into_iter().flat_map(|f| [120.0, 200.0, 280.0, 320.0, 390.0, 744.0, 1024.0].map(|w| (f, w))) {
+    let settings = zatex::bundled::Face::ALL.map(|f| (f, 100)).into_iter().chain([(zatex::bundled::Face::Fira, 150), (zatex::bundled::Face::ComputerModern, 150)]);
+    for ((face, size), width) in settings.flat_map(|f| [120.0, 200.0, 280.0, 320.0, 390.0, 744.0, 1024.0].map(|w| (f, w))) {
         let mut w = worker(width);
         w.math = MathSettings::new(true, face, size);
         w.input = transcript_one(md);
@@ -813,9 +814,30 @@ fn streaming_math_converges_to_full_parse() {
 
 #[test]
 fn math_fonts_cross_ffi() {
-    assert!(!display::math_font_data(0).is_empty(), "Fira Math");
-    assert!(!display::math_font_data(1).is_empty(), "STIX Two Math");
-    assert!(display::math_font_data(2).is_empty());
+    let fonts: Vec<Vec<u8>> = (0..6).map(display::math_font_data).collect();
+    for (i, data) in fonts.iter().enumerate() {
+        assert!(!data.is_empty(), "font {i}");
+        assert!(fonts[..i].iter().all(|other| other != data), "font {i} is its own file");
+    }
+    assert!(display::math_font_data(6).is_empty());
+    assert!(display::math_font_data(u8::MAX).is_empty());
+}
+
+/// Every FFI face lays formulas out in its own font (its table index), with
+/// STIX Two (1) only for what it lacks; the order matches `math_font_data`.
+#[test]
+fn every_math_face_lays_out() {
+    use display::MathFace;
+    let faces = [MathFace::Fira, MathFace::StixTwo, MathFace::ComputerModern, MathFace::Libertinus, MathFace::Pagella, MathFace::Euler];
+    let md = r"Sum $\sum_{k=1}^{n} \frac{x_k^2}{\sqrt{y}} + \mathcal{L} = \alpha$ here.";
+    for (i, face) in faces.into_iter().enumerate() {
+        let zface = zatex::bundled::Face::from(face);
+        assert_eq!(zface.index() as usize, i, "{face:?}");
+        let row = rows_with_math(md, MathSettings { face: zface, ..MathSettings::default() }).remove(0);
+        assert!(row.glyphs.len() > 8, "{face:?}: {:?}", row.glyphs);
+        assert!(row.glyphs.iter().all(|g| g.font == i as u8 || g.font == 1), "{face:?}: {:?}", row.glyphs);
+        assert!(row.glyphs.iter().any(|g| g.font == i as u8), "{face:?} paints from its own font");
+    }
 }
 
 /// Every row of a one-message transcript at 390pt, with `math` settings.

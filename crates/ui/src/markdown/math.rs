@@ -14,8 +14,9 @@
 //! cross it and copy yields `$$tex$$` like any paragraph.
 //!
 //! Glyphs name their font by index into zatex's fixed bundled table
-//! ([`zatex::bundled::font_at`]) whichever face set them, so the fonts
-//! register and verify once and both faces paint through the same ids.
+//! ([`zatex::bundled::font_at`]) whichever face set them, so each font
+//! registers and verifies once, when a glyph first needs it, and every face
+//! paints through the same ids. Faces nobody uses are never parsed.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -209,26 +210,23 @@ fn nbsp_em() -> f32 {
     })
 }
 
-/// The bundled math fonts by glyph font index, each loaded once.
-fn bundled_fonts() -> impl Iterator<Item = &'static zatex::MathFont> {
-    (0..zatex::bundled::FONTS).map(zatex::bundled::font_at)
-}
+/// How many fonts glyphs can name ([`zatex::bundled::FONTS`]).
+const FONTS: usize = zatex::bundled::FONTS as usize;
 
-/// The bundled math faces, parsed once, by glyph font index.
-fn math_faces() -> &'static [Option<ttf_parser::Face<'static>>] {
-    static FACES: OnceLock<Vec<Option<ttf_parser::Face<'static>>>> = OnceLock::new();
-    FACES.get_or_init(|| {
-        bundled_fonts()
-            .map(|font| ttf_parser::Face::parse(font.data(), 0).ok())
-            .collect()
-    })
+/// The bundled math face a glyph font index names, parsed on first use.
+fn math_face(font: u8) -> Option<&'static ttf_parser::Face<'static>> {
+    static FACES: [OnceLock<Option<ttf_parser::Face<'static>>>; FONTS] =
+        [const { OnceLock::new() }; FONTS];
+    FACES
+        .get(usize::from(font))?
+        .get_or_init(|| ttf_parser::Face::parse(zatex::bundled::font_at(font).data(), 0).ok())
+        .as_ref()
 }
 
 /// The horizontal extent `formula` paints over, in ems from its origin:
 /// its advance box, widened wherever negative space sets an item outside it
 /// (`a\hspace{-3em}b` has a negative advance and a glyph left of the origin).
 pub(crate) fn span(formula: &Formula) -> Range<f32> {
-    let faces = math_faces();
     let mut span = 0.0f32.min(formula.width)..formula.width.max(0.0);
     for item in &formula.items {
         let (left, right) = match *item {
@@ -239,9 +237,7 @@ pub(crate) fn span(formula: &Formula) -> Range<f32> {
                 size,
                 ..
             } => {
-                let advance = faces
-                    .get(usize::from(font))
-                    .and_then(Option::as_ref)
+                let advance = math_face(font)
                     .and_then(|face| {
                         let advance = face.glyph_hor_advance(ttf_parser::GlyphId(glyph))?;
                         Some(f32::from(advance) / f32::from(face.units_per_em()))
@@ -392,43 +388,52 @@ pub(crate) fn color_at(runs: &[TextRun], at: usize) -> Option<Hsla> {
     })
 }
 
-/// The bundled math fonts' GPUI ids, by glyph font index. Fonts
-/// register with the text system on first paint. A face is only used by id
-/// once it's verified to be the bundled bytes (see [`is_bundled_face`]);
-/// otherwise it stays `None` and its glyphs paint as outlines from the
-/// bundled data, never through some other copy of the family whose glyph ids
-/// might differ.
-struct MathFonts(Vec<Option<FontId>>);
+/// The bundled math fonts' GPUI ids, by glyph font index: `None` until a
+/// glyph first needs the font, then what [`register`] made of it. A font
+/// that fails verification stays `Some(None)` and its glyphs paint as
+/// outlines from the bundled data, never through some other copy of the
+/// family whose glyph ids might differ.
+#[derive(Default)]
+struct MathFonts([Option<Option<FontId>>; FONTS]);
 
 impl gpui::Global for MathFonts {}
 
-fn math_fonts<'a>(window: &Window, cx: &'a mut App) -> &'a [Option<FontId>] {
-    if !cx.has_global::<MathFonts>() {
-        let chain: Vec<&zatex::MathFont> = bundled_fonts().collect();
-        let text_system = window.text_system();
-        if let Err(error) = text_system.add_fonts(
-            chain
-                .iter()
-                .map(|font| Cow::Borrowed(font.data()))
-                .collect(),
-        ) {
-            tracing::warn!(%error, "failed to register bundled math fonts");
-        }
-        let ids = chain
-            .iter()
-            .map(|font| {
-                let family = family_name(font.data())?;
-                let id = text_system.resolve_font(&gpui::font(family.clone()));
-                let bundled = is_bundled_face(text_system, id, &family, font.data());
-                if !bundled {
-                    tracing::warn!(%family, "math font resolved to another copy; painting outlines");
-                }
-                bundled.then_some(id)
-            })
-            .collect();
-        cx.set_global(MathFonts(ids));
+impl MathFonts {
+    /// `font`'s id, registered through `register` the first time it's asked
+    /// for. `None` paints outlines.
+    fn id(
+        &mut self,
+        font: u8,
+        register: impl FnOnce(&'static zatex::MathFont) -> Option<FontId>,
+    ) -> Option<FontId> {
+        *self
+            .0
+            .get_mut(usize::from(font))?
+            .get_or_insert_with(|| register(zatex::bundled::font_at(font)))
     }
-    &cx.global::<MathFonts>().0
+}
+
+/// Registers `font` with the text system and resolves it by family; `None`
+/// unless what resolves is the bundled bytes (see [`is_bundled_face`]).
+fn register(
+    text_system: &gpui::WindowTextSystem,
+    font: &'static zatex::MathFont,
+) -> Option<FontId> {
+    if let Err(error) = text_system.add_fonts(vec![Cow::Borrowed(font.data())]) {
+        tracing::warn!(%error, "failed to register a bundled math font");
+    }
+    let family = family_name(font.data())?;
+    let id = text_system.resolve_font(&gpui::font(family.clone()));
+    let bundled = is_bundled_face(text_system, id, &family, font.data());
+    if !bundled {
+        tracing::warn!(%family, "math font resolved to another copy; painting outlines");
+    }
+    bundled.then_some(id)
+}
+
+fn math_font_id(font: u8, window: &Window, cx: &mut App) -> Option<FontId> {
+    cx.default_global::<MathFonts>()
+        .id(font, |data| register(window.text_system(), data))
 }
 
 /// Whether `id` shapes like `data`: a spread of the face's characters, laid
@@ -452,7 +457,14 @@ fn is_bundled_face(
             }
         }
     }
-    chars.retain(|c| c.is_alphanumeric() || ('\u{2190}'..='\u{22FF}').contains(c));
+    // Latin, Greek, arrows and operators: what math sets, and what shapes
+    // one glyph per character. (Some faces carry Indic marks, which reorder
+    // and combine.)
+    chars.retain(|c| {
+        c.is_ascii_alphanumeric()
+            || ('\u{0391}'..='\u{03C9}').contains(c)
+            || ('\u{2190}'..='\u{22FF}').contains(c)
+    });
     chars.sort_unstable();
     chars.dedup();
     if chars.is_empty() {
@@ -517,7 +529,6 @@ pub(crate) fn paint_formula(
     cx: &mut App,
 ) {
     let scale = f32::from(font_size);
-    let fonts = math_fonts(window, cx);
     // Glyphs of a face the text system can't vouch for, as filled outlines.
     let mut outlines: Option<OutlineSink> = None;
     // Thin rules (fraction bars) keep at least one device pixel; a quad
@@ -533,11 +544,11 @@ pub(crate) fn paint_formula(
                 size,
             } => {
                 let at = point(origin.x + px(x * scale), origin.y + px(y * scale));
-                if let Some(Some(font_id)) = fonts.get(usize::from(font)) {
+                if let Some(font_id) = math_font_id(font, window, cx) {
                     window
                         .paint_glyph(
                             at,
-                            *font_id,
+                            font_id,
                             GlyphId(u32::from(glyph)),
                             px(size * scale),
                             color,
@@ -796,36 +807,98 @@ mod tests {
         assert_ne!(fira.width, stix.width, "the faces set differently");
     }
 
+    /// Counts the outline commands a glyph paints with.
+    #[derive(Default)]
+    struct CountingSink(usize);
+
+    impl zatex::PathSink for CountingSink {
+        fn move_to(&mut self, _: f32, _: f32) {
+            self.0 += 1;
+        }
+        fn line_to(&mut self, _: f32, _: f32) {
+            self.0 += 1;
+        }
+        fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
+            self.0 += 1;
+        }
+        fn cubic_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+            self.0 += 1;
+        }
+        fn close(&mut self) {}
+    }
+
     #[test]
-    fn glyph_fonts_resolve_in_the_bundled_table_for_both_faces() {
-        let faces = math_faces();
-        assert_eq!(faces.len(), usize::from(zatex::bundled::FONTS));
-        let stix = zatex::bundled::font(Face::StixTwo).data().as_ptr();
-        for face in [Face::Fira, Face::StixTwo] {
-            let laid = formula(r"\mathcal{L} + \alpha^2", false, face).unwrap();
+    fn every_face_sets_and_paints_through_the_bundled_table() {
+        let stix = Face::StixTwo.index();
+        let tex = r"\mathcal{L} = \int_0^1 \frac{x^2}{2}\,dx + \alpha";
+        for face in Face::ALL {
+            let laid = formula(tex, true, face).unwrap();
             let mut fonts = Vec::new();
+            let mut painted = CountingSink::default();
             for item in &laid.items {
                 if let Item::Glyph { font, glyph, .. } = *item {
-                    let resolved = zatex::bundled::font_at(font);
-                    let parsed = faces[usize::from(font)].as_ref().unwrap();
+                    assert!(usize::from(font) < FONTS, "{face:?}");
+                    let parsed = math_face(font).unwrap();
                     assert!(
                         parsed
                             .glyph_hor_advance(ttf_parser::GlyphId(glyph))
                             .is_some()
                     );
-                    fonts.push(resolved.data().as_ptr());
+                    zatex::bundled::font_at(font).outline(glyph, 16.0, 0.0, 0.0, &mut painted);
+                    fonts.push(font);
                 }
             }
-            match face {
-                // STIX Two sets every glyph itself.
-                Face::StixTwo => assert!(fonts.iter().all(|&font| font == stix)),
-                // Fira falls back to STIX Two for script letters only.
-                Face::Fira => {
-                    assert!(fonts.contains(&stix));
-                    assert!(fonts.iter().any(|&font| font != stix));
+            assert!(painted.0 > 0, "{face:?} paints");
+            // Each face sets its own glyphs; STIX Two only fills its gaps.
+            assert!(fonts.contains(&face.index()), "{face:?}");
+            assert!(
+                fonts
+                    .iter()
+                    .all(|&font| font == face.index() || font == stix),
+                "{face:?}: {fonts:?}"
+            );
+        }
+        // Fira falls back to STIX Two for script letters.
+        let fira = formula(r"\mathcal{L}", false, Face::Fira).unwrap();
+        assert!(fira.items.iter().any(|item| matches!(
+            *item,
+            Item::Glyph { font, .. } if font == stix
+        )));
+    }
+
+    #[test]
+    fn math_fonts_register_only_the_faces_glyphs_use() {
+        let mut fonts = MathFonts::default();
+        let mut registered = Vec::new();
+        let laid = formula(r"\mathcal{L} + x", false, Face::Fira).unwrap();
+        for _ in 0..2 {
+            for item in &laid.items {
+                if let Item::Glyph { font, .. } = *item {
+                    fonts.id(font, |data| {
+                        registered.push(font);
+                        assert!(std::ptr::eq(data, zatex::bundled::font_at(font)));
+                        Some(FontId(usize::from(font)))
+                    });
                 }
             }
         }
+        registered.sort_unstable();
+        assert_eq!(
+            registered,
+            [Face::Fira.index(), Face::StixTwo.index()],
+            "each used face once, no other"
+        );
+        assert_eq!(
+            fonts.0.iter().filter(|id| id.is_some()).count(),
+            2,
+            "untouched faces stay unregistered"
+        );
+        // A face that fails verification paints outlines and isn't retried.
+        let euler = Face::Euler.index();
+        assert_eq!(fonts.id(euler, |_| None), None);
+        assert_eq!(fonts.id(euler, |_| unreachable!()), None);
+        // Past the table there's nothing to register.
+        assert_eq!(fonts.id(zatex::bundled::FONTS, |_| unreachable!()), None);
     }
 
     #[test]
@@ -1082,24 +1155,15 @@ mod tests {
     }
 
     #[test]
-    fn bundled_math_faces_verify_against_their_own_bytes() {
+    fn bundled_math_faces_register_one_by_one_and_verify() {
         let (_native, text_system) = crate::typography::native_text_system();
-        let chain: Vec<_> = bundled_fonts().collect();
-        text_system
-            .add_fonts(
-                chain
-                    .iter()
-                    .map(|font| Cow::Borrowed(font.data()))
-                    .collect(),
-            )
-            .unwrap();
-        for font in &chain {
+        // Each face is its own `add_fonts` call, as first paints make them.
+        for index in 0..zatex::bundled::FONTS {
+            let font = zatex::bundled::font_at(index);
             let family = family_name(font.data()).unwrap();
-            let id = text_system.resolve_font(&gpui::font(family.clone()));
-            assert!(
-                is_bundled_face(&text_system, id, &family, font.data()),
-                "{family}"
-            );
+            let id = register(&text_system, font);
+            assert!(id.is_some(), "{family}");
+            assert_eq!(id, Some(text_system.resolve_font(&gpui::font(family))));
         }
         // Another face's glyph numbering fails the check.
         let geist = text_system.resolve_font(&slot_font());
@@ -1107,15 +1171,25 @@ mod tests {
             &text_system,
             geist,
             "Geist",
-            chain[0].data()
+            zatex::bundled::font_at(0).data()
         ));
     }
 
     #[test]
     fn bundled_math_families_resolve_by_name() {
-        let names: Vec<String> = bundled_fonts()
-            .filter_map(|font| family_name(font.data()))
+        let names: Vec<String> = (0..zatex::bundled::FONTS)
+            .filter_map(|index| family_name(zatex::bundled::font_at(index).data()))
             .collect();
-        assert_eq!(names, ["Fira Math", "STIX Two Math"]);
+        assert_eq!(
+            names,
+            [
+                "Fira Math",
+                "STIX Two Math",
+                "NewComputerModern Math",
+                "Libertinus Math",
+                "TeX Gyre Pagella Math",
+                "Euler Math",
+            ]
+        );
     }
 }

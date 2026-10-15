@@ -2,8 +2,8 @@
 //!
 //! cargo run -p zatex --example sheet -- out.png [formula…]
 //!
-//! With no formulas, renders a built-in sample set. Fonts: STIX Two Math,
-//! Libertinus Math and Fira Math (both falling back to STIX Two).
+//! With no formulas, renders a built-in sample set. Fonts: the six faces
+//! `zatex::bundled` ships (each but STIX Two falling back to STIX Two).
 
 use std::sync::Arc;
 
@@ -68,9 +68,12 @@ fn main() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts");
     let stix = Arc::new(load(&format!("{dir}/STIXTwoMath-Regular.otf")));
     let fonts = [
+        load(&format!("{dir}/FiraMath-Regular.otf")).with_fallback(stix.clone()),
         load(&format!("{dir}/STIXTwoMath-Regular.otf")),
+        load(&format!("{dir}/NewCMMath-Book.otf")).with_fallback(stix.clone()),
         load(&format!("{dir}/LibertinusMath-Regular.otf")).with_fallback(stix.clone()),
-        load(&format!("{dir}/FiraMath-Regular.otf")).with_fallback(stix),
+        load(&format!("{dir}/texgyrepagella-math.otf")).with_fallback(stix.clone()),
+        load(&format!("{dir}/Euler-Math.otf")).with_fallback(stix),
     ];
 
     let scale = 2.0;
