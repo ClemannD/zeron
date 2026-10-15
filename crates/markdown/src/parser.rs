@@ -37,6 +37,8 @@ pub struct InlineStyle {
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
+    /// Inline TeX math (`$…$`, `\(…\)`): `text` is the TeX source without delimiters.
+    pub math: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,10 @@ pub enum Block {
         /// Per-column GFM alignment (`:--`/`:-:`/`--:`); unspecified is Left.
         align: Vec<TableAlign>,
     },
+    /// Display math (`$$…$$`, `\[…\]`) on its own: the TeX source without delimiters.
+    Math {
+        tex: String,
+    },
     Rule,
 }
 
@@ -132,7 +138,10 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
@@ -141,25 +150,35 @@ pub fn parse_full(source: &str) -> BlockTree {
 }
 
 fn parse_at(source: &str, offset: usize) -> BlockTree {
-    let (text, insertions) = match rewrite_absolute_destinations(source) {
-        Some((text, insertions)) => (Cow::Owned(text), Some(insertions)),
-        None => (Cow::Borrowed(source), None),
-    };
+    // Pre-passes run in order, each over the previous one's output; `maps`
+    // records their edits so ranges walk back through them in reverse.
+    let mut text = Cow::Borrowed(source);
+    let mut maps: Vec<OffsetMap> = Vec::new();
+    if let Some((rewritten, map)) = rewrite_math_delimiters(&text) {
+        text = Cow::Owned(rewritten);
+        maps.push(map);
+    }
+    if let Some((rewritten, map)) = rewrite_absolute_destinations(&text) {
+        text = Cow::Owned(rewritten);
+        maps.push(map);
+    }
     let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options())
         .into_offset_iter()
         .map(|(event, range)| {
-            // Inserted angle brackets shift every following offset; ranges
-            // come from the rewritten text and must point into the original.
-            let range = match &insertions {
-                Some(insertions) => insertions.original_range(range),
-                None => range,
-            };
+            // Rewrites shift every following offset; ranges come from the
+            // rewritten text and must point into the original.
+            let range = maps
+                .iter()
+                .rev()
+                .fold(range, |range, map| map.original_range(range));
             (event, range.start + offset..range.end + offset)
         })
         .collect();
     let mut cur = Cursor {
         events: &events,
         ix: 0,
+        source,
+        offset,
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
@@ -187,22 +206,221 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
     BlockTree { blocks }
 }
 
-/// Byte positions, in the rewritten text, of the angle brackets the rewrite
-/// inserted. A rewritten offset maps back to the original by subtracting the
-/// insertions before it; nothing is ever removed, so the mapping is exact.
+/// The edits a rewrite pass made, as `(position, shift)` pairs in rewritten
+/// byte order: every rewritten offset past `position` maps back to the
+/// original by adding `shift` (the running total of bytes removed minus bytes
+/// inserted up to there). Each edit replaces a delimiter with the single byte
+/// at `position`, so a range starting on it maps to the original delimiter's
+/// start and a range ending after it maps past the original delimiter's end.
 #[derive(Debug, Default)]
-struct Insertions {
-    positions: Vec<usize>,
+struct OffsetMap {
+    edits: Vec<(usize, isize)>,
 }
 
-impl Insertions {
+impl OffsetMap {
+    /// Record `delta` original bytes more (or, negative, fewer) behind the
+    /// rewritten byte at `position`.
+    fn shift(&mut self, position: usize, delta: isize) {
+        let total = self.edits.last().map_or(0, |&(_, total)| total) + delta;
+        self.edits.push((position, total));
+    }
+
     fn original(&self, offset: usize) -> usize {
-        offset - self.positions.partition_point(|&at| at < offset)
+        match self.edits.partition_point(|&(at, _)| at < offset) {
+            0 => offset,
+            n => offset.saturating_add_signed(self.edits[n - 1].1),
+        }
     }
 
     fn original_range(&self, range: Range<usize>) -> Range<usize> {
         self.original(range.start)..self.original(range.end)
     }
+}
+
+/// Rewrite the LaTeX delimiters models favor — `\(…\)` inline, `\[…\]`
+/// display — to the `$…$` / `$$…$$` pulldown-cmark understands. Code keeps
+/// its spelling (fences, indented lines and inline code spans are copied
+/// verbatim), an opener is rewritten only once its closer has arrived within
+/// the same paragraph (so a still-streaming formula stays literal and the
+/// rewrite is append-stable), and a backslash that is itself escaped (`\\(`)
+/// is a literal backslash, not an opener. An opener glued to a word
+/// (`arr\[0\]`, `f\(x\)`) is markdown escaping, not math, and an empty pair
+/// (`\[ \]`) is an escaped task box. Inline formulas drop the whitespace
+/// inside their delimiters, which `$…$` does not allow.
+fn rewrite_math_delimiters(source: &str) -> Option<(String, OffsetMap)> {
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut rewritten: Option<String> = None;
+    let mut map = OffsetMap::default();
+    let mut copied = 0usize;
+    let mut at = 0usize;
+    // The last closer search that failed, per (closer, quoted, heading): it
+    // proved there is no closer up to where it stopped. A later opener of the
+    // same kind before that point would scan a suffix of the same bytes
+    // (escape pairs align: every scan starts just after a `(` or `[`) and
+    // fail too, so a paragraph full of unclosed openers stays linear.
+    let mut misses: Vec<((u8, bool, bool), usize)> = Vec::new();
+    while at < bytes.len() {
+        if at == 0 || bytes[at - 1] == b'\n' {
+            if let Some(fence) = fence_open(&source[at..]) {
+                let end = skip_fenced_block(source, at, fence);
+                skip(&mut rewritten, source, &mut copied, end);
+                at = end;
+                continue;
+            }
+            if line_is_indented_code(&source[at..]) {
+                let end = line_end(source, at);
+                skip(&mut rewritten, source, &mut copied, end);
+                at = end;
+                continue;
+            }
+        }
+        match bytes[at] {
+            b'`' if !is_escaped(bytes, at) => {
+                let run = backtick_run(bytes, at);
+                let end = match closing_backtick_run(bytes, at + run, run) {
+                    Some(close) => close + run,
+                    None => at + run,
+                };
+                skip(&mut rewritten, source, &mut copied, end);
+                at = end;
+            }
+            b'\\' if !is_escaped(bytes, at) && matches!(bytes.get(at + 1), Some(b'(' | b'[')) => {
+                let display = bytes[at + 1] == b'[';
+                let glued = at > 0 && bytes[at - 1].is_ascii_alphanumeric();
+                let closer = if display { b']' } else { b')' };
+                let line_start = source[..at].rfind('\n').map_or(0, |nl| nl + 1);
+                let line = source[line_start..].trim_start();
+                let in_quote = line.starts_with('>');
+                // An ATX heading is one line: its formula closes on it.
+                let heading = line.starts_with('#') && opens_block(line, true);
+                let key = (closer, in_quote, heading);
+                let known_miss = misses.iter().any(|&(k, stop)| k == key && at + 2 < stop);
+                let close = if glued || known_miss {
+                    None
+                } else {
+                    match math_closer(source, at + 2, closer, in_quote, heading) {
+                        Ok(close) => Some(close),
+                        Err(stop) => {
+                            misses.retain(|&(k, _)| k != key);
+                            misses.push((key, stop));
+                            None
+                        }
+                    }
+                };
+                let Some(close) = close.filter(|&close| !source[at + 2..close].trim().is_empty())
+                else {
+                    at += 2;
+                    continue;
+                };
+                let out = rewritten.get_or_insert_with(|| {
+                    let mut out = String::with_capacity(source.len());
+                    out.push_str(&source[..copied]);
+                    out
+                });
+                out.push_str(&source[copied..at]);
+                if display {
+                    // `\[` and `$$` are the same length: no offsets move.
+                    out.push_str("$$");
+                    out.push_str(&source[at + 2..close]);
+                    out.push_str("$$");
+                } else {
+                    let body = &source[at + 2..close];
+                    let inner = body.trim_start();
+                    let lead = body.len() - inner.len();
+                    let inner = inner.trim_end();
+                    let trail = body.len() - lead - inner.len();
+                    // Each `$` stands in for its two-byte delimiter plus the
+                    // whitespace it swallowed.
+                    map.shift(out.len(), 1 + lead as isize);
+                    out.push('$');
+                    out.push_str(inner);
+                    map.shift(out.len(), 1 + trail as isize);
+                    out.push('$');
+                }
+                copied = close + 2;
+                at = close + 2;
+            }
+            _ => at += 1,
+        }
+    }
+    let mut out = rewritten?;
+    out.push_str(&source[copied..]);
+    Some((out, map))
+}
+
+/// The start of the first unescaped `\` + `closer` from `from` — or, as
+/// `Err`, where the search stopped — unless the paragraph ends first: at a
+/// blank line (math never crosses one), or at a line that opens another
+/// block. The latter keeps an opener and its closer in one top-level block —
+/// so the incremental tail reparse always sees both or neither — and keeps a
+/// fence's body from ever being rewritten.
+fn math_closer(
+    source: &str,
+    from: usize,
+    closer: u8,
+    in_quote: bool,
+    one_line: bool,
+) -> Result<usize, usize> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while at < bytes.len() {
+        match bytes[at] {
+            // Escape pairs (`\\`, `\{`) step over together, so the backslash
+            // of a TeX line break never starts a closer.
+            b'\\' if bytes.get(at + 1) == Some(&closer) => return Ok(at),
+            b'\\' => at += 2,
+            b'\n' => {
+                if one_line || opens_block(&source[at + 1..], in_quote) {
+                    return Err(at);
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    Err(bytes.len())
+}
+
+/// Whether a line ends the paragraph above it: a blank line, or (after up to
+/// three spaces) a fence, an ATX heading, a list item, a thematic break, or a
+/// block quote — unless the paragraph is itself quoted, where `>` continues
+/// it. Conservative: a false positive only leaves a formula's delimiters
+/// literal.
+fn opens_block(line: &str, in_quote: bool) -> bool {
+    let line = &line[..line.find('\n').unwrap_or(line.len())];
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return false;
+    }
+    let trimmed = trimmed.trim_end();
+    let bytes = trimmed.as_bytes();
+    let spaced = |at: usize| {
+        bytes
+            .get(at)
+            .is_none_or(|&byte| byte == b' ' || byte == b'\t')
+    };
+    let hashes = bytes.iter().take_while(|&&byte| byte == b'#').count();
+    let digits = bytes
+        .iter()
+        .take_while(|&&byte| byte.is_ascii_digit())
+        .count();
+    let thematic = |mark: u8| {
+        bytes.iter().filter(|&&byte| byte == mark).count() >= 3
+            && bytes.iter().all(|&byte| byte == mark || byte == b' ')
+    };
+    trimmed.is_empty()
+        || fence_open(trimmed).is_some()
+        || (1..=6).contains(&hashes) && spaced(hashes)
+        || matches!(bytes.first(), Some(b'-' | b'*' | b'+')) && spaced(1)
+        || (1..=9).contains(&digits)
+            && matches!(bytes.get(digits), Some(b'.' | b')'))
+            && spaced(digits + 1)
+        || thematic(b'*')
+        || thematic(b'_')
+        || (!in_quote && bytes.first() == Some(&b'>'))
 }
 
 /// Wrap inline link and image destinations that spell an absolute path with
@@ -212,13 +430,13 @@ impl Insertions {
 /// code span is copied verbatim — and a destination that is already bracketed
 /// or whose closing `)` has not streamed in yet is left alone, which makes
 /// the rewrite idempotent and safe while text is still arriving.
-fn rewrite_absolute_destinations(source: &str) -> Option<(String, Insertions)> {
+fn rewrite_absolute_destinations(source: &str) -> Option<(String, OffsetMap)> {
     if !source.contains("](") {
         return None;
     }
     let bytes = source.as_bytes();
     let mut rewritten: Option<String> = None;
-    let mut insertions = Insertions::default();
+    let mut insertions = OffsetMap::default();
     // Bytes before this are already in `rewritten`; skipped regions advance
     // it without copying, so the next splice stays contiguous.
     let mut copied = 0usize;
@@ -268,10 +486,10 @@ fn rewrite_absolute_destinations(source: &str) -> Option<(String, Insertions)> {
                         }),
                     };
                     out.push_str(&source[copied..start]);
-                    insertions.positions.push(out.len());
+                    insertions.shift(out.len(), -1);
                     out.push('<');
                     out.push_str(destination);
-                    insertions.positions.push(out.len());
+                    insertions.shift(out.len(), -1);
                     out.push('>');
                     copied = start + destination.len();
                 }
@@ -456,6 +674,10 @@ fn destination_close(bytes: &[u8], start: usize) -> Option<usize> {
 struct Cursor<'a, 'e> {
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
+    /// The original (unrewritten) source the event ranges point into, and
+    /// the document offset of its first byte.
+    source: &'a str,
+    offset: usize,
 }
 
 impl<'a, 'e> Cursor<'a, 'e> {
@@ -469,6 +691,16 @@ impl<'a, 'e> Cursor<'a, 'e> {
 
     fn bump(&mut self) {
         self.ix += 1;
+    }
+
+    /// The original source spelling of a document range, plus the byte after
+    /// it (if any).
+    fn spelling(&self, range: &Range<usize>) -> (&'a str, Option<u8>) {
+        let (start, end) = (range.start - self.offset, range.end - self.offset);
+        (
+            &self.source[start..end],
+            self.source.as_bytes().get(end).copied(),
+        )
     }
 
     fn next_event(&mut self) -> Option<Event<'e>> {
@@ -502,11 +734,7 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
         return Vec::new();
     };
     match tag {
-        Tag::Paragraph => {
-            vec![Block::Paragraph {
-                runs: parse_inline_container(cur, &InlineStyle::default()),
-            }]
-        }
+        Tag::Paragraph => parse_paragraph(cur),
         Tag::Heading { level, .. } => vec![Block::Heading {
             level: heading_level(level),
             runs: parse_inline_container(cur, &InlineStyle::default()),
@@ -603,6 +831,9 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
 fn parse_block_sequence(cur: &mut Cursor) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut inline_acc: Vec<InlineRun> = Vec::new();
+    // Text after a display formula drops its leading break (see
+    // `take_display_math`).
+    let mut after_math = false;
     while let Some(event) = cur.peek_event() {
         match event {
             Event::End(_) => {
@@ -610,27 +841,122 @@ fn parse_block_sequence(cur: &mut Cursor) -> Vec<Block> {
                 break;
             }
             Event::Start(tag) if is_block_tag(tag) => {
-                flush_paragraph(&mut out, &mut inline_acc);
+                flush_paragraph(&mut out, &mut inline_acc, std::mem::take(&mut after_math));
                 out.extend(parse_started_block(cur));
             }
             Event::Rule => {
-                flush_paragraph(&mut out, &mut inline_acc);
+                flush_paragraph(&mut out, &mut inline_acc, std::mem::take(&mut after_math));
                 cur.bump();
                 out.push(Block::Rule);
             }
-            _ => parse_inline_event(cur, &mut inline_acc, &InlineStyle::default()),
+            _ => {
+                if !take_display_math(cur, &mut out, &mut inline_acc, &mut after_math) {
+                    parse_inline_event(cur, &mut inline_acc, &InlineStyle::default());
+                }
+            }
         }
     }
-    flush_paragraph(&mut out, &mut inline_acc);
+    flush_paragraph(&mut out, &mut inline_acc, after_math);
     out
 }
 
-fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>) {
+fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>, after_math: bool) {
+    if after_math {
+        trim_runs_start(acc);
+    }
     if !acc.is_empty() {
         out.push(Block::Paragraph {
             runs: merge_runs(std::mem::take(acc)),
         });
     }
+}
+
+/// A paragraph's inline content, split around display math: `$$…$$` on its
+/// own is a [`Block::Math`], and one mid-paragraph ends the text before it
+/// and starts a new paragraph after it. Display math nested in emphasis or a
+/// link stays an inline math run. All the pieces share the paragraph's range.
+fn parse_paragraph(cur: &mut Cursor) -> Vec<Block> {
+    let mut out = Vec::new();
+    let mut runs = Vec::new();
+    let mut after_math = false;
+    while let Some(event) = cur.peek_event() {
+        if matches!(event, Event::End(_)) {
+            cur.bump();
+            break;
+        }
+        if !take_display_math(cur, &mut out, &mut runs, &mut after_math) {
+            parse_inline_event(cur, &mut runs, &InlineStyle::default());
+        }
+    }
+    if after_math {
+        trim_runs_start(&mut runs);
+    }
+    if !runs.is_empty() || out.is_empty() {
+        out.push(Block::Paragraph {
+            runs: autolink_runs(merge_runs(runs)),
+        });
+    }
+    out
+}
+
+/// Consume a display-math event at paragraph level: flush the text before
+/// it (minus the soft break or space leading up to the formula) and push the
+/// formula as its own block. `false` (nothing consumed) for any other event.
+fn take_display_math(
+    cur: &mut Cursor,
+    out: &mut Vec<Block>,
+    acc: &mut Vec<InlineRun>,
+    after_math: &mut bool,
+) -> bool {
+    let Some(Event::DisplayMath(tex)) = cur.peek_event() else {
+        return false;
+    };
+    let tex = tex.trim().to_string();
+    cur.bump();
+    trim_runs_end(acc);
+    if *after_math {
+        trim_runs_start(acc);
+    }
+    if !acc.is_empty() {
+        out.push(Block::Paragraph {
+            runs: autolink_runs(merge_runs(std::mem::take(acc))),
+        });
+    }
+    out.push(Block::Math { tex });
+    *after_math = true;
+    true
+}
+
+/// Plain text whose edge whitespace is layout, not content: code, math,
+/// images and task markers keep their spelling.
+fn is_plain(run: &InlineRun) -> bool {
+    !run.style.code && !run.style.math && run.style.image.is_none() && run.style.task.is_none()
+}
+
+fn trim_runs_end(runs: &mut Vec<InlineRun>) {
+    while let Some(last) = runs.last_mut().filter(|run| is_plain(run)) {
+        last.text.truncate(last.text.trim_end().len());
+        if !last.text.is_empty() {
+            break;
+        }
+        runs.pop();
+    }
+}
+
+fn trim_runs_start(runs: &mut Vec<InlineRun>) {
+    let mut drop = 0;
+    for run in runs.iter_mut() {
+        if !is_plain(run) {
+            break;
+        }
+        let trimmed = run.text.len() - run.text.trim_start().len();
+        run.text.drain(..trimmed);
+        if !run.text.is_empty() {
+            break;
+        }
+        drop += 1;
+    }
+    runs.drain(..drop);
 }
 
 fn parse_table(cur: &mut Cursor, align: Vec<TableAlign>) -> Block {
@@ -711,6 +1037,24 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             s.code = true;
             push(runs, t.into_string(), s);
         }
+        Event::InlineMath(tex) => {
+            let range = range.unwrap();
+            let (spelling, next) = cur.spelling(&range);
+            if spelling.starts_with('$') && not_math(&tex, next) {
+                push(runs, spelling.to_string(), style.clone());
+            } else {
+                let mut s = style.clone();
+                s.math = true;
+                push(runs, tex.trim().to_string(), s);
+            }
+        }
+        // Display math reaching here sits in a heading, a table cell or a
+        // styled span — places that hold runs, so it renders inline.
+        Event::DisplayMath(tex) => {
+            let mut s = style.clone();
+            s.math = true;
+            push(runs, tex.trim().to_string(), s);
+        }
         Event::SoftBreak => push(runs, " ".into(), style.clone()),
         Event::HardBreak => push(runs, "\n".into(), style.clone()),
         Event::Html(t) | Event::InlineHtml(t) => push(runs, t.into_string(), style.clone()),
@@ -765,15 +1109,32 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
     }
 }
 
+/// Whether a `$…$` span (`tex` between the dollars, `next` the byte after
+/// the closer) is really prose that happens to hold two dollar signs:
+/// - Pandoc's currency rule: a closer glued to a digit is a price (`$5-$10`);
+/// - a span ending in `/` is a path join (`$HOME/$USER`) — no formula ends so;
+/// - an all-caps identifier whose closer runs into another identifier is a
+///   shell variable (`$FOO$BAR`), while `$AB$` or `$n$th` stay math.
+fn not_math(tex: &str, next: Option<u8>) -> bool {
+    let shell_name = tex.len() > 1
+        && tex
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && tex.as_bytes()[0].is_ascii_uppercase();
+    next.is_some_and(|b| b.is_ascii_digit())
+        || tex.ends_with('/')
+        || (shell_name && next.is_some_and(|b| b.is_ascii_uppercase() || b == b'_'))
+}
+
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
 /// constantly; user report: the link isn't clickable). Runs already inside a
-/// link or code span pass through untouched. Idempotent, so nested containers
+/// link, code span or formula pass through untouched. Idempotent, so nested containers
 /// re-applying it on their merged output is harmless.
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code {
+        if run.style.link.is_some() || run.style.code || run.style.math {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -860,12 +1221,15 @@ fn bare_url_len(text: &str) -> usize {
 }
 
 /// Merge adjacent identically-styled runs (keeps run counts small and makes the
-/// tree canonical for equality tests).
+/// tree canonical for equality tests). Images and math are atoms: two formulas
+/// side by side stay two formulas.
 fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style && run.style.image.is_none() => {
+            Some(last)
+                if last.style == run.style && run.style.image.is_none() && !run.style.math =>
+            {
                 last.text.push_str(&run.text)
             }
             _ => out.push(run),
@@ -900,6 +1264,10 @@ pub struct IncrementalParser {
     /// tree is exactly [`Self::tree`]. Never fed back into the incremental
     /// state — the canonical tree stays parity-exact with `parse_full`.
     display_tail: Option<Vec<Arc<TopBlock>>>,
+    /// Index of the first canonical block the display tail replaces: the last
+    /// block and any siblings sharing its range (a paragraph split around
+    /// display math reparses as a unit).
+    display_from: usize,
     /// Link-reference definitions act at a distance — full reparses only.
     full_only: bool,
     /// Bytes fed through `parse_full` by the most recent `set_text`/`append`/
@@ -933,7 +1301,7 @@ impl IncrementalParser {
         let Some(tail) = &self.display_tail else {
             return self.tree.clone();
         };
-        let stable = &self.tree.blocks[..self.tree.blocks.len() - 1];
+        let stable = &self.tree.blocks[..self.display_from];
         let mut blocks = Vec::with_capacity(stable.len() + tail.len());
         blocks.extend_from_slice(stable);
         blocks.extend_from_slice(tail);
@@ -1004,10 +1372,17 @@ impl IncrementalParser {
         // further back (a block's separation from its predecessor is decided
         // by its own already-streamed leading bytes), so two blocks suffice;
         // the parity tests stream corpora to hold this invariant.
-        let boundary = match self.tree.blocks.len() {
-            0 | 1 => 0,
-            n => self.tree.blocks[n - 2].range.start,
-        };
+        // Blocks split from one source block (a paragraph around display
+        // math) share its range and count as one here.
+        let last_start = self.tree.blocks.last().map_or(0, |b| b.range.start);
+        let boundary = self
+            .tree
+            .blocks
+            .iter()
+            .rev()
+            .map(|b| b.range.start)
+            .find(|&start| start < last_start)
+            .unwrap_or(0);
         let boundary = self.source[..boundary]
             .rfind('\n')
             .map(|i| i + 1)
@@ -1035,10 +1410,11 @@ impl IncrementalParser {
             return;
         };
         // Code blocks render an unclosed fence verbatim (already stable);
-        // rules and tables have no inline tail to mend.
+        // rules, tables and a paragraph ending in display math have no inline
+        // tail to mend.
         if matches!(
             last.block,
-            Block::CodeBlock { .. } | Block::Rule | Block::Table { .. }
+            Block::CodeBlock { .. } | Block::Rule | Block::Table { .. } | Block::Math { .. }
         ) {
             return;
         }
@@ -1056,6 +1432,12 @@ impl IncrementalParser {
             // closers at the end clamp away.
             top.range.end = top.range.end.min(self.source.len());
         }
+        self.display_from = self
+            .tree
+            .blocks
+            .iter()
+            .rposition(|b| b.range.start != start)
+            .map_or(0, |i| i + 1);
         self.display_tail = Some(tail);
     }
 }
@@ -1168,6 +1550,11 @@ mod tests {
         "text\n\n```\n[x](/tmp/a b.md)\n```\n\nafter [y](file:///tmp/c d.md)\n",
         "para with <span>inline html</span> inside\n\n<div>\nblock html\n</div>\n",
         "###### deep heading\n\n#### h4\n",
+        "Euler: $e^{i\\pi} + 1 = 0$ and $a_1 * b_2$.\n\n$$\n\\sum_{k=1}^n k = \\frac{n(n+1)}{2}\n$$\n\nafter\n",
+        "Before\n$$x^2$$\nmiddle **bold** $$y$$ tail\n\n- item $$z$$\n- $a$\n\n> $$q$$\n",
+        "Prose \\(a^2 + b^2\\) here.\n\n\\[\n\\int_0^1 f(x)\\,dx\n\\]\n\nand `\\(code\\)` then \\[ e = mc^2 \\] end\n",
+        "costs $5-$10 or between $5 and $10, but $x$ is math\n\n# Heading $$h$$\n\n| m |\n|---|\n| $$c$$ |\n",
+        "# T \\(\nx \\) y\npara \\[\n- item \\]\n\n> \\[\n> q_1\n> \\]\n\ntext\n```\n\\(raw\\)\n```\n",
     ];
 
     #[test]
@@ -1188,9 +1575,11 @@ mod tests {
     #[test]
     fn appends_keep_committed_blocks_identical() {
         // Streaming stability invariant: blocks before the reparse boundary
-        // (everything but the last two top-level blocks) must be reused
-        // as-is across appends — same index, same value — so row/element keys
-        // never re-mount and earlier blocks can never visibly reflow.
+        // (everything but the last two source blocks — pieces of a paragraph
+        // split around display math share a range and count as one) must be
+        // reused as-is across appends — same index, same value — so
+        // row/element keys never re-mount and earlier blocks can never
+        // visibly reflow.
         for corpus in CORPORA {
             let mut p = IncrementalParser::new();
             let mut prev = p.tree().clone();
@@ -1205,7 +1594,14 @@ mod tests {
                 start = end;
 
                 let cur = p.tree();
-                let committed = prev.blocks.len().saturating_sub(2);
+                let mut starts: Vec<usize> = prev.blocks.iter().map(|b| b.range.start).collect();
+                starts.dedup();
+                let committed = match starts.len() {
+                    0..=2 => 0,
+                    n => prev
+                        .blocks
+                        .partition_point(|b| b.range.start < starts[n - 2]),
+                };
                 assert!(
                     cur.blocks.len() >= committed,
                     "committed blocks disappeared:\n{corpus}"
@@ -1710,6 +2106,309 @@ mod destination_rewrite_tests {
             rewrite_absolute_destinations(&once.0).is_none(),
             "second pass must find nothing to rewrite"
         );
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn blocks(source: &str) -> Vec<Block> {
+        parse_full(source)
+            .blocks
+            .iter()
+            .map(|top| top.block.clone())
+            .collect()
+    }
+
+    fn para(source: &str) -> Vec<InlineRun> {
+        match blocks(source).as_slice() {
+            [Block::Paragraph { runs }] => runs.clone(),
+            other => panic!("expected one paragraph for {source:?}: {other:?}"),
+        }
+    }
+
+    fn math(text: &str) -> InlineRun {
+        InlineRun {
+            text: text.into(),
+            style: InlineStyle {
+                math: true,
+                ..InlineStyle::default()
+            },
+        }
+    }
+
+    fn plain(text: &str) -> InlineRun {
+        InlineRun {
+            text: text.into(),
+            style: InlineStyle::default(),
+        }
+    }
+
+    fn display(tex: &str) -> Block {
+        Block::Math { tex: tex.into() }
+    }
+
+    fn paragraph(runs: Vec<InlineRun>) -> Block {
+        Block::Paragraph { runs }
+    }
+
+    #[test]
+    fn inline_math_is_an_atomic_run() {
+        assert_eq!(para("a $x^2$ b"), [plain("a "), math("x^2"), plain(" b")]);
+        // Neighbouring formulas never merge; their TeX is not autolinked
+        // and its markers are not emphasis.
+        assert_eq!(para("$a$$b$"), [math("a"), math("b")]);
+        assert_eq!(
+            para("$\\text{https://x.dev}$"),
+            [math("\\text{https://x.dev}")]
+        );
+        assert_eq!(para("$a_1 * b_2$"), [math("a_1 * b_2")]);
+        // Inline math keeps the surrounding style.
+        let runs = para("**bold $x$**");
+        assert!(runs[1].style.math && runs[1].style.bold);
+    }
+
+    #[test]
+    fn display_math_alone_is_a_block() {
+        assert_eq!(blocks("$$x$$"), [display("x")]);
+        assert_eq!(blocks("$$\n\\frac{a}{b}\n$$\n"), [display("\\frac{a}{b}")]);
+    }
+
+    #[test]
+    fn display_math_mid_paragraph_splits_it() {
+        assert_eq!(
+            blocks("before\n$$x$$\nafter **b**"),
+            [
+                paragraph(vec![plain("before")]),
+                display("x"),
+                paragraph(vec![
+                    plain("after "),
+                    InlineRun {
+                        text: "b".into(),
+                        style: InlineStyle {
+                            bold: true,
+                            ..InlineStyle::default()
+                        }
+                    }
+                ]),
+            ]
+        );
+        assert_eq!(
+            blocks("lead $$x$$ $$y$$ tail"),
+            [
+                paragraph(vec![plain("lead")]),
+                display("x"),
+                display("y"),
+                paragraph(vec![plain("tail")]),
+            ]
+        );
+        assert_eq!(
+            blocks("$$x$$ trailing"),
+            [display("x"), paragraph(vec![plain("trailing")])]
+        );
+        // Every piece shares the source paragraph's range.
+        let source = "intro\n\nbefore $$x$$ after\n";
+        let tree = parse_full(source);
+        assert_eq!(tree.len(), 4);
+        for top in &tree.blocks[1..] {
+            assert_eq!(&source[top.range.clone()], "before $$x$$ after\n");
+        }
+    }
+
+    #[test]
+    fn display_math_splits_inside_lists_and_quotes() {
+        let Block::List { items, .. } = &blocks("- see $$x$$ ok\n- $$y$$\n")[0] else {
+            panic!("list");
+        };
+        assert_eq!(
+            items[0],
+            [
+                paragraph(vec![plain("see")]),
+                display("x"),
+                paragraph(vec![plain("ok")])
+            ]
+        );
+        assert_eq!(items[1], [display("y")]);
+        let Block::BlockQuote { children } = &blocks("> q\n> $$z$$\n")[0] else {
+            panic!("quote");
+        };
+        assert_eq!(children, &[paragraph(vec![plain("q")]), display("z")]);
+    }
+
+    #[test]
+    fn display_math_stays_inline_in_headings_tables_and_spans() {
+        let Block::Heading { runs, .. } = &blocks("# Sum $$x$$")[0] else {
+            panic!("heading");
+        };
+        assert_eq!(runs, &[plain("Sum "), math("x")]);
+        let Block::Table { rows, .. } = &blocks("| m |\n|---|\n| $$c$$ |\n")[0] else {
+            panic!("table");
+        };
+        assert_eq!(rows[0][0], [math("c")]);
+        let runs = para("*a $$x$$ b*");
+        assert!(runs.iter().any(|run| run.style.math && run.style.italic));
+    }
+
+    #[test]
+    fn currency_stays_text() {
+        assert_eq!(para("costs $5-$10 total"), [plain("costs $5-$10 total")]);
+        assert_eq!(para("between $5 and $10"), [plain("between $5 and $10")]);
+        assert_eq!(para("$x$5"), [plain("$x$5")]);
+        // A formula followed by a non-digit is still math.
+        assert_eq!(para("$5$ apples"), [math("5"), plain(" apples")]);
+    }
+
+    #[test]
+    fn shell_variables_stay_text() {
+        assert_eq!(para("Set $HOME/$USER now"), [plain("Set $HOME/$USER now")]);
+        assert_eq!(para("echo $FOO$BAR"), [plain("echo $FOO$BAR")]);
+        // Capital letters alone are still geometry, and suffixes still attach.
+        assert_eq!(
+            para("triangle $ABC$ here"),
+            [plain("triangle "), math("ABC"), plain(" here")]
+        );
+        assert_eq!(
+            para("the $n$th one"),
+            [plain("the "), math("n"), plain("th one")]
+        );
+    }
+
+    #[test]
+    fn latex_delimiters_become_math() {
+        assert_eq!(
+            para("so \\(a^2 + b^2\\) holds"),
+            [plain("so "), math("a^2 + b^2"), plain(" holds")]
+        );
+        // Whitespace inside `\( … \)` is dropped (`$ x $` would not parse).
+        assert_eq!(para("\\( x \\)"), [math("x")]);
+        // A rewritten closer before a digit is not a price.
+        assert_eq!(para("\\(x\\)2"), [math("x"), plain("2")]);
+        assert_eq!(blocks("\\[ e = mc^2 \\]"), [display("e = mc^2")]);
+        assert_eq!(
+            blocks("Thus\n\\[\n\\int_0^1 f\\,dx \\\\\ny\n\\]\nso"),
+            [
+                paragraph(vec![plain("Thus")]),
+                display("\\int_0^1 f\\,dx \\\\\ny"),
+                paragraph(vec![plain("so")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn unclosed_latex_openers_scan_in_linear_time() {
+        // 20k openers with no closer in their paragraph: each would rescan it.
+        let mut source = "\\(".repeat(20_000);
+        source.push_str(" tail\n\nand \\(y\\) after");
+        let started = std::time::Instant::now();
+        let (out, _) = rewrite_math_delimiters(&source).unwrap();
+        assert!(
+            started.elapsed().as_millis() < 500,
+            "{:?}",
+            started.elapsed()
+        );
+        // The openers stay literal; the next paragraph's pair still closes.
+        assert!(out.starts_with("\\(\\(\\("));
+        assert!(
+            out.ends_with(" tail\n\nand $y$ after"),
+            "{}",
+            &out[out.len() - 30..]
+        );
+    }
+
+    #[test]
+    fn latex_delimiters_need_a_closer_in_the_same_paragraph() {
+        // Unclosed (still streaming): markdown escapes, so `(` / `[` show.
+        assert_eq!(para("so \\(a^2"), [plain("so (a^2")]);
+        assert_eq!(
+            blocks("\\[\nx\n\nmore \\]"),
+            [
+                paragraph(vec![plain("[ x")]),
+                paragraph(vec![plain("more ]")])
+            ]
+        );
+        // A closer past the start of another block doesn't pair either — not
+        // into a fence's body, not across a heading or list item.
+        let tree = blocks("a \\[\n```\n\\]\n```\n");
+        assert_eq!(tree[0], paragraph(vec![plain("a [")]));
+        assert_eq!(
+            tree[1],
+            Block::CodeBlock {
+                language: None,
+                code: "\\]".into()
+            }
+        );
+        assert_eq!(blocks("# h \\(\nx \\)")[1], paragraph(vec![plain("x )")]));
+        assert_eq!(blocks("a \\(\n- x \\)").len(), 2);
+        // Quoted paragraphs continue over their `>` lines.
+        let Block::BlockQuote { children } = &blocks("> \\[\n> x\n> \\]\n")[0] else {
+            panic!("quote");
+        };
+        assert_eq!(children, &[display("x")]);
+    }
+
+    #[test]
+    fn latex_delimiters_leave_escapes_and_code_alone() {
+        // `\\(` is a literal backslash then `(`.
+        assert_eq!(para("a \\\\(b\\\\) c"), [plain("a \\(b\\) c")]);
+        // Escaped brackets glued to a word, and escaped task boxes.
+        assert_eq!(para("arr\\[0\\] and f\\(x\\)"), [plain("arr[0] and f(x)")]);
+        assert_eq!(para("\\[ \\] todo"), [plain("[ ] todo")]);
+        // Code spans, fences and indented code keep their spelling.
+        let runs = para("`\\(x\\)` and \\(y\\)");
+        assert_eq!(runs[0].text, "\\(x\\)");
+        assert!(runs[0].style.code);
+        assert_eq!(runs[2], math("y"));
+        let Block::CodeBlock { code, .. } = &blocks("```\n\\[x\\]\n```\n")[0] else {
+            panic!("fence");
+        };
+        assert_eq!(code, "\\[x\\]");
+        let Block::CodeBlock { code, .. } = &blocks("    \\(x\\)\n")[0] else {
+            panic!("indented");
+        };
+        assert_eq!(code, "\\(x\\)");
+    }
+
+    #[test]
+    fn rewritten_ranges_map_back_to_the_original_source() {
+        let source = "a \\( x \\) [l](/tmp/a b.md)\n\n\\[y\\] tail\n";
+        let tree = parse_full(source);
+        assert_eq!(
+            &source[tree.blocks[0].range.clone()],
+            "a \\( x \\) [l](/tmp/a b.md)\n"
+        );
+        assert_eq!(&source[tree.blocks[1].range.clone()], "\\[y\\] tail\n");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        assert_eq!(runs[1], math("x"));
+        assert_eq!(
+            runs.iter().find_map(|run| run.style.link.as_deref()),
+            Some("/tmp/a b.md")
+        );
+        // Composed offsets: the event ranges themselves land on the
+        // original delimiters.
+        let (text, map) = rewrite_math_delimiters(source).unwrap();
+        assert_eq!(&text[..6], "a $x$ ");
+        assert_eq!(map.original_range(2..5), 2..9);
+        assert_eq!(&source[2..9], "\\( x \\)");
+    }
+
+    #[test]
+    fn streamed_math_matches_full_parse() {
+        let mut parser = IncrementalParser::new();
+        parser.set_text("text $$x");
+        assert_eq!(parser.display_tree(), *parser.tree());
+        parser.append("$$ more **b");
+        assert_eq!(parser.tree(), &parse_full(parser.source()));
+        // The display tail replaces the whole split paragraph exactly once.
+        let shown = parser.display_tree();
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown.blocks[1].block, display("x"));
+        let Block::Paragraph { runs } = &shown.blocks[2].block else {
+            panic!("paragraph");
+        };
+        assert!(runs.iter().any(|run| run.style.bold && run.text == "b"));
     }
 }
 

@@ -159,6 +159,54 @@ impl NewThreadBackgroundEffect {
     }
 }
 
+/// The face Markdown math is set in. Both are bundled, so the choice never
+/// depends on what the device has installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MathFont {
+    #[default]
+    Fira,
+    StixTwo,
+}
+
+impl MathFont {
+    pub const ALL: [Self; 2] = [Self::Fira, Self::StixTwo];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fira => "Fira Math",
+            Self::StixTwo => "STIX Two",
+        }
+    }
+
+    /// The short note beside the label in the menu.
+    pub const fn style(self) -> &'static str {
+        match self {
+            Self::Fira => "Sans",
+            Self::StixTwo => "Serif",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Fira => "A sans face that sits beside the interface font.",
+            Self::StixTwo => "A serif face with the classic TeX look.",
+        }
+    }
+
+    pub const fn face(self) -> zatex::bundled::Face {
+        match self {
+            Self::Fira => zatex::bundled::Face::Fira,
+            Self::StixTwo => zatex::bundled::Face::StixTwo,
+        }
+    }
+}
+
+/// Markdown math size as a percent of the text around it.
+pub const MATH_SIZE_DEFAULT: u16 = 100;
+pub const MATH_SIZE_MIN: u16 = 75;
+pub const MATH_SIZE_MAX: u16 = 200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GitHistoryColumns {
@@ -325,6 +373,9 @@ pub struct SettingsStore {
     /// the persisted revision, this advances only when the global Fit choice
     /// changes, including a change back to its previous value.
     code_fences_generation: u64,
+    /// The same token for how Markdown math renders (on or off, face and
+    /// size).
+    math_generation: u64,
     save_task: Option<Task<()>>,
 }
 
@@ -350,6 +401,12 @@ impl SettingsStore {
         if self.current.code_fences_fit_content != before.code_fences_fit_content {
             self.code_fences_generation = self.code_fences_generation.wrapping_add(1);
         }
+        if self.current.render_math != before.render_math
+            || self.current.math_font != before.math_font
+            || self.current.math_size != before.math_size
+        {
+            self.math_generation = self.math_generation.wrapping_add(1);
+        }
         self.revision = self.revision.wrapping_add(1);
         true
     }
@@ -364,6 +421,7 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
         revision: 0,
         saved_revision: 0,
         code_fences_generation: 0,
+        math_generation: 0,
         save_task: None,
     });
 }
@@ -592,6 +650,50 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+/// How Markdown surfaces set math, read each render without cloning the
+/// settings.
+pub fn math_style(cx: &App) -> crate::markdown::math::MathStyle {
+    cx.try_global::<SettingsStore>()
+        .map(|store| crate::markdown::math::MathStyle {
+            enabled: store.current.render_math,
+            face: store.current.math_font.face(),
+            size: store.current.math_size,
+        })
+        .unwrap_or_default()
+}
+
+/// Monotonic id of [`math_style`]: Markdown surfaces that keep measured row
+/// heights compare it during render and remeasure when it moves.
+pub fn math_generation(cx: &App) -> u64 {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.math_generation)
+        .unwrap_or_default()
+}
+
+pub fn set_render_math(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.render_math = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_math_font(font: MathFont, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.math_font = font;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_math_size(size: u16, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.math_size = size;
     }) {
         cx.refresh_windows();
     }
@@ -958,6 +1060,12 @@ pub struct UiSettings {
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
+    /// Typeset LaTeX math in Markdown. Off shows its source as code.
+    pub render_math: bool,
+    /// The bundled face typeset math is set in.
+    pub math_font: MathFont,
+    /// Typeset math size, as a percent of the text around it.
+    pub math_size: u16,
     /// Maximum message and docked composer surface width in logical pixels.
     /// The centered new-chat composer keeps its own width.
     pub transcript_width: f32,
@@ -1084,6 +1192,9 @@ impl Default for UiSettings {
             diff_split: false,
             diff_wrap: false,
             code_fences_fit_content: false,
+            render_math: true,
+            math_font: MathFont::Fira,
+            math_size: MATH_SIZE_DEFAULT,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
@@ -1733,6 +1844,9 @@ impl UiSettings {
             diff_split,
             diff_wrap,
             code_fences_fit_content,
+            render_math,
+            math_font,
+            math_size,
             transcript_width,
             open_web_links_in_zeron,
             transcript_compact_mode,
@@ -1796,6 +1910,7 @@ impl UiSettings {
         self.files_autosave_delay_ms = self
             .files_autosave_delay_ms
             .clamp(FILES_AUTOSAVE_DELAY_MIN_MS, FILES_AUTOSAVE_DELAY_MAX_MS);
+        self.math_size = self.math_size.clamp(MATH_SIZE_MIN, MATH_SIZE_MAX);
         self.terminal_font_size = clamp_or(
             self.terminal_font_size,
             crate::typography::FONT_SIZE_MIN,
@@ -2366,6 +2481,9 @@ mod tests {
             loaded.code_font_size,
             crate::typography::CODE_FONT_SIZE_DEFAULT
         );
+        assert!(loaded.render_math);
+        assert_eq!(loaded.math_font, MathFont::Fira);
+        assert_eq!(loaded.math_size, MATH_SIZE_DEFAULT);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2807,6 +2925,9 @@ mod tests {
             diff_split: true,
             diff_wrap: true,
             code_fences_fit_content: true,
+            render_math: false,
+            math_font: MathFont::StixTwo,
+            math_size: 135,
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
@@ -2849,6 +2970,9 @@ mod tests {
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
+        assert!(json.contains(r#""renderMath": false"#));
+        assert!(json.contains(r#""mathFont": "stixTwo""#));
+        assert!(json.contains(r#""mathSize": 135"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
         assert!(json.contains(r#""focalX": 0.25"#));
@@ -2871,6 +2995,7 @@ mod tests {
             revision: 0,
             saved_revision: 0,
             code_fences_generation: 0,
+            math_generation: 0,
             save_task: None,
         };
 
@@ -2929,6 +3054,7 @@ mod tests {
             revision: 0,
             saved_revision: 0,
             code_fences_generation: 0,
+            math_generation: 0,
             save_task: None,
         };
 
@@ -2942,6 +3068,79 @@ mod tests {
 
         assert!(!store.update_current(|settings| settings.code_fences_fit_content = false));
         assert_eq!(store.code_fences_generation, 2);
+    }
+
+    #[test]
+    fn math_generation_tracks_every_math_change_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore {
+            current: UiSettings::default(),
+            data_dir: dir.path().to_path_buf(),
+            revision: 0,
+            saved_revision: 0,
+            code_fences_generation: 0,
+            math_generation: 0,
+            save_task: None,
+        };
+
+        assert!(store.update_current(|settings| settings.code_fences_fit_content = true));
+        assert_eq!(store.math_generation, 0);
+
+        assert!(store.update_current(|settings| settings.render_math = false));
+        assert_eq!(store.math_generation, 1);
+        assert!(store.update_current(|settings| settings.math_font = MathFont::StixTwo));
+        assert_eq!(store.math_generation, 2);
+        assert!(store.update_current(|settings| settings.render_math = true));
+        assert_eq!(store.math_generation, 3);
+
+        assert!(!store.update_current(|settings| settings.math_font = MathFont::StixTwo));
+        assert_eq!(store.math_generation, 3);
+
+        assert!(store.update_current(|settings| settings.math_size = 120));
+        assert_eq!(store.math_generation, 4);
+        assert!(!store.update_current(|settings| settings.math_size = 120));
+        assert_eq!(store.math_generation, 4);
+        // A value the clamp heals back to the current size changes nothing.
+        assert!(store.update_current(|settings| settings.math_size = MATH_SIZE_MAX));
+        assert_eq!(store.math_generation, 5);
+        assert!(!store.update_current(|settings| settings.math_size = 500));
+        assert_eq!(store.math_generation, 5);
+    }
+
+    #[test]
+    fn math_settings_default_to_typeset_fira() {
+        let settings = UiSettings::default();
+        assert!(settings.render_math);
+        assert_eq!(settings.math_font, MathFont::Fira);
+        assert_eq!(settings.math_font.face(), zatex::bundled::Face::Fira);
+        assert_eq!(MathFont::StixTwo.face(), zatex::bundled::Face::StixTwo);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["renderMath"], true);
+        assert_eq!(json["mathFont"], "fira");
+        assert_eq!(settings.math_size, 100);
+        assert_eq!(json["mathSize"], 100);
+    }
+
+    #[test]
+    fn math_size_heals_out_of_range_values() {
+        for (value, expected) in [
+            (10, MATH_SIZE_MIN),
+            (0, MATH_SIZE_MIN),
+            (500, MATH_SIZE_MAX),
+            (75, 75),
+            (135, 135),
+            (200, 200),
+        ] {
+            let settings = UiSettings {
+                math_size: value,
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(settings.math_size, expected, "{value}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"mathSize":10}"#).unwrap();
+        assert_eq!(UiSettings::load(dir.path()).math_size, MATH_SIZE_MIN);
     }
 
     #[test]

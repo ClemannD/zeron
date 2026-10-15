@@ -64,6 +64,30 @@ enum Fonts {
     static func ui(_ face: FaceRole, _ size: CGFloat) -> UIFont {
         ctFont(face, size: Float(size)) as UIFont
     }
+
+    /// The core's math faces, by table index (0 Fira Math, 1 STIX Two Math,
+    /// whichever face the setting picks; glyph ids index these exact bytes),
+    /// each at `mathReferenceSize`. Never registered: they're drawn by glyph
+    /// id, not by name. Glyphs draw at any size by scaling the context — no
+    /// per-size fonts, since shrunk formulas make sizes continuous (and iOS
+    /// doesn't hint, so a scaled glyph paints the same as a sized one).
+    private static let mathFonts: [CTFont] = {
+        var fonts: [CTFont] = []
+        while fonts.count < 8 {
+            let data = mathFontData(index: UInt8(fonts.count))
+            guard !data.isEmpty, let provider = CGDataProvider(data: data as CFData), let font = CGFont(provider) else { break }
+            fonts.append(CTFontCreateWithGraphicsFont(font, mathReferenceSize, nil, nil))
+        }
+        return fonts
+    }()
+
+    /// The size `mathFont` fonts are made at; scale by `size / this` to draw.
+    static let mathReferenceSize: CGFloat = 16
+
+    /// Math font `index` at `mathReferenceSize` (nil: unknown face).
+    static func mathFont(_ index: UInt8) -> CTFont? {
+        Int(index) < mathFonts.count ? mathFonts[Int(index)] : nil
+    }
 }
 
 /// CoreText as ground truth for glyphs the bundled faces don't cover.

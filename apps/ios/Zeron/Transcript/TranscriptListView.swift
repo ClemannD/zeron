@@ -1,6 +1,61 @@
 import SafariServices
 import UIKit
 
+/// How transcripts show LaTeX math, local to this phone: rendered (in Fira
+/// Math or STIX Two) or as its TeX source.
+enum MathSettings {
+    static let didChange = Notification.Name("ZeronMathSettingsChanged")
+
+    /// Off shows `$…$` as an inline code chip and `$$…$$` as a code block.
+    static var render: Bool {
+        get { UserDefaults.standard.object(forKey: "mathRender") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathRender")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static var face: MathFace {
+        get { UserDefaults.standard.string(forKey: "mathFont") == "stixTwo" ? .stixTwo : .fira }
+        set {
+            UserDefaults.standard.set(newValue == .stixTwo ? "stixTwo" : "fira", forKey: "mathFont")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allFaces: [MathFace] = [.fira, .stixTwo]
+
+    /// Formula size as a percent of the text around it (the desktop's
+    /// options; Rust clamps to 75–200).
+    static var size: Int {
+        get { UserDefaults.standard.object(forKey: "mathSize") as? Int ?? 100 }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathSize")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allSizes = [90, 100, 110, 120, 135, 150]
+
+    static func label(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "Fira Math"
+        case .stixTwo: "STIX Two"
+        }
+    }
+
+    static func detail(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "A sans that sits beside the interface font."
+        case .stixTwo: "The classic serif TeX look."
+        }
+    }
+
+    static func apply(to engine: TranscriptView) {
+        engine.setMath(enabled: render, face: face, sizePercent: UInt16(clamping: size))
+    }
+}
+
 /// Virtualized transcript host. Rust owns geometry: each `LayoutFrame` gives
 /// exact row offsets, so this view only (1) asks which rows intersect the
 /// viewport, (2) positions reusable `RowView`s there, and (3) keeps the user's
@@ -16,9 +71,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
     private var memoryObserver: NSObjectProtocol?
+    private var mathObserver: NSObjectProtocol?
 
     deinit {
         if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+        if let mathObserver { NotificationCenter.default.removeObserver(mathObserver) }
     }
     private var cacheOrder: [ModelKey] = []
     private var knownKeys = Set<UInt64>()
@@ -198,6 +255,12 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             self?.cacheOrder.removeAll()
             self?.pool.forEach { $0.removeFromSuperview() }
             self?.pool.removeAll()
+        }
+        // Rebuilt rows get new versions, so stale models just stop matching.
+        MathSettings.apply(to: engine)
+        mathObserver = NotificationCenter.default.addObserver(forName: MathSettings.didChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            MathSettings.apply(to: self.engine)
         }
     }
 

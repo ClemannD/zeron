@@ -11,14 +11,20 @@
 //! untouched, so a marker that genuinely never closes settles honestly — one
 //! flip when the row completes — instead of jittering throughout.
 //!
-//! Repairs, in the spirit of remend's handler set (its katex/html/comparison
-//! handlers don't apply here — zeron renders raw HTML literally and has no
-//! math):
+//! Repairs, in the spirit of remend's handler set (its html/comparison
+//! handlers don't apply here — zeron renders raw HTML literally):
 //! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
 //!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
 //!   completed (`**a*` → `**a**`);
 //! - inline code backtick parity (fence-shaped tails never reach here — the
 //!   parser gates mending on the last block not being a code block);
+//! - math (`$…$`, `$$…$$`) shields its TeX like a code span — `a_1` or `x^*`
+//!   inside never opens emphasis — but an unclosed formula is *not* closed:
+//!   half a formula would render broken, so it stays literal until its own
+//!   closer streams in. Only a half-streamed display closer (`$$x$`) is
+//!   completed. A display formula also ends any emphasis or link text opened
+//!   before it (closing across it would fold the formula inline), and a lone
+//!   `$` before a digit is a price, not an opener;
 //! - links/images: the URL never renders — `[text](partial` and a bare
 //!   `[text` both mend to `[text](`[`PENDING_LINK_URL`]`)`, so the link text
 //!   shows styled immediately and the settling URL can't collapse the line;
@@ -71,6 +77,12 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let mut last_content: Option<usize> = None;
     // Char index of the `]` of a `](…` whose URL runs off the end.
     let mut pending_url: Option<usize> = None;
+    // Open math: (dollar run length, 1 inline or 2 display; content char
+    // index). Shields its content and is never closed synthetically.
+    let mut math: Option<(usize, usize)> = None;
+    // Char index of a lone `$` ending open display math — the first half of
+    // its closing `$$`.
+    let mut half_closer: Option<usize> = None;
 
     let mut i = 0;
     while i < n {
@@ -80,7 +92,30 @@ pub fn close_hanging(text: &str) -> Option<String> {
             if i + 1 < n {
                 last_content = Some(i + 1);
             }
+            half_closer = None;
             i += 2;
+            continue;
+        }
+        if let Some((open, _)) = math {
+            if c == '$' {
+                let run = run_len(&cs, i);
+                // Inline math closes on a `$` glued to its content; display
+                // math on `$$` wherever it falls.
+                let glued = i > 0 && !cs[i - 1].1.is_whitespace();
+                if run >= open && (open == 2 || glued) {
+                    math = None;
+                } else if open == 2 && run == 1 {
+                    half_closer = Some(i);
+                }
+                last_content = Some(i + run - 1);
+                i += run;
+                continue;
+            }
+            if !c.is_whitespace() {
+                half_closer = None;
+                last_content = Some(i);
+            }
+            i += 1;
             continue;
         }
         if c == '`' {
@@ -100,6 +135,21 @@ pub fn close_hanging(text: &str) -> Option<String> {
             continue;
         }
         match c {
+            '$' => {
+                let run = run_len(&cs, i);
+                let next = at(i + run);
+                if run >= 2 {
+                    // Emphasis and link text opened before a display formula
+                    // don't reach past it.
+                    delims.clear();
+                    brackets.clear();
+                    math = Some((2, i + run));
+                } else if next.is_some_and(|c| !c.is_whitespace() && !c.is_ascii_digit()) {
+                    math = Some((1, i + run));
+                }
+                last_content = Some(i + run - 1);
+                i += run;
+            }
             '*' | '_' | '~' => {
                 let run = run_len(&cs, i);
                 delim(&mut delims, &cs, c, run, i, &mut last_content);
@@ -161,6 +211,9 @@ pub fn close_hanging(text: &str) -> Option<String> {
     // splits the emphasis closers naturally: delimiters opened inside the
     // link text close before the `](…)`, ones opened before it close after.
     let mut pending: Vec<(usize, String)> = Vec::new();
+    if let (Some((2, mpos)), Some(_)) = (math, half_closer) {
+        pending.push((mpos, "$".into()));
+    }
     if let Some((ticks, cpos)) = code
         && last_content.is_some_and(|lc| lc >= cpos)
     {
@@ -371,6 +424,37 @@ mod tests {
         mends("call `a ** b", "call `a ** b`");
         mends("``a`", "``a```"); // shorter run is span content, not a closer
         stays("`done` after");
+    }
+
+    #[test]
+    fn math_shields_markers_and_is_never_closed() {
+        // Unclosed formulas stay literal: no synthetic `$`.
+        stays("so $x_{1} + b");
+        stays("so $$\\sum_{i} x_i^*");
+        // Markers inside a closed formula don't open anything.
+        stays("so $a_1 * b_2$ done");
+        stays("$$x_*$$ and $y_1$");
+        // Emphasis after a formula still mends.
+        mends("$a_1$ then **bo", "$a_1$ then **bo**");
+        // Escaped dollars and dollars in code are not math.
+        mends("\\$5 **bo", "\\$5 **bo**");
+        mends("`$x` **bo", "`$x` **bo**");
+    }
+
+    #[test]
+    fn math_prices_and_half_display_closers() {
+        // A lone `$` before a digit reads as a price and shields nothing.
+        mends("costs $5 and **bo", "costs $5 and **bo**");
+        // `$$x$` is a display formula whose closer is half streamed.
+        mends("$$x^2$", "$$x^2$$");
+        mends("$$\nx_1\n$", "$$\nx_1\n$$");
+        stays("$$x$$");
+    }
+
+    #[test]
+    fn display_math_ends_emphasis_opened_before_it() {
+        stays("**a $$x$$ b");
+        mends("**a $$x$$ *b", "**a $$x$$ *b*");
     }
 
     #[test]
