@@ -156,107 +156,257 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
 }
 
 fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
-    // Pre-passes run in order, each over the previous one's output; `maps`
-    // records their edits so ranges walk back through them in reverse.
-    let mut text = Cow::Borrowed(source);
-    let mut maps: Vec<OffsetMap> = Vec::new();
-    if let Some((rewritten, map)) = rewrite_math_delimiters(source, options) {
-        text = Cow::Owned(rewritten);
-        maps.push(map);
+    // pulldown-cmark 0.12 can panic on some malformed input (a slice index
+    // in its first pass); a message must never take the app down with it.
+    // Such a source renders as its plain text.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_rewritten(source, offset, options)
+    }))
+    .unwrap_or_else(|_| BlockTree {
+        blocks: vec![Arc::new(TopBlock {
+            range: offset..offset + source.len(),
+            block: Block::Paragraph {
+                runs: vec![InlineRun {
+                    text: source.to_owned(),
+                    style: InlineStyle::default(),
+                }],
+            },
+        })],
+    })
+}
+
+/// Rewrites a parse must not keep: math delimiters (by the original offset of
+/// their opener) and destination rewrites (by the original offset of their
+/// `](`) that didn't come out as the formula or link they were for.
+#[derive(Default)]
+struct Skip {
+    math: std::collections::HashSet<usize>,
+    destinations: std::collections::HashSet<usize>,
+    all: bool,
+}
+
+/// Deepest block and inline nesting kept: pulldown-cmark itself is
+/// iterative, but the tree builder and every renderer recurse per level, so
+/// `>` × 20 000 would overflow a stack. Deeper starts and ends are dropped
+/// and their content joins the innermost kept container.
+const MAX_NESTING: usize = 32;
+
+fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
+    let mut skip = Skip::default();
+    // Every rewrite is checked against the parse it produced: a formula pair
+    // must come out as exactly one formula, a destination rewrite inside a
+    // link. Anything else (a code span the dollar pass reopened, delimiters
+    // whose trimming moved a line, a `](` with no link to finish) is undone
+    // and the source reparsed; after a few rounds, without any rewrite.
+    for round in 0.. {
+        skip.all |= round >= 3;
+        // Pre-passes run in order, each over the previous one's output;
+        // `maps` records their edits so ranges walk back through them in
+        // reverse.
+        let mut text = Cow::Borrowed(source);
+        let mut maps: Vec<OffsetMap> = Vec::new();
+        let mut formulas = Vec::new();
+        let mut destinations = Vec::new();
+        if !skip.all {
+            if let Some((rewritten, map, pairs)) =
+                rewrite_math_delimiters(source, options, &skip.math)
+            {
+                text = Cow::Owned(rewritten);
+                maps.push(map);
+                formulas = pairs;
+            }
+            let math_map = maps.first();
+            let to_source = |at: usize| math_map.map_or(at, |map| map.original(at));
+            if let Some((rewritten, map, at)) =
+                rewrite_absolute_destinations(&text, options, &skip.destinations, to_source)
+            {
+                text = Cow::Owned(rewritten);
+                maps.push(map);
+                destinations = at;
+            }
+        }
+        let events = parse_dollars(source, text, &mut maps, options);
+        // Ranges come from the rewritten text and must point into the
+        // original.
+        let events: Vec<(Event, Range<usize>)> = events
+            .into_iter()
+            .map(|(event, range)| {
+                let range = maps
+                    .iter()
+                    .rev()
+                    .fold(range, |range, map| map.original_range(range));
+                (event, range)
+            })
+            .collect();
+        if !(formulas.is_empty() && destinations.is_empty()) {
+            let set: std::collections::HashSet<Range<usize>> = events
+                .iter()
+                .filter(|(event, _)| matches!(event, Event::InlineMath(_) | Event::DisplayMath(_)))
+                .map(|(_, range)| range.clone())
+                .collect();
+            let bad_math: Vec<usize> = formulas
+                .iter()
+                .filter(|pair| !set.contains(pair))
+                .map(|pair| pair.start)
+                .collect();
+            let mut links: Vec<Range<usize>> = events
+                .iter()
+                .filter(|(event, _)| {
+                    matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. }))
+                })
+                .map(|(_, range)| range.clone())
+                .collect();
+            links.sort_by_key(|range| range.start);
+            let mut bad_destinations = Vec::new();
+            let (mut next, mut reach) = (0, 0);
+            for &at in &destinations {
+                while next < links.len() && links[next].start <= at {
+                    reach = reach.max(links[next].end);
+                    next += 1;
+                }
+                if reach <= at {
+                    bad_destinations.push(at);
+                }
+            }
+            if !(bad_math.is_empty() && bad_destinations.is_empty()) {
+                skip.math.extend(bad_math);
+                skip.destinations.extend(bad_destinations);
+                continue;
+            }
+        }
+        return build_tree(events, source, offset);
     }
-    if let Some((rewritten, map)) = rewrite_absolute_destinations(&text, options) {
-        text = Cow::Owned(rewritten);
-        maps.push(map);
-    }
-    // Rewrites shift every following offset; ranges come from the rewritten
-    // text and must point into the original.
+    unreachable!("the last round rewrites nothing")
+}
+
+/// Parse `text`, escaping the opening `$` of every dollar span that isn't a
+/// formula. pulldown pairs dollars across markup (`**$5** to **$10**`), so a
+/// span `not_math` rejects can't just print its source: the emphasis, links
+/// and code inside would stay literal. Escape its opening `$` and reparse
+/// until every remaining span is math. An escape reshapes only the text
+/// after it, and only a code span, autolink or raw HTML shows an escape's
+/// backslash — so within a block, later spans are escaped in the same round
+/// unless an earlier one's TeX could open one of those. Each round escapes
+/// at least one dollar; the bound only matters for pathological input, whose
+/// leftovers print as source. Ranges are in the final text (see `maps`).
+fn parse_dollars<'t>(
+    source: &str,
+    mut text: Cow<'t, str>,
+    maps: &mut Vec<OffsetMap>,
+    options: Options,
+) -> Vec<(Event<'t>, Range<usize>)> {
     let original = |maps: &[OffsetMap], range: Range<usize>| {
         maps.iter()
             .rev()
             .fold(range, |range, map| map.original_range(range))
     };
-    // pulldown pairs dollars across markup (`**$5** to **$10**`), so a span
-    // `not_math` rejects can't just print its source: the emphasis, links
-    // and code inside would stay literal. Escape its opening `$` and reparse
-    // until every remaining span is math. An escape reshapes only the text
-    // after it, and only a code span, autolink or raw HTML shows an escape's
-    // backslash — so within a block, later spans are escaped in the same
-    // round unless an earlier one's TeX could open one of those. Each round
-    // escapes at least one dollar; the bound only matters for pathological
-    // input, whose leftovers print as source.
     let mut rounds = 0;
-    let events = loop {
-        let events: Vec<(Event, Range<usize>)> =
-            Parser::new_ext(&text, options).into_offset_iter().collect();
-        let mut rejected = Vec::new();
-        if rounds < 16 && text.contains('$') {
-            let mut stalled = false;
-            for (event, range) in &events {
-                match event {
-                    Event::Start(
-                        Tag::Emphasis
-                        | Tag::Strong
-                        | Tag::Strikethrough
-                        | Tag::Link { .. }
-                        | Tag::Image { .. },
-                    )
-                    | Event::End(
-                        TagEnd::Emphasis
-                        | TagEnd::Strong
-                        | TagEnd::Strikethrough
-                        | TagEnd::Link
-                        | TagEnd::Image,
-                    ) => {}
-                    Event::Start(_) | Event::End(_) => stalled = false,
-                    Event::InlineMath(tex) if !stalled => {
-                        let spelled = original(&maps, range.clone());
-                        let next = source.as_bytes().get(spelled.end).copied();
-                        let spelled = &source[spelled];
-                        // A dollar the source spells can also pair with the
-                        // `$` a rewritten `\(` became (`[$]()\(a\)`): its
-                        // closer is then no `$` of the source, and it is no
-                        // formula.
-                        if spelled.starts_with('$')
-                            && (!spelled.ends_with('$') || not_math(tex, next))
-                        {
-                            rejected.push(range.start);
-                            stalled = tex.contains(['`', '<']);
+    loop {
+        let rejected = {
+            let mut rejected = Vec::new();
+            if rounds < 16 && text.contains('$') {
+                let mut stalled = false;
+                for (event, range) in Parser::new_ext(&text, options).into_offset_iter() {
+                    match event {
+                        Event::Start(
+                            Tag::Emphasis
+                            | Tag::Strong
+                            | Tag::Strikethrough
+                            | Tag::Link { .. }
+                            | Tag::Image { .. },
+                        )
+                        | Event::End(
+                            TagEnd::Emphasis
+                            | TagEnd::Strong
+                            | TagEnd::Strikethrough
+                            | TagEnd::Link
+                            | TagEnd::Image,
+                        ) => {}
+                        Event::Start(_) | Event::End(_) => stalled = false,
+                        Event::InlineMath(tex) if !stalled => {
+                            let spelled = original(maps, range.clone());
+                            let next = source.as_bytes().get(spelled.end).copied();
+                            let spelled = &source[spelled];
+                            // A dollar the source spells can also pair with
+                            // the `$` a rewritten `\(` became (`[$]()\(a\)`):
+                            // its closer is then no `$` of the source, and it
+                            // is no formula.
+                            if spelled.starts_with('$')
+                                && (!spelled.ends_with('$') || not_math(&tex, next))
+                            {
+                                rejected.push(range.start);
+                                stalled = tex.contains(['`', '<']);
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
+            rejected
+        };
         if rejected.is_empty() {
-            break events;
+            break;
         }
         let (escaped, map) = escape_dollars(&text, &rejected);
         text = Cow::Owned(escaped);
         maps.push(map);
         rounds += 1;
-    };
+    }
+    match text {
+        Cow::Borrowed(text) => Parser::new_ext(text, options).into_offset_iter().collect(),
+        Cow::Owned(text) => Parser::new_ext(&text, options)
+            .into_offset_iter()
+            .map(|(event, range)| (event.into_static(), range))
+            .collect(),
+    }
+}
+
+/// The block tree of `events` (ranges into `source`, which starts at document
+/// offset `offset`).
+fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -> BlockTree {
     let mut kept: Vec<(Event, Range<usize>)> = Vec::with_capacity(events.len());
+    // Open items' ranges, and whether each open start was kept.
+    let mut items: Vec<Range<usize>> = Vec::new();
+    let mut open: Vec<bool> = Vec::new();
+    let mut depth = 0usize;
     for (event, range) in events {
-        let range = original(&maps, range);
         let range = range.start + offset..range.end + offset;
-        // pulldown-cmark can emit a task marker after its item has closed (an
-        // item holding only a nested list or a heading: `- [x] *`), so it
-        // lands in a later paragraph or item and would check that one off. A
-        // marker belongs right at the start of its own item (tight) or of the
-        // item's first paragraph, inside that item's source.
-        if matches!(event, Event::TaskListMarker(_)) {
-            let n = kept.len();
-            let item = |back: usize| {
-                n.checked_sub(back).and_then(|i| match &kept[i] {
-                    (Event::Start(Tag::Item), item) => Some(item.clone()),
-                    _ => None,
-                })
-            };
-            let paragraph = matches!(kept.last(), Some((Event::Start(Tag::Paragraph), _)));
-            let owner = item(1).or_else(|| paragraph.then(|| item(2)).flatten());
-            if !owner.is_some_and(|item| item.start <= range.start && range.end <= item.end) {
+        match &event {
+            Event::Start(tag) => {
+                let keep = depth < MAX_NESTING;
+                if keep {
+                    depth += 1;
+                    if matches!(tag, Tag::Item) {
+                        items.push(range.clone());
+                    }
+                }
+                open.push(keep);
+                if !keep {
+                    continue;
+                }
+            }
+            Event::End(end) => {
+                if !open.pop().unwrap_or(false) {
+                    continue;
+                }
+                depth -= 1;
+                if matches!(end, TagEnd::Item) {
+                    items.pop();
+                }
+            }
+            // pulldown-cmark can emit a task marker after its item has closed
+            // (an item holding only a nested list or a heading: `- [x] *`),
+            // so it lands in a later paragraph or item and would check that
+            // one off. A marker belongs to the innermost open item, inside
+            // its source.
+            Event::TaskListMarker(_)
+                if !items
+                    .last()
+                    .is_some_and(|item| item.start <= range.start && range.end <= item.end) =>
+            {
                 continue;
             }
+            _ => {}
         }
         kept.push((event, range));
     }
@@ -378,7 +528,9 @@ fn inline_texts(source: &str, options: Options) -> Vec<InlineText> {
                 container += 1;
             }
             Event::Start(Tag::Link { link_type, .. }) => {
-                let auto = matches!(link_type, LinkType::Autolink | LinkType::Email);
+                // Autolinks spell a URL; a reference link's text is the label
+                // its definition must match, rewritten it would match none.
+                let auto = !matches!(link_type, LinkType::Inline);
                 literal += usize::from(auto);
                 autolinks.push(auto);
                 container += 1;
@@ -410,76 +562,55 @@ fn inline_texts(source: &str, options: Options) -> Vec<InlineText> {
 }
 
 /// Rewrite the LaTeX delimiters models favor — `\(…\)` inline, `\[…\]`
-/// display — to the `$…$` / `$$…$$` pulldown-cmark understands. Only
-/// delimiters pulldown itself reads as backslash escapes in inline text count
-/// ([`inline_texts`]), so code, raw HTML, URLs and reference definitions keep
-/// their spelling wherever they sit, and `\\(` (a literal backslash) is never
-/// an opener. An opener pairs with the next closer of its kind in the same
-/// inline container — a still-streaming formula stays literal, so the rewrite
-/// is append-stable, and an opener and its closer always share one top-level
-/// block, so a tail reparse rewrites exactly as the full parse does. An
-/// opener glued to a word (`f\(x\)`, `x_\(1\)`) or inside a URL or path
-/// (`/wiki/Foo,\(b\)`) is markdown escaping, not math; an empty pair
-/// (`\[ \]`) is an escaped task box; a body with an unescaped `$` would not
-/// survive the rewrite. Inline formulas drop the whitespace inside their
-/// delimiters, which `$…$` does not allow. Linear in the source.
-fn rewrite_math_delimiters(source: &str, options: Options) -> Option<(String, OffsetMap)> {
+/// display — to the `$…$` / `$$…$$` pulldown-cmark understands, returning
+/// each pair's original range (opener to past its closer) for the caller to
+/// check against the parse. Only delimiters pulldown itself reads as
+/// backslash escapes in inline text count ([`inline_texts`]), so code, raw
+/// HTML, URLs, reference labels and definitions keep their spelling wherever
+/// they sit, and `\\(` (a literal backslash) is never an opener. A closer
+/// pairs with the nearest opener of its kind before it in the same inline
+/// container — a still-streaming formula stays literal, so the rewrite is
+/// append-stable, and both delimiters share one top-level block, so a tail
+/// reparse rewrites exactly as the full parse does. Openers glued to a word
+/// or inside a URL or path, openers in `skip`, and bodies that can't be (or
+/// survive as) TeX ([`math_body`]) stay literal. Linear in the source: each
+/// body is checked once.
+fn rewrite_math_delimiters(
+    source: &str,
+    options: Options,
+    skip: &std::collections::HashSet<usize>,
+) -> Option<(String, OffsetMap, Vec<Range<usize>>)> {
     if !source.contains("\\(") && !source.contains("\\[") {
         return None;
     }
     let bytes = source.as_bytes();
-    // (backslash offset, delimiter, container), in source order.
-    let marks: Vec<(usize, u8, u32)> = inline_texts(source, options)
-        .into_iter()
-        .filter(|text| text.escaped && matches!(bytes[text.range.start], b'(' | b'[' | b')' | b']'))
-        .map(|text| {
-            (
-                text.range.start - 1,
-                bytes[text.range.start],
-                text.container,
-            )
-        })
-        .collect();
-    // The next `\)` / `\]` at or after each mark.
-    let mut next_close = vec![[usize::MAX; 2]; marks.len() + 1];
-    for (i, &(_, delimiter, _)) in marks.iter().enumerate().rev() {
-        next_close[i] = next_close[i + 1];
-        match delimiter {
-            b')' => next_close[i][0] = i,
-            b']' => next_close[i][1] = i,
-            _ => {}
-        }
-    }
     let mut words = WordScan::default();
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    while i < marks.len() {
-        let (at, delimiter, container) = marks[i];
-        let kind = match delimiter {
-            b'(' => 0,
-            b'[' => 1,
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-        let close = next_close[i + 1][kind];
-        let Some(&(end, _, close_container)) = marks.get(close) else {
-            i += 1;
-            continue;
-        };
-        let body = &source[at + 2..end];
-        if close_container != container
-            || words.glued(bytes, at)
-            || body.trim().is_empty()
-            || has_unescaped_dollar(body)
-            || prose_like(body)
-        {
-            i += 1;
+    let mut pairs: Vec<(usize, usize, bool)> = Vec::new();
+    // The latest opener of each kind (inline, display) awaiting its closer.
+    let mut pending: [Option<usize>; 2] = [None, None];
+    let mut container = None;
+    for text in inline_texts(source, options) {
+        let at = text.range.start;
+        if !text.escaped || !matches!(bytes[at], b'(' | b'[' | b')' | b']') {
             continue;
         }
-        pairs.push((at, end, kind == 1));
-        i = close + 1;
+        if container != Some(text.container) {
+            container = Some(text.container);
+            pending = [None, None];
+        }
+        let backslash = at - 1;
+        let display = matches!(bytes[at], b'[' | b']');
+        let kind = usize::from(display);
+        if matches!(bytes[at], b'(' | b'[') {
+            if !skip.contains(&backslash) && !words.glued(bytes, backslash) {
+                pending[kind] = Some(backslash);
+            }
+        } else if let Some(open) = pending[kind].take()
+            && math_body(&source[open + 2..backslash], display)
+        {
+            pairs.push((open, backslash, display));
+            pending = [None, None];
+        }
     }
     if pairs.is_empty() {
         return None;
@@ -487,7 +618,7 @@ fn rewrite_math_delimiters(source: &str, options: Options) -> Option<(String, Of
     let mut out = String::with_capacity(source.len());
     let mut map = OffsetMap::default();
     let mut copied = 0;
-    for (at, close, display) in pairs {
+    for &(at, close, display) in &pairs {
         out.push_str(&source[copied..at]);
         let body = &source[at + 2..close];
         if display {
@@ -511,7 +642,36 @@ fn rewrite_math_delimiters(source: &str, options: Options) -> Option<(String, Of
         copied = close + 2;
     }
     out.push_str(&source[copied..]);
-    Some((out, map))
+    let pairs = pairs.iter().map(|&(at, close, _)| at..close + 2).collect();
+    Some((out, map, pairs))
+}
+
+/// Whether a delimited body can be a formula and survives as one: not blank;
+/// no unescaped `$` (it would pair with the rewritten delimiters) and no
+/// backtick (TeX has no use for one; it belongs to a code span the
+/// delimiters straddle); an inline body's surrounding whitespace on one line
+/// (trimming a newline would move a line); not ending in a backslash (it
+/// would escape the closing `$`); and not prose ([`prose_like`]).
+fn math_body(body: &str, display: bool) -> bool {
+    let inner = body.trim();
+    if inner.is_empty() || body.contains('`') || has_unescaped_dollar(body) {
+        return false;
+    }
+    if !display {
+        let lead = &body[..body.len() - body.trim_start().len()];
+        let trail = &body[body.trim_end().len()..];
+        if lead.contains('\n') || trail.contains('\n') {
+            return false;
+        }
+    }
+    let escaping = inner
+        .bytes()
+        .rev()
+        .take_while(|&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1;
+    !escaping && !prose_like(inner, display)
 }
 
 /// Whether a backslash at `at` is glued to what precedes it: a word character
@@ -544,20 +704,24 @@ impl WordScan {
 /// Whether a delimited body reads as prose, not TeX: a citation or equation
 /// number (`\[1\]`, `\(2.3\)`) or words (`\[Online\]`, `\(optional\)`,
 /// `\(see above\)`) are markdown escapes of brackets and parens around text.
-/// TeX has a command, an operator, a brace or only short variable names.
-fn prose_like(body: &str) -> bool {
-    let body = body.trim();
+/// TeX has a command, an operator, a brace or only short variable names —
+/// and a display formula more than bare letters (`Escape \[ and \]`).
+fn prose_like(body: &str, display: bool) -> bool {
     if !body
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || b" .,;:'!?-".contains(&byte))
     {
         return false;
     }
+    let letters = body
+        .bytes()
+        .all(|byte| byte.is_ascii_alphabetic() || byte == b' ');
     body.bytes()
         .all(|byte| byte.is_ascii_digit() || b".,-".contains(&byte))
         || body
             .split(|c: char| !c.is_ascii_alphabetic())
             .any(|word| word.len() >= 4)
+        || (display && letters && body.len() > 1)
 }
 
 /// Whether `body` holds a `$` that isn't backslash-escaped.
@@ -582,7 +746,12 @@ fn has_unescaped_dollar(body: &str) -> bool {
 /// destination that is already bracketed or whose closing `)` has not
 /// streamed in yet is left alone, which makes the rewrite idempotent and safe
 /// while text is still arriving. Linear in the source.
-fn rewrite_absolute_destinations(source: &str, options: Options) -> Option<(String, OffsetMap)> {
+fn rewrite_absolute_destinations(
+    source: &str,
+    options: Options,
+    skip: &std::collections::HashSet<usize>,
+    to_source: impl Fn(usize) -> usize,
+) -> Option<(String, OffsetMap, Vec<usize>)> {
     if !source.contains("](") {
         return None;
     }
@@ -600,6 +769,8 @@ fn rewrite_absolute_destinations(source: &str, options: Options) -> Option<(Stri
     let mut rewritten: Option<String> = None;
     let mut insertions = OffsetMap::default();
     let mut copied = 0usize;
+    // Where each rewrite's `](` sits in the original source.
+    let mut done = Vec::new();
     // A `](` inside a destination that closed is part of that destination.
     let mut free = 0usize;
     for (&(at, start), close) in starts.iter().zip(closes) {
@@ -608,7 +779,8 @@ fn rewrite_absolute_destinations(source: &str, options: Options) -> Option<(Stri
         };
         free = close + 1;
         let destination = source[start..close].trim_end_matches(' ');
-        if absolute_destination_with_spaces(destination) {
+        if absolute_destination_with_spaces(destination) && !skip.contains(&to_source(at)) {
+            done.push(to_source(at));
             let out = rewritten.get_or_insert_with(|| String::with_capacity(source.len() + 8));
             out.push_str(&source[copied..start]);
             insertions.shift(out.len(), -1);
@@ -621,7 +793,7 @@ fn rewrite_absolute_destinations(source: &str, options: Options) -> Option<(Stri
     }
     let mut out = rewritten?;
     out.push_str(&source[copied..]);
-    Some((out, insertions))
+    Some((out, insertions, done))
 }
 
 /// Which bytes a backslash escapes: an odd run of backslashes before a byte.
@@ -2348,11 +2520,13 @@ mod destination_rewrite_tests {
     #[test]
     fn rewrite_is_idempotent_on_its_own_output() {
         let source = "see [it](/tmp/Some Folder/it's here.txt) and [web](https://x.dev/a b)";
-        let once = rewrite_absolute_destinations(source, options()).expect("rewrite");
+        let once = rewrite_absolute_destinations(source, options(), &Default::default(), |at| at)
+            .expect("rewrite");
         assert!(once.0.contains("](</tmp/Some Folder/it's here.txt>)"));
         assert!(once.0.contains("https://x.dev/a b"));
         assert!(
-            rewrite_absolute_destinations(&once.0, options()).is_none(),
+            rewrite_absolute_destinations(&once.0, options(), &Default::default(), |at| at)
+                .is_none(),
             "second pass must find nothing to rewrite"
         );
     }
@@ -2596,7 +2770,7 @@ mod math_tests {
         source.push_str(&"`a` ``b ".repeat(10_000));
         source.push_str(" tail\n\nand \\(y\\) after");
         let started = std::time::Instant::now();
-        let (out, _) = rewrite_math_delimiters(&source, options()).unwrap();
+        let (out, _, _) = rewrite_math_delimiters(&source, options(), &Default::default()).unwrap();
         assert!(
             started.elapsed().as_millis() < 500,
             "{:?}",
@@ -2830,7 +3004,8 @@ mod math_tests {
         );
         // Composed offsets: the event ranges themselves land on the
         // original delimiters.
-        let (text, map) = rewrite_math_delimiters(source, options()).unwrap();
+        let (text, map, _) =
+            rewrite_math_delimiters(source, options(), &Default::default()).unwrap();
         assert_eq!(&text[..6], "a $x$ ");
         assert_eq!(map.original_range(2..5), 2..9);
         assert_eq!(&source[2..9], "\\( x \\)");
@@ -2953,6 +3128,8 @@ mod math_tests {
             line("[a](\\( "),
             line("[a](x "),
             line("-\\(x\\)"),
+            format!("{}$ \\)", "\\( ".repeat(85_000)),
+            format!("{}$ \\]", "\\[ ".repeat(85_000)),
         ] {
             let started = std::time::Instant::now();
             parse_full(&source);
@@ -3064,8 +3241,133 @@ mod math_tests {
         assert_eq!(para("so \\(x\\)"), [plain("so "), math("x")]);
         assert_eq!(para("so \\(ab\\)"), [plain("so "), math("ab")]);
         assert_eq!(para("so \\(3x\\)"), [plain("so "), math("3x")]);
-        assert_eq!(para("so \\(\\text{cost}\\)"), [plain("so "), math("\\text{cost}")]);
+        assert_eq!(
+            para("so \\(\\text{cost}\\)"),
+            [plain("so "), math("\\text{cost}")]
+        );
         assert_eq!(blocks("\\[ x^2 \\]"), [display("x^2")]);
+    }
+    /// Every rewrite is checked against the parse it produced: a code span
+    /// the dollar pass reopens, a trimmed newline that moves a line, a quote
+    /// marker inside the body — all keep the source's spelling.
+    #[test]
+    fn rewrites_that_dont_survive_the_parse_are_undone() {
+        fn walk(blocks: &[Block], out: &mut Vec<String>) {
+            for block in blocks {
+                match block {
+                    Block::Paragraph { runs } | Block::Heading { runs, .. } => out.extend(
+                        runs.iter()
+                            .filter(|run| run.style.code)
+                            .map(|run| run.text.clone()),
+                    ),
+                    Block::BlockQuote { children } => walk(children, out),
+                    Block::List { items, .. } => items.iter().for_each(|item| walk(item, out)),
+                    _ => {}
+                }
+            }
+        }
+        let code = |source: &str| {
+            let mut out = Vec::new();
+            walk(&blocks(source), &mut out);
+            out
+        };
+        assert_eq!(
+            code("With $HOME set, the regex `^$\\(a\\)` matches"),
+            ["^$\\(a\\)"]
+        );
+        assert_eq!(
+            code("Costs $5. Use `printf \"%s$\" \\(x\\)` here"),
+            ["printf \"%s$\" \\(x\\)"]
+        );
+        for source in [
+            "> \\(\n> x\\)\n",
+            "- > \\(\n  > x\\)\n",
+            "> \\(x\n> \\)\n",
+            "\\(x \\ \\)",
+            "\\(\\ \\)",
+            "In BRE write \\( … `grep 'a\\(b\\)'` … close it with \\).",
+            "Escape them as \\[ and \\] in the regex",
+            "$\\(x\\)\\[y \\]",
+        ] {
+            let tree = format!("{:?}", parse_full(source));
+            assert!(!tree.contains("Math {"), "{source:?}: {tree}");
+            assert!(!tree.contains("$$"), "{source:?}: {tree}");
+        }
+        // Delimiters across a table delimiter row stay literal, the same
+        // streamed or not.
+        let source = "\\(x\n|-|\n\\)\n---|---\n";
+        assert_no_math(source);
+        let full = parse_full(source);
+        for chunk in 1..=12 {
+            let mut parser = IncrementalParser::new();
+            let mut start = 0;
+            while start < source.len() {
+                let end = (start + chunk).min(source.len());
+                parser.append(&source[start..end]);
+                start = end;
+            }
+            assert_eq!(parser.tree(), &full, "chunk {chunk}");
+        }
+        // A reference link keeps its label (and so its definition).
+        let runs = para("[\\(x\\)]\n\n[\\(x\\)]: /u\n");
+        assert_eq!(runs[0].style.link.as_deref(), Some("/u"));
+        // A `](` with no link to finish never shows the brackets it got.
+        let tree = format!("{:?}", parse_full("see ](/abs path/a b.png) here"));
+        assert!(!tree.contains('<'), "{tree}");
+    }
+
+    #[test]
+    fn task_markers_stay_with_their_own_item() {
+        let tasks = |source: &str| {
+            format!("{:?}", parse_full(source))
+                .matches("task: Some")
+                .count()
+        };
+        assert_eq!(tasks("- [ ] > quote\n"), 1);
+        assert_eq!(tasks("- [x] Title\n  =====\n"), 1);
+        // Markers pulldown emits after their item closed check nothing off.
+        for source in ["- [ ] -\n\n- p\n", "- [x] -\n\n> - p\n", "- [x] *\n\nb\n"] {
+            assert_eq!(tasks(source), 0, "{source:?}");
+        }
+    }
+
+    /// Hostile nesting and inputs pulldown-cmark itself panics on: the tree
+    /// stays shallow and the parse never takes the process down.
+    #[test]
+    fn hostile_nesting_and_parser_panics_are_contained() {
+        fn depth(blocks: &[Block]) -> usize {
+            blocks
+                .iter()
+                .map(|block| match block {
+                    Block::BlockQuote { children } => 1 + depth(children),
+                    Block::List { items, .. } => {
+                        1 + items.iter().map(|item| depth(item)).max().unwrap_or(0)
+                    }
+                    _ => 1,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        for source in [
+            ">".repeat(20_000),
+            "- ".repeat(20_000),
+            format!("{}x{}", "![".repeat(20_000), "](u)".repeat(20_000)),
+            "~~a ".repeat(20_000),
+            "*a ".repeat(20_000),
+        ] {
+            let tree = std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn(move || parse_full(&source))
+                .unwrap()
+                .join()
+                .expect("no stack overflow");
+            let blocks: Vec<Block> = tree.blocks.iter().map(|top| top.block.clone()).collect();
+            assert!(depth(&blocks) <= MAX_NESTING + 1);
+        }
+        let source = "- [ ] [b]:/\n      \n  -";
+        assert!(!parse_full(source).blocks.is_empty());
+        let mut parser = IncrementalParser::new();
+        parser.set_text(source);
     }
 }
 
