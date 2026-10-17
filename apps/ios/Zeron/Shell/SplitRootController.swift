@@ -36,10 +36,9 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         delegate = self
         preferredDisplayMode = .oneBesideSecondary
         preferredSplitBehavior = .tile
-        // About a phone's width, so the rows read as they do on iPhone
-        // (narrower on narrow windows: see viewWillLayoutSubviews).
+        // About a phone's width, so the rows read as they do on iPhone.
         preferredPrimaryColumnWidth = 360
-        minimumPrimaryColumnWidth = 280
+        minimumPrimaryColumnWidth = 320
         maximumPrimaryColumnWidth = 400
         primaryBackgroundStyle = .none
         // No toggle button (the phone has none); ⌘B still hides the sidebar.
@@ -73,13 +72,14 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         if !isCollapsed, detail.viewControllers.isEmpty { showDraft(prompt: nil, focus: false) }
     }
 
-    /// Narrow regular windows (the unfolded iPhone Duo is 669pt wide in
-    /// portrait) give the sidebar less so the session column keeps room for
-    /// a readable transcript and composer.
+    /// Narrow windows hold the sidebar at its minimum (an iPad mini in
+    /// portrait gets 320). The unfolded iPhone Duo is narrower still (669pt
+    /// in portrait): it goes lower so the session column keeps a phone's
+    /// width for the transcript and composer.
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        let width = min(360, max(minimumPrimaryColumnWidth, view.bounds.width - 380))
-        if preferredPrimaryColumnWidth != width { preferredPrimaryColumnWidth = width }
+        let minimum: CGFloat = view.bounds.width < 700 ? 280 : 320
+        if minimumPrimaryColumnWidth != minimum { minimumPrimaryColumnWidth = minimum }
     }
 
     override var keyCommands: [UIKeyCommand]? {
