@@ -552,3 +552,53 @@ fn runaway_sizes_are_too_large() {
     );
     assert!(layout(&matrix, stix(), &Options::display(16.0)).is_ok());
 }
+
+/// Hosts size a formula's slot from its box, so nothing may paint outside
+/// it: vertically the box grows to the ink, horizontally ink may overhang
+/// the advance by at most an em, and anything else is refused.
+#[test]
+fn the_box_holds_all_ink() {
+    let options = Options::inline(16.0);
+    let check = |src: &str| {
+        let f = layout(src, stix(), &options).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let ink = crate::ink_bounds(&f.items, stix());
+        assert!(ink.top <= f.ascent + 1e-3, "{src}: ink above the box");
+        assert!(ink.bottom <= f.descent + 1e-3, "{src}: ink below the box");
+        assert!(ink.left >= f.width.min(0.0) - 16.0 - 1e-3, "{src}");
+        assert!(ink.right <= f.width.max(0.0) + 16.0 + 1e-3, "{src}");
+        f
+    };
+    // A negative row gap moves a row out of the TeX box; the box follows.
+    let spoof = check(r"\text{Approve}\\[-40em]\\");
+    assert!(spoof.descent >= 19.0 * 16.0, "{}", spoof.descent);
+    for src in [
+        r"x^2 + \frac{a}{b}",
+        r"\int\!\!\!\int_D f",
+        r"a\hspace{-3em}b",
+        r"\sum_{i=1}^n \overbrace{a+b}^{c}",
+        r"a\\[-0.5em]b",
+        r"\begin{matrix} a \\[-2em] b \end{matrix}",
+    ] {
+        check(src);
+    }
+    for src in [
+        r"x\\[-100em]x\\[-100em]x\\[-100em]x",
+        r"a\hspace{-50em}b\hspace{50em}",
+        r"\hspace{30em}\hspace{-60em}x\hspace{30em}",
+    ] {
+        assert_eq!(
+            layout(src, stix(), &options)
+                .map(|_| ())
+                .map_err(|e| e.kind),
+            Err(ErrorKind::TooLarge),
+            "{src}"
+        );
+    }
+    // Bounds that overflow to infinity refuse rather than pass everything.
+    assert_eq!(
+        layout("x", stix(), &Options::inline(1e36))
+            .map(|_| ())
+            .map_err(|e| e.kind),
+        Err(ErrorKind::TooLarge)
+    );
+}

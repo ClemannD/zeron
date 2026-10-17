@@ -393,6 +393,9 @@ impl TranscriptView {
         let worker_visuals = visuals.clone();
         thread::Builder::new()
             .name("zeron-layout".into())
+            // Math layout recurses per nesting level; a debug build needs
+            // about 1.5 MB at zatex's depth limit (see `Options::max_depth`).
+            .stack_size(8 << 20)
             .spawn(move || Worker::new(&text, worker_shared, listener, Some(worker_visuals)).run(rx))
             .expect("spawn layout thread");
         Arc::new(Self {

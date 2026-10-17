@@ -64,10 +64,11 @@ pub struct Options {
     /// Longest accepted source, in bytes.
     pub max_bytes: usize,
     /// Deepest accepted nesting (groups, arguments, environments). Parsing
-    /// and layout recurse once per level: a release build needs well under
-    /// 128 KB of stack at the default, a debug build several times that
-    /// (about 20 nested `\overbrace`s fill 512 KB) — mind it if layout runs
-    /// on a small thread.
+    /// and layout recurse once per level, and script chains (`x^{x^{…}}`)
+    /// reach the full depth: at the default a release build needs about
+    /// 192 KB of stack, a debug build about 1.5 MB (20 nested `\overbrace`s
+    /// already fill 512 KB). Run layout on a thread with a few MB of stack —
+    /// not a 512 KB secondary or dispatch-queue thread.
     pub max_depth: usize,
     /// Most items a formula may emit (bounds memory and paint time); layout
     /// work is bounded at a few times this.
@@ -384,18 +385,25 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
         options.max_width * options.size,
         options.max_height * options.size,
     );
-    let inside = |x: f32, y: f32| x.abs() <= w && y.abs() <= h;
+    // A huge `size` (or bound) overflows the bounds to infinity, which every
+    // extent would pass.
+    if !(w.is_finite() && h.is_finite()) {
+        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+    }
+    // Hosts size a formula's slot, line or row from its box, so the box must
+    // hold all of its ink: anything painted outside would land on the
+    // surrounding text (a negative row gap moves a whole row out of the box:
+    // `\text{Approve}\\[-40em]\\`). Vertically the box grows to cover the
+    // ink; horizontally the advance is TeX's (negative space can shrink it
+    // below the ink), so ink reaching more than an em past it is refused.
+    let ink = ink_bounds(&b.items, font);
+    let ascent = b.h.max(ink.top);
+    let descent = b.d.max(ink.bottom).max(-ascent);
+    let overhang = options.size;
     let fits = b.w.abs() <= w
-        && b.h + b.d <= h
-        && b.items.iter().all(|item| match *item {
-            Item::Glyph { x, y, .. } => inside(x, y),
-            Item::Rule {
-                x,
-                y,
-                width,
-                height,
-            } => inside(x, y) && inside(x + width, y + height),
-        });
+        && ascent + descent <= h
+        && ink.left >= b.w.min(0.0) - overhang
+        && ink.right <= b.w.max(0.0) + overhang;
     if !fits {
         return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
     }
@@ -404,8 +412,61 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
     items.shrink_to_fit();
     Ok(Formula {
         width: b.w,
-        ascent: b.h,
-        descent: b.d,
+        ascent,
+        descent,
         items,
     })
+}
+
+/// The extent of everything `items` paint, in points: `left`/`right` from
+/// the origin, `top` above and `bottom` below the baseline (negative infinity
+/// when nothing is painted, so an empty formula keeps its own box).
+struct Ink {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
+    let mut ink = Ink {
+        left: 0.0,
+        right: 0.0,
+        top: f32::NEG_INFINITY,
+        bottom: f32::NEG_INFINITY,
+    };
+    let mut add = |left: f32, right: f32, top: f32, bottom: f32| {
+        ink.left = ink.left.min(left);
+        ink.right = ink.right.max(right);
+        ink.top = ink.top.max(top);
+        ink.bottom = ink.bottom.max(bottom);
+    };
+    for item in items {
+        match *item {
+            Item::Glyph {
+                font: index,
+                glyph,
+                x,
+                y,
+                size,
+            } => {
+                let face = font.at(index);
+                let m = face.metrics(glyph);
+                let scale = size / face.upem();
+                add(
+                    x + m.x_min * scale,
+                    x + m.x_max * scale,
+                    m.height * scale - y,
+                    m.depth * scale + y,
+                );
+            }
+            Item::Rule {
+                x,
+                y,
+                width,
+                height,
+            } => add(x.min(x + width), x.max(x + width), -y, y + height),
+        }
+    }
+    ink
 }
