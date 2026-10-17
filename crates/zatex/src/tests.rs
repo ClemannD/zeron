@@ -458,17 +458,17 @@ fn alphabets_come_from_the_fallback_when_missing() {
 
 #[test]
 fn nested_middle_is_bounded() {
+    // Each `\middle` body is laid out once, so nesting to the depth limit is
+    // linear work, not 2^31.
     let n = 31;
     let src = "\\left.".repeat(n) + &"\\middle.\\right.".repeat(n);
     let started = std::time::Instant::now();
-    let e = layout(&src, stix(), &Options::default()).unwrap_err();
-    assert_eq!(e.kind, ErrorKind::TooLarge);
+    assert!(layout(&src, stix(), &Options::default()).is_ok());
     assert!(
-        started.elapsed().as_secs_f32() < 2.0,
+        started.elapsed().as_millis() < 50,
         "{:?}",
         started.elapsed()
     );
-    // Honest nesting still works, and re-layouts don't count as items.
     let honest = "\\left(".repeat(8) + "x" + &"\\middle| y \\right)".repeat(8);
     assert!(layout(&honest, stix(), &Options::default()).is_ok());
 }
@@ -486,4 +486,69 @@ fn missing_glyphs_point_at_their_source() {
     let src = "abc + \\operatorname{x\u{378}}";
     let e = layout(src, stix(), &Options::default()).unwrap_err();
     assert_eq!(&src[e.range.clone()], "\u{378}");
+}
+
+/// The reviewer's reproducer: `\middle` nesting around a long `\text`.
+#[test]
+fn nested_middle_with_text_stays_fast() {
+    for d in [8, 10, 12, 14, 20, 30] {
+        let open = "\\left.\\middle|".repeat(d);
+        let fill = 16_000usize.saturating_sub(open.len() + 7 * d + 8);
+        let src = format!(
+            "{open}\\text{{{}}}{}",
+            "x".repeat(fill),
+            "\\right.".repeat(d)
+        );
+        let started = std::time::Instant::now();
+        let _ = layout(&src, stix(), &Options::default());
+        let took = started.elapsed();
+        assert!(took.as_millis() < 250, "d={d}: {took:?}");
+    }
+    // `\middle` bodies are laid out once: deep honest nesting costs linear work.
+    let honest = "\\left(".repeat(30) + "x" + &"\\middle| y \\right)".repeat(30);
+    let started = std::time::Instant::now();
+    assert!(layout(&honest, stix(), &Options::default()).is_ok());
+    assert!(
+        started.elapsed().as_millis() < 50,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn empty_cells_and_parts_count_as_work() {
+    // 16 KB of empty cells: bounded by the work budget, never a hang.
+    let src = format!("\\begin{{matrix}}{}\\end{{matrix}}", "&".repeat(16_000));
+    let started = std::time::Instant::now();
+    let _ = layout(&src, stix(), &Options::default());
+    assert!(
+        started.elapsed().as_millis() < 250,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn runaway_sizes_are_too_large() {
+    let err = |src: &str| layout(src, stix(), &Options::default()).unwrap_err().kind;
+    // Dimensions are capped after unit conversion.
+    assert_eq!(err(r"a\kern1000in b"), ErrorKind::BadDimension);
+    assert_eq!(err(r"a\kern-1000in b"), ErrorKind::BadDimension);
+    assert_eq!(err(r"a \\[1000in] b"), ErrorKind::BadDimension);
+    assert_eq!(err(r"\mkern2000mu"), ErrorKind::BadDimension);
+    // Within each cap, but adding up to a runaway box.
+    let wide = r"a\kern99em".repeat(30);
+    assert_eq!(err(&wide), ErrorKind::TooLarge);
+    let tall = format!("x{}", r"\\".repeat(8000));
+    assert_eq!(err(&tall), ErrorKind::TooLarge);
+    // A kern out and back still lands its items far away.
+    let hidden = format!("{}b{}", r"\kern99em".repeat(30), r"\kern-99em".repeat(30));
+    assert_eq!(err(&hidden), ErrorKind::TooLarge);
+    // Ordinary large formulas are fine.
+    assert!(layout(r"\kern50em x", stix(), &Options::default()).is_ok());
+    let matrix = format!(
+        "\\begin{{pmatrix}}{}\\end{{pmatrix}}",
+        "1 \\\\ ".repeat(100)
+    );
+    assert!(layout(&matrix, stix(), &Options::display(16.0)).is_ok());
 }

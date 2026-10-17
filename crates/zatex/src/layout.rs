@@ -161,11 +161,10 @@ pub(crate) struct Ctx<'f> {
     pub size: f32,
     pub max_items: usize,
     pub items: usize,
-    /// Atoms laid out so far, re-layouts included: bounds time where the
-    /// item count can't (`\middle` lays its body out twice, so nesting doubles).
+    /// Everything laid out so far — atoms, items, cells, assembly parts,
+    /// including attempts that get discarded. Never reset, so it bounds time
+    /// where the item count alone can't.
     work: usize,
-    /// Size of `\middle` delimiters inside the `\left…\right` being laid out.
-    middle: Option<f32>,
 }
 
 type R<T> = Result<T, Error>;
@@ -178,7 +177,6 @@ impl<'f> Ctx<'f> {
             max_items,
             items: 0,
             work: 0,
-            middle: None,
         }
     }
 
@@ -208,6 +206,15 @@ impl<'f> Ctx<'f> {
     fn count(&mut self, n: usize) -> R<()> {
         self.items += n;
         if self.items > self.max_items {
+            return Err(Error::new(ErrorKind::TooLarge, 0..0));
+        }
+        self.work(n)
+    }
+
+    /// Charges `n` units against the work budget (a few times `max_items`).
+    fn work(&mut self, n: usize) -> R<()> {
+        self.work = self.work.saturating_add(n);
+        if self.work > self.max_items.saturating_mul(4) {
             return Err(Error::new(ErrorKind::TooLarge, 0..0));
         }
         Ok(())
@@ -384,8 +391,23 @@ impl<'f> Ctx<'f> {
     /// Lays out a math list; `lead_ord` spaces the first atom as if an empty
     /// Ord preceded it (the right half of an `aligned` pair starting with `=`).
     fn list_lead(&mut self, nodes: &[Node], st: St, lead_ord: bool) -> R<LBox> {
+        let (pieces, _) = self.pieces(nodes, st, false)?;
+        Ok(self.assemble(pieces, lead_ord))
+    }
+
+    /// A list's atoms and kerns, not yet spaced. With `defer_middles`, each
+    /// `\middle` is an empty placeholder whose index (and delimiter and
+    /// style) is returned, to be sized once the rest of the body is known.
+    #[allow(clippy::type_complexity)]
+    fn pieces(
+        &mut self,
+        nodes: &[Node],
+        st: St,
+        defer_middles: bool,
+    ) -> R<(Vec<Piece>, Vec<(usize, Option<char>, St)>)> {
         let mut st = st;
         let mut pieces = Vec::with_capacity(nodes.len());
+        let mut middles = Vec::new();
         for node in nodes {
             match node {
                 Node::Style(s) => st.style = *s,
@@ -396,9 +418,18 @@ impl<'f> Ctx<'f> {
                         Dim::Mu(v) => v * em / 18.0,
                     }));
                 }
+                Node::Middle(delim) if defer_middles => {
+                    middles.push((pieces.len(), *delim, st));
+                    pieces.push(Piece::Atom(Atom::new(Class::Ord, LBox::default()), st));
+                }
                 _ => pieces.push(Piece::Atom(self.atom(node, st)?, st)),
             }
         }
+        Ok((pieces, middles))
+    }
+
+    /// Spaces and concatenates a list's pieces (TeX rules 5, 6 and 20).
+    fn assemble(&mut self, mut pieces: Vec<Piece>, lead_ord: bool) -> LBox {
         // Bin atoms with nothing to bind become Ord (TeX rules 5 and 6).
         let mut prev: Option<usize> = None;
         for i in 0..pieces.len() {
@@ -461,14 +492,11 @@ impl<'f> Ctx<'f> {
             }
         }
         out.w = x;
-        Ok(out)
+        out
     }
 
     fn atom(&mut self, node: &Node, st: St) -> R<Atom> {
-        self.work += 1;
-        if self.work > self.max_items.saturating_mul(4) {
-            return Err(Error::new(ErrorKind::TooLarge, 0..0));
-        }
+        self.work(1)?;
         Ok(match node {
             Node::Char {
                 ch,
@@ -549,10 +577,8 @@ impl<'f> Ctx<'f> {
             Node::LeftRight { left, right, body } => {
                 Atom::new(Class::Inner, self.left_right(*left, body, *right, st)?)
             }
-            Node::Middle(delim) => {
-                let target = self.middle.unwrap_or(0.0);
-                Atom::new(Class::Ord, self.delimiter(*delim, target, st)?)
-            }
+            // A `\middle` outside `\left…\right` keeps its natural size.
+            Node::Middle(delim) => Atom::new(Class::Ord, self.delimiter(*delim, 0.0, st)?),
             Node::Big { delim, size, class } => {
                 let target = BIG_SIZES[(*size as usize).clamp(1, 4) - 1] * self.size;
                 Atom::new(*class, self.delimiter(*delim, target, st)?)
@@ -895,18 +921,23 @@ impl<'f> Ctx<'f> {
         right: Option<char>,
         st: St,
     ) -> R<LBox> {
-        let saved = self.middle.take();
-        let items = self.items;
-        let mut inner = self.list(body, st)?;
-        let target = self.delimiter_target(inner.h, inner.d, st);
-        if body.iter().any(|n| matches!(n, Node::Middle(_))) {
-            // Size `\middle` to the body, then lay it out again; only the
-            // kept pass counts toward the item limit.
-            self.items = items;
-            self.middle = Some(target);
-            inner = self.list(body, st)?;
+        // The body is laid out once: `\middle`s wait as placeholders until the
+        // rest of it sets their size, then everything is spaced together.
+        let (mut pieces, middles) = self.pieces(body, st, true)?;
+        let (h, d) = pieces
+            .iter()
+            .fold((0.0f32, 0.0f32), |(h, d), piece| match piece {
+                Piece::Atom(atom, _) => (h.max(atom.b.h), d.max(atom.b.d)),
+                Piece::Kern(_) => (h, d),
+            });
+        let target = self.delimiter_target(h, d, st);
+        for (ix, delim, st) in middles {
+            pieces[ix] = Piece::Atom(
+                Atom::new(Class::Ord, self.delimiter(delim, target, st)?),
+                st,
+            );
         }
-        self.middle = saved;
+        let inner = self.assemble(pieces, false);
         self.fence(left, inner, right, target, st)
     }
 
@@ -1201,6 +1232,8 @@ impl<'f> Ctx<'f> {
             let mut boxes = Vec::with_capacity(row.len());
             let (mut h, mut d) = (strut_h, strut_d);
             for (j, cell) in row.iter().enumerate() {
+                // Empty cells (`&&&…`) emit nothing but still cost a layout.
+                self.work(1)?;
                 let lead = a.kind == ArrayKind::Aligned && j % 2 == 1;
                 let b = self.list_lead(cell, cell_st, lead)?;
                 widths[j] = widths[j].max(b.w);

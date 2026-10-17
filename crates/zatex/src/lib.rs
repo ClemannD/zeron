@@ -63,10 +63,21 @@ pub struct Options {
     pub display: bool,
     /// Longest accepted source, in bytes.
     pub max_bytes: usize,
-    /// Deepest accepted nesting (groups, arguments, environments).
+    /// Deepest accepted nesting (groups, arguments, environments). Parsing
+    /// and layout recurse once per level: a release build needs well under
+    /// 128 KB of stack at the default, a debug build several times that
+    /// (about 20 nested `\overbrace`s fill 512 KB) — mind it if layout runs
+    /// on a small thread.
     pub max_depth: usize,
-    /// Most items a formula may emit (bounds memory and paint time).
+    /// Most items a formula may emit (bounds memory and paint time); layout
+    /// work is bounded at a few times this.
     pub max_items: usize,
+    /// Widest accepted formula, in ems. Anything wider (or any item farther
+    /// out) is [`ErrorKind::TooLarge`], so hosts never size a slot, row or
+    /// backing store from a runaway formula.
+    pub max_width: f32,
+    /// Tallest accepted formula (ascent plus descent), in ems.
+    pub max_height: f32,
 }
 
 impl Default for Options {
@@ -77,6 +88,8 @@ impl Default for Options {
             max_bytes: 16 * 1024,
             max_depth: 64,
             max_items: 20_000,
+            max_width: 2000.0,
+            max_height: 200.0,
         }
     }
 }
@@ -367,6 +380,25 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
         }
         e
     })?;
+    let (w, h) = (
+        options.max_width * options.size,
+        options.max_height * options.size,
+    );
+    let inside = |x: f32, y: f32| x.abs() <= w && y.abs() <= h;
+    let fits = b.w.abs() <= w
+        && b.h + b.d <= h
+        && b.items.iter().all(|item| match *item {
+            Item::Glyph { x, y, .. } => inside(x, y),
+            Item::Rule {
+                x,
+                y,
+                width,
+                height,
+            } => inside(x, y) && inside(x + width, y + height),
+        });
+    if !fits {
+        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+    }
     let mut items = b.items;
     // Hosts keep formulas around (caches, prepared rows): drop growth slack.
     items.shrink_to_fit();

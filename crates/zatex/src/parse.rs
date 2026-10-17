@@ -1064,7 +1064,7 @@ pub(crate) fn parse_dim(raw: &str) -> Option<Dim> {
     let em = match raw[split..].trim() {
         "em" => value,
         "ex" => value * 0.431,
-        "mu" => return Some(Dim::Mu(value)),
+        "mu" => return (value.abs() <= MAX_DIM_EM * 18.0).then_some(Dim::Mu(value)),
         "pt" | "px" | "bp" | "dd" => value * 0.1,
         "pc" => value * 1.2,
         "mm" => value * 0.2845,
@@ -1072,8 +1072,13 @@ pub(crate) fn parse_dim(raw: &str) -> Option<Dim> {
         "in" => value * 7.227,
         _ => return None,
     };
-    Some(Dim::Em(em))
+    // Checked after unit conversion: `1000in` is 7227em. No real kern or row
+    // gap comes near 100em; beyond it a dimension can only blow up the box.
+    (em.abs() <= MAX_DIM_EM).then_some(Dim::Em(em))
 }
+
+/// Largest accepted dimension (`\kern`, `\hspace`, `\\[…]`), in ems.
+const MAX_DIM_EM: f32 = 100.0;
 
 fn describe(ended: &Ended) -> String {
     match ended {
