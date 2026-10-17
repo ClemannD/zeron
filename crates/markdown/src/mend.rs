@@ -88,6 +88,8 @@ pub fn close_hanging(text: &str) -> Option<String> {
     // Open `\(…` or `\[…` formula: the char that closes it after a `\`.
     // Shields like `math`, and is never closed either.
     let mut latex: Option<char> = None;
+    // Char index of the `$` that last closed an inline formula.
+    let mut inline_closed: Option<usize> = None;
     // The last places an inline formula could still close: an unclosed one
     // with no closer ahead shields only its own line.
     let last_dollar = cs
@@ -147,6 +149,9 @@ pub fn close_hanging(text: &str) -> Option<String> {
                 let glued = i > 0 && !cs[i - 1].1.is_whitespace();
                 if run >= open && (open == 2 || glued) {
                     math = None;
+                    if open == 1 {
+                        inline_closed = Some(i);
+                    }
                 } else if open == 2 && run == 1 {
                     half_closer = Some(i);
                 }
@@ -277,6 +282,33 @@ pub fn close_hanging(text: &str) -> Option<String> {
     pending.sort_by_key(|b| std::cmp::Reverse(b.0));
     let closers: String = pending.into_iter().map(|(_, s)| s).collect();
 
+    // A lone `$` ending the stream that closes no formula this scan opened
+    // (`$5 to $`, `**$5** to **$`, `$HOME and $`) would still pair with an
+    // earlier dollar in the parse and flash that prose as a formula until the
+    // next character shows it's a price; it stays a literal `$` until then.
+    // A formula that does close there (`$x$`) renders at once.
+    let trailing_dollar = n > 0
+        && cs[n - 1].1 == '$'
+        && (n < 2 || cs[n - 2].1 != '$')
+        && cs[..n - 1]
+            .iter()
+            .rev()
+            .take_while(|&&(_, c)| c == '\\')
+            .count()
+            % 2
+            == 0
+        && code.is_none()
+        && math.is_none()
+        && latex.is_none()
+        && inline_closed != Some(n - 1);
+    let text: std::borrow::Cow<str> = if trailing_dollar {
+        let at = cs[n - 1].0;
+        format!("{}\\$", &text[..at]).into()
+    } else {
+        text.into()
+    };
+    let text = text.as_ref();
+
     // A trailing line of only `-`/`--`/`=`/`==` under text is a setext
     // underline (or hr) to the parser but almost always a streaming list
     // item; a zero-width space breaks the reading invisibly until the next
@@ -284,7 +316,7 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let setext = setext_partial(text);
 
     if closers.is_empty() && !setext {
-        return None;
+        return trailing_dollar.then(|| text.to_owned());
     }
     if setext {
         // Closers belong to the paragraph content above the underline line.
