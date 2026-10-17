@@ -261,6 +261,23 @@ pub const MATH_SIZE_DEFAULT: u16 = 100;
 pub const MATH_SIZE_MIN: u16 = 75;
 pub const MATH_SIZE_MAX: u16 = 200;
 
+/// A stored math size: any number rounds and clamps into range; anything
+/// else (`"big"`, `null`, an object) reads as the default. Like an unknown
+/// [`MathFont`], a bad value never fails the rest of the settings file.
+fn deserialize_math_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u16, D::Error> {
+    let stored = serde_json::Value::deserialize(deserializer)?;
+    Ok(stored
+        .as_f64()
+        .filter(|size| size.is_finite())
+        .map_or(MATH_SIZE_DEFAULT, |size| {
+            // In range, the cast is exact.
+            size.round()
+                .clamp(f64::from(MATH_SIZE_MIN), f64::from(MATH_SIZE_MAX)) as u16
+        }))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GitHistoryColumns {
@@ -1118,7 +1135,9 @@ pub struct UiSettings {
     pub render_math: bool,
     /// The bundled face typeset math is set in.
     pub math_font: MathFont,
-    /// Typeset math size, as a percent of the text around it.
+    /// Typeset math size, as a percent of the text around it. Read
+    /// tolerantly ([`deserialize_math_size`]).
+    #[serde(deserialize_with = "deserialize_math_size")]
     pub math_size: u16,
     /// Maximum message and docked composer surface width in logical pixels.
     /// The centered new-chat composer keeps its own width.
@@ -3240,6 +3259,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"mathSize":10}"#).unwrap();
         assert_eq!(UiSettings::load(dir.path()).math_size, MATH_SIZE_MIN);
+    }
+
+    #[test]
+    fn a_malformed_math_size_never_fails_the_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for (stored, expected) in [
+            // Numbers round, then clamp.
+            ("1.5", MATH_SIZE_MIN),
+            ("134.6", 135),
+            ("134.4", 134),
+            ("-1", MATH_SIZE_MIN),
+            ("1e300", MATH_SIZE_MAX),
+            ("99999999999999999999999", MATH_SIZE_MAX),
+            ("150", 150),
+            // Anything else is the default.
+            (r#""big""#, MATH_SIZE_DEFAULT),
+            (r#""150""#, MATH_SIZE_DEFAULT),
+            ("null", MATH_SIZE_DEFAULT),
+            ("true", MATH_SIZE_DEFAULT),
+            ("[150]", MATH_SIZE_DEFAULT),
+            (r#"{"size":150}"#, MATH_SIZE_DEFAULT),
+        ] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(
+                    r#"{{"sidebarWidth":300.0,"mathSize":{stored},"mathFont":"stixTwo","renderMath":false}}"#
+                ),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(loaded.math_size, expected, "{stored}");
+            // The rest of the file survives.
+            assert_eq!(loaded.sidebar_width, 300.0, "{stored}");
+            assert_eq!(loaded.math_font, MathFont::StixTwo, "{stored}");
+            assert!(!loaded.render_math, "{stored}");
+        }
+        // Absent, it's the default.
+        let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.math_size, MATH_SIZE_DEFAULT);
     }
 
     #[test]

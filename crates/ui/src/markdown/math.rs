@@ -126,36 +126,49 @@ impl FormulaCache {
         }
     }
 
-    fn get(&mut self, tex: &str, display: bool, face: Face) -> Option<Arc<Formula>> {
-        let options = if display {
+    /// zatex's options for `display`, sized in ems.
+    fn options(display: bool) -> zatex::Options {
+        if display {
             zatex::Options::display(1.0)
         } else {
             zatex::Options::inline(1.0)
-        };
-        // zatex refuses these without parsing; keeping the key would hold
-        // the whole oversized source for nothing.
-        if tex.len() > options.max_bytes {
-            return None;
         }
+    }
+
+    /// The cached result for `tex`, marked used: `Some(None)` for a cached
+    /// error, `None` when it isn't cached yet.
+    fn lookup(&mut self, tex: &str, display: bool, face: Face) -> Option<Option<Arc<Formula>>> {
         self.tick += 1;
         let tick = self.tick;
-        let entries = self.entries.entry((face, display)).or_default();
-        if let Some(entry) = entries.get_mut(tex) {
-            if let Some(key) = self.order.remove(&entry.used) {
-                self.order.insert(tick, key);
-            }
-            entry.used = tick;
-            return entry.formula.clone();
+        let entry = self.entries.get_mut(&(face, display))?.get_mut(tex)?;
+        if let Some(key) = self.order.remove(&entry.used) {
+            self.order.insert(tick, key);
         }
-        let formula = zatex::bundled::layout(tex, face, &options)
-            .ok()
-            .map(Arc::new);
+        entry.used = tick;
+        Some(entry.formula.clone())
+    }
+
+    /// Caches `formula` (laid out from `tex`, or `None` for an error) and
+    /// returns what's now cached. Should another lookup have laid `tex` out
+    /// meanwhile, the entry already there wins, so every caller shares one
+    /// layout.
+    fn insert(
+        &mut self,
+        tex: &str,
+        display: bool,
+        face: Face,
+        formula: Option<Arc<Formula>>,
+    ) -> Option<Arc<Formula>> {
+        if let Some(cached) = self.lookup(tex, display, face) {
+            return cached;
+        }
+        let tick = self.tick;
         let key: Arc<str> = tex.into();
         let bytes = key.len()
             + formula.as_ref().map_or(0, |formula| {
                 formula.items.len() * std::mem::size_of::<Item>()
             });
-        entries.insert(
+        self.entries.entry((face, display)).or_default().insert(
             key.clone(),
             CachedFormula {
                 formula: formula.clone(),
@@ -179,19 +192,69 @@ impl FormulaCache {
         }
         formula
     }
+
+    /// [`Self::lookup`], laying `tex` out and caching it on a miss. Tests use
+    /// this; [`formula`] does the same without holding the cache through the
+    /// layout.
+    #[cfg(test)]
+    fn get(&mut self, tex: &str, display: bool, face: Face) -> Option<Arc<Formula>> {
+        let options = Self::options(display);
+        if tex.len() > options.max_bytes {
+            return None;
+        }
+        if let Some(cached) = self.lookup(tex, display, face) {
+            return cached;
+        }
+        let laid = lay_out(tex, face, &options);
+        self.insert(tex, display, face, laid)
+    }
+}
+
+/// `tex` laid out in `face`, or `None` on any error.
+fn lay_out(tex: &str, face: Face, options: &zatex::Options) -> Option<Arc<Formula>> {
+    zatex::bundled::layout(tex, face, options)
+        .ok()
+        .map(Arc::new)
+}
+
+/// The process-wide formula cache.
+fn cache() -> std::sync::MutexGuard<'static, FormulaCache> {
+    static CACHE: LazyLock<Mutex<FormulaCache>> =
+        LazyLock::new(|| Mutex::new(FormulaCache::new(CACHE_CAPACITY, CACHE_MAX_BYTES)));
+    CACHE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// `tex` laid out in `face` in ems (1.0 = the surrounding font size), or
 /// `None` when zatex can't render it faithfully — the caller shows the
 /// source instead. Errors are cached like formulas, so a malformed formula
 /// isn't re-parsed every frame either.
+///
+/// The cache is only held to look up and to insert, never through a layout,
+/// so one slow formula doesn't stall every other lookup (and the window)
+/// behind it. Two threads missing on the same source may both lay it out;
+/// the first to insert wins and both return its layout.
 pub(crate) fn formula(tex: &str, display: bool, face: Face) -> Option<Arc<Formula>> {
-    static CACHE: LazyLock<Mutex<FormulaCache>> =
-        LazyLock::new(|| Mutex::new(FormulaCache::new(CACHE_CAPACITY, CACHE_MAX_BYTES)));
-    CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(tex, display, face)
+    formula_with(tex, display, face, lay_out)
+}
+
+/// [`formula`] laying out with `lay_out`.
+fn formula_with(
+    tex: &str,
+    display: bool,
+    face: Face,
+    lay_out: impl FnOnce(&str, Face, &zatex::Options) -> Option<Arc<Formula>>,
+) -> Option<Arc<Formula>> {
+    let options = FormulaCache::options(display);
+    // zatex refuses these without parsing; keeping the key would hold the
+    // whole oversized source for nothing.
+    if tex.len() > options.max_bytes {
+        return None;
+    }
+    if let Some(cached) = cache().lookup(tex, display, face) {
+        return cached;
+    }
+    let laid = lay_out(tex, face, &options);
+    cache().insert(tex, display, face, laid)
 }
 
 /// The advance of Geist's NBSP in ems: the unit a slot is measured in.
@@ -253,17 +316,39 @@ pub(crate) fn span(formula: &Formula) -> Range<f32> {
     span
 }
 
+/// The widest (and tallest) a formula may set, in ems of the surrounding
+/// text, math size included. zatex already refuses formulas wider than
+/// [`zatex::Options::max_width`] (2000 em, so 4000 at the largest math size);
+/// this is the second line of defence, so a slot never grows into
+/// a string GPUI shapes every frame on surfaces that don't cache layout. At
+/// Geist's quarter-em NBSP it's at most ~32K spaces (64 KB).
+const MAX_SLOT_EMS: f32 = 8192.0;
+
 /// The NBSPs that reserve room for `formula` set at `scale`: whole spaces
 /// covering all it paints, rounded up so it never overlaps its neighbors; it
 /// centers in the slack. NBSPs are word characters to GPUI's wrapper, so a
 /// slot only splits across rows when it (with any text glued to it) is wider
 /// than the column.
-pub(crate) fn slot_text(formula: &Formula, scale: f32) -> String {
+///
+/// `None` when the formula is too big to set (past [`MAX_SLOT_EMS`], or with
+/// a non-finite extent): the caller shows its source instead, as for one
+/// zatex can't render.
+pub(crate) fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
     let span = span(formula);
-    let count = ((span.end - span.start) * scale / nbsp_em())
-        .ceil()
-        .max(1.0) as usize;
-    std::iter::repeat_n(NBSP, count).collect()
+    // `span` skips a NaN advance (`min`/`max` ignore NaN), so check it here.
+    let width = if formula.width.is_finite() {
+        (span.end - span.start) * scale
+    } else {
+        f32::NAN
+    };
+    let height = formula.height() * scale;
+    // NaN fails every comparison, so it's rejected too.
+    let fits = |ems: f32| (0.0..=MAX_SLOT_EMS).contains(&ems);
+    if !(fits(width) && fits(height.abs())) {
+        return None;
+    }
+    let count = (width / nbsp_em()).ceil().max(1.0) as usize;
+    Some(std::iter::repeat_n(NBSP, count).collect())
 }
 
 /// The font a slot shapes in (see [`SLOT_FAMILY`]).
@@ -345,12 +430,18 @@ pub(crate) fn display_line_height(
 }
 
 /// A display formula as one line of text: its slot shows the formula, and
-/// copy and selection read the source as `$$tex$$`.
-pub(crate) fn display_flat(tex: &str, formula: Arc<Formula>, scale: f32, color: Hsla) -> FlatText {
-    let text = slot_text(&formula, scale);
+/// copy and selection read the source as `$$tex$$`. `None` when the formula
+/// is too big to set ([`slot_text`]).
+pub(crate) fn display_flat(
+    tex: &str,
+    formula: Arc<Formula>,
+    scale: f32,
+    color: Hsla,
+) -> Option<FlatText> {
+    let text = slot_text(&formula, scale)?;
     let source = format!("$${tex}$$");
     let range = 0..text.len();
-    FlatText {
+    Some(FlatText {
         original: Some(OriginalText {
             offsets: OffsetMap {
                 omissions: vec![(0..source.len(), range.clone())],
@@ -376,7 +467,7 @@ pub(crate) fn display_flat(tex: &str, formula: Arc<Formula>, scale: f32, color: 
             display: true,
             scale,
         }],
-    }
+    })
 }
 
 /// The paint color of the text run covering byte `at`.
@@ -755,8 +846,11 @@ mod tests {
         let mut cache = FormulaCache::new(CACHE_CAPACITY, 1024 * 1024);
         let mut kept = 0;
         for i in 0..24 {
-            // ~10 KB of source: valid, and thousands of items laid out.
-            let tex = format!("{i}{}", "+x".repeat(5_000));
+            // ~10 KB of source: valid, within zatex's width and height
+            // limits, and thousands of items laid out.
+            let row = format!("{}x", "x&".repeat(49));
+            let rows = vec![row; 100].join(r"\\");
+            let tex = format!(r"{i}\begin{{matrix}}{rows}\end{{matrix}}");
             let laid = cache.get(&tex, true, Face::Fira).expect("lays out");
             assert!(laid.items.len() > 5_000);
             let held: usize = cache
@@ -904,7 +998,7 @@ mod tests {
     #[test]
     fn slots_cover_the_formula_in_whole_spaces() {
         let wide = formula(r"a + b + c + d", false, Face::Fira).unwrap();
-        let text = slot_text(&wide, 1.0);
+        let text = slot_text(&wide, 1.0).unwrap();
         assert!(text.chars().all(|c| c == NBSP));
         let count = text.chars().count() as f32;
         assert!(count * nbsp_em() >= wide.width);
@@ -920,7 +1014,7 @@ mod tests {
         let span = span(&formula);
         assert!(span.start < -4.0 && span.end > 0.0, "{span:?}");
         // The slot reserves everything painted, not the negative advance.
-        let count = slot_text(&formula, 1.0).chars().count() as f32;
+        let count = slot_text(&formula, 1.0).unwrap().chars().count() as f32;
         assert!(count * nbsp_em() >= span.end - span.start);
         // An ordinary formula spans its advance box.
         let plain = self::formula("x+y", false, Face::Fira).unwrap();
@@ -928,10 +1022,112 @@ mod tests {
         assert!(span.start >= 0.0 && (span.end - plain.width).abs() < 0.2);
     }
 
+    /// A formula `width` ems wide and one em tall, as no source sets it.
+    fn ruled(width: f32) -> Formula {
+        Formula {
+            width,
+            ascent: 0.75,
+            descent: 0.25,
+            items: vec![Item::Rule {
+                x: 0.0,
+                y: -0.75,
+                width,
+                height: 1.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn slots_refuse_formulas_too_big_to_set() {
+        // At the cap a slot is still a bounded string.
+        let edge = slot_text(&ruled(MAX_SLOT_EMS), 1.0).expect("fits");
+        assert!(edge.len() <= 2 * (MAX_SLOT_EMS / nbsp_em()).ceil() as usize);
+        assert!(edge.len() < 128 * 1024, "{}", edge.len());
+        // Past it, in ems or once scaled, nothing is built.
+        for (formula, scale) in [
+            (ruled(1e7), 1.0),
+            (ruled(MAX_SLOT_EMS * 2.0), 1.0),
+            (ruled(MAX_SLOT_EMS * 0.75), 2.0),
+            (ruled(f32::INFINITY), 1.0),
+            (ruled(f32::NAN), 1.0),
+            (ruled(10.0), f32::NAN),
+            (ruled(10.0), -1.0),
+        ] {
+            assert!(
+                slot_text(&formula, scale).is_none(),
+                "{} @ {scale}",
+                formula.width
+            );
+        }
+        // As are absurdly tall ones and non-finite extents.
+        let tall = Formula {
+            ascent: 1e7,
+            ..ruled(1.0)
+        };
+        assert!(slot_text(&tall, 1.0).is_none());
+        let nan = Formula {
+            descent: f32::NAN,
+            ..ruled(1.0)
+        };
+        assert!(slot_text(&nan, 1.0).is_none());
+        assert!(display_flat("x", Arc::new(ruled(1e7)), 1.0, gpui::black()).is_none());
+    }
+
+    #[test]
+    fn formulas_too_big_to_set_show_their_source() {
+        // Seed the cache with a layout no source would set, so this doesn't
+        // depend on zatex's own width limit.
+        let tex = r"\text{too wide to set (slot test)}";
+        let laid = formula_with(tex, false, Face::Fira, |_, _, _| Some(Arc::new(ruled(1e7))))
+            .expect("cached");
+        assert_eq!(laid.width, 1e7);
+        let flat = inline(&[("so ", false), (tex, true)]);
+        assert!(flat.math.is_empty(), "no slot");
+        assert_eq!(flat.text.as_ref(), format!("so ${tex}$"));
+        assert_eq!(flat.code_ranges.len(), 1, "shown as inline code");
+    }
+
+    #[test]
+    fn layout_runs_outside_the_cache_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (started, on_start) = mpsc::channel();
+        let (release, on_release) = mpsc::channel::<()>();
+        let slow = r"\text{slow layout (lock test)}";
+        let blocked = std::thread::spawn(move || {
+            formula_with(slow, false, Face::Fira, |tex, face, options| {
+                started.send(()).unwrap();
+                on_release.recv().unwrap();
+                lay_out(tex, face, options)
+            })
+        });
+        on_start.recv().unwrap();
+        // While that layout is in flight, other lookups and layouts go
+        // through: on another thread, so a held lock fails instead of hangs.
+        let (done, on_done) = mpsc::channel();
+        std::thread::spawn(move || {
+            let hit = formula("x", false, Face::Fira).is_some();
+            let miss = formula(r"\text{fresh (lock test)}", true, Face::Fira).is_some();
+            done.send(hit && miss).unwrap();
+        });
+        let finished = on_done.recv_timeout(Duration::from_secs(10));
+        // The same source laid out meanwhile is cached first; the slow
+        // thread's layout then defers to it, so everyone shares one.
+        let first = formula_with(slow, false, Face::Fira, lay_out).expect("lays out");
+        release.send(()).unwrap();
+        let late = blocked.join().unwrap().expect("lays out");
+        assert_eq!(finished, Ok(true), "a slow layout blocked other lookups");
+        assert!(Arc::ptr_eq(&first, &late));
+        assert!(Arc::ptr_eq(
+            &first,
+            &formula(slow, false, Face::Fira).unwrap()
+        ));
+    }
+
     #[test]
     fn slots_scale_with_the_math_size() {
         let wide = formula(r"a + b + c + d", false, Face::Fira).unwrap();
-        let count = |scale: f32| slot_text(&wide, scale).chars().count() as f32;
+        let count = |scale: f32| slot_text(&wide, scale).unwrap().chars().count() as f32;
         // 100% is the size-independent slot, unscaled.
         let span = span(&wide);
         let normal = ((span.end - span.start) / nbsp_em()).ceil();
@@ -968,12 +1164,16 @@ mod tests {
         // The slot widens with it.
         let width = |scale| {
             display_flat("x", laid.clone(), scale, gpui::black())
+                .unwrap()
                 .text
                 .len()
         };
         assert!(width(1.5) > width(1.0));
         assert_eq!(
-            display_flat("x", laid.clone(), 1.5, gpui::black()).math[0].scale,
+            display_flat("x", laid.clone(), 1.5, gpui::black())
+                .unwrap()
+                .math[0]
+                .scale,
             1.5
         );
     }
@@ -1042,7 +1242,8 @@ mod tests {
             formula(r"\frac{a^2}{b_1}", true, Face::Fira).unwrap(),
             1.0,
             gpui::black(),
-        );
+        )
+        .unwrap();
         assert_eq!(line_height_with(&display, 22.0, 14.0, geist), 22.0);
     }
 
@@ -1070,7 +1271,7 @@ mod tests {
     #[test]
     fn display_math_copies_its_delimited_source() {
         let formula = formula(r"\sum_{i=1}^n i", true, Face::Fira).unwrap();
-        let flat = display_flat(r"\sum_{i=1}^n i", formula, 1.0, gpui::black());
+        let flat = display_flat(r"\sum_{i=1}^n i", formula, 1.0, gpui::black()).unwrap();
         let original = flat.original.as_ref().unwrap();
         assert_eq!(original.text.as_ref(), r"$$\sum_{i=1}^n i$$");
         assert_eq!(original.offsets.original(0), 0);

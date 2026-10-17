@@ -806,7 +806,10 @@ fn render_math_block(
     };
     let line_height =
         super::math::display_line_height(&formula, math.scale(), MD_TEXT_SIZE, MD_LINE_HEIGHT);
-    let flat = super::math::display_flat(tex, formula, math.scale(), theme.text);
+    // Too big to set: the source, as for a formula zatex can't render.
+    let Some(flat) = super::math::display_flat(tex, formula, math.scale(), theme.text) else {
+        return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
+    };
     let line = div()
         .min_w_full()
         .flex_none()
@@ -1120,20 +1123,25 @@ fn flatten_runs_weighted(
             continue;
         }
         // Inline math reads back as `$tex$`. A formula shows as its slot; one
-        // zatex can't render, or any with math off, shows that source as
-        // inline code instead.
+        // zatex can't render, too big to set, or any with math off, shows
+        // that source as inline code instead.
         let formula = run.style.math.then(|| {
             math_style
                 .enabled
                 .then(|| super::math::formula(&run.text, false, math_style.face))
                 .flatten()
+                .and_then(|formula| {
+                    let slot = super::math::slot_text(&formula, math_style.scale())?;
+                    Some((formula, slot))
+                })
         });
         let delimited = run.style.math.then(|| format!("${}$", run.text));
         let run_source = delimited.as_deref().unwrap_or(&run.text);
-        let slot = formula
-            .as_ref()
-            .and_then(|formula| formula.as_deref())
-            .map(|formula| super::math::slot_text(formula, math_style.scale()));
+        let (formula, slot) = match formula {
+            Some(Some((formula, slot))) => (Some(Some(formula)), Some(slot)),
+            Some(None) => (Some(None), None),
+            None => (None, None),
+        };
         let code = run.style.code || matches!(formula, Some(None));
         let shown = match (&slot, &delimited) {
             (Some(slot), _) => slot.as_str(),
