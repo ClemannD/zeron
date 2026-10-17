@@ -53,6 +53,53 @@
 /// styles it like any link but must not register it as clickable.
 pub const PENDING_LINK_URL: &str = "zeron:pending-link";
 
+/// The open delimiter runs, innermost last, with each character's runs
+/// indexed so a closer finds its opener without scanning the others (a
+/// block of `_a ` openers then `a* ` closers stays linear).
+#[derive(Default)]
+struct Delims {
+    list: Vec<OpenDelim>,
+    by: [Vec<usize>; 3],
+}
+
+impl Delims {
+    fn slot(c: char) -> usize {
+        match c {
+            '*' => 0,
+            '_' => 1,
+            _ => 2,
+        }
+    }
+
+    fn push(&mut self, delim: OpenDelim) {
+        self.by[Self::slot(delim.ch)].push(self.list.len());
+        self.list.push(delim);
+    }
+
+    fn last_of(&self, c: char) -> Option<usize> {
+        self.by[Self::slot(c)].last().copied()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.list.truncate(len);
+        for by in &mut self.by {
+            while by.last().is_some_and(|&i| i >= len) {
+                by.pop();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.truncate(0);
+    }
+
+    /// Drop the runs opened at or after char index `pos`.
+    fn retain_before(&mut self, pos: usize) {
+        let keep = self.list.partition_point(|d| d.pos < pos);
+        self.truncate(keep);
+    }
+}
+
 /// One unclosed emphasis-family delimiter run (`*`, `_`, or `~~`).
 struct OpenDelim {
     ch: char,
@@ -75,6 +122,9 @@ pub fn close_hanging(text: &str) -> Option<String> {
 /// the next character shows it's a price. The caller keeps it only where
 /// that `$` really closes a formula in the parse.
 pub fn close_hanging_dollar(text: &str) -> Option<String> {
+    if !text.ends_with('$') {
+        return None;
+    }
     match mend(text, true) {
         (Some(mended), true) => Some(mended),
         _ => None,
@@ -88,7 +138,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     let n = cs.len();
     let at = |i: usize| cs.get(i).map(|&(_, c)| c);
 
-    let mut delims: Vec<OpenDelim> = Vec::new();
+    let mut delims = Delims::default();
     // Char indices of unmatched `[`.
     let mut brackets: Vec<usize> = Vec::new();
     // Open inline code span: (backtick run length, content char index).
@@ -116,6 +166,27 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
         .enumerate()
         .rposition(|(j, &(_, c))| c == '$' && j > 0 && !cs[j - 1].1.is_whitespace());
     let last_paren = cs.windows(2).rposition(|w| w[0].1 == '\\' && w[1].1 == ')');
+    let last_bracket = cs.windows(2).rposition(|w| w[0].1 == '\\' && w[1].1 == ']');
+    // Whether TeX syntax follows each char: an unclosed `\[` streams a
+    // display formula only if what follows reads as one.
+    let mut tex_after = vec![false; n + 1];
+    for j in (0..n).rev() {
+        tex_after[j] = tex_after[j + 1] || matches!(cs[j].1, '\\' | '^' | '_' | '{' | '}' | '=');
+    }
+    // Whether the word (since the last whitespace) up to each char holds a
+    // `/`: the parser reads an opener inside a URL or path as an escape.
+    let mut slash = false;
+    let word_slash: Vec<bool> = cs
+        .iter()
+        .map(|&(_, c)| {
+            if c.is_whitespace() {
+                slash = false;
+            } else if c == '/' {
+                slash = true;
+            }
+            slash
+        })
+        .collect();
 
     let mut i = 0;
     while i < n {
@@ -128,7 +199,13 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
                 }
             } else if math.is_none()
                 && matches!(next, Some('(' | '['))
-                && !i.checked_sub(1).is_some_and(|p| glued_to_word(cs[p].1))
+                && !i.checked_sub(1).is_some_and(|p| glued_to_word(cs[p].1, word_slash[p]))
+                // A `\[` with no `\]` ahead and no TeX after it is an
+                // escape (`Escape \[ in regex`), not a formula still
+                // streaming.
+                && (next == Some('(')
+                    || last_bracket.is_some_and(|last| last > i)
+                    || tex_after[(i + 2).min(n)])
             {
                 // The parser reads `\(…\)` / `\[…\]` as math (and a
                 // display formula ends emphasis opened before it, like `$$`).
@@ -233,7 +310,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
                     // Emphasis opened inside a completed `[…]` and never
                     // closed there stays literal — as the final parse will
                     // decide too.
-                    delims.retain(|d| d.pos < open);
+                    delims.retain_before(open);
                     if at(i + 1) == Some('(') {
                         // Consume the URL through its balanced `)`.
                         let mut j = i + 2;
@@ -291,7 +368,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     {
         pending.push((cpos, "`".repeat(ticks)));
     }
-    for d in &delims {
+    for d in &delims.list {
         if last_content.is_some_and(|lc| lc >= d.pos) {
             pending.push((d.pos, d.ch.to_string().repeat(d.len)));
         }
@@ -377,8 +454,10 @@ fn shell_variable(after: &[(usize, char)]) -> bool {
 
 /// A character an escaped `\(` or `\[` glued to is markdown escaping, not
 /// math (mirrors the parser's rewrite).
-fn glued_to_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "_/.-:=?&#%~+@".contains(c)
+/// Whether a `\(` after `c` is glued to it, as the parser decides: after a
+/// word character, or any non-space inside a URL or path (`in_path`).
+fn glued_to_word(c: char, in_path: bool) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || (in_path && !c.is_whitespace())
 }
 
 fn run_len(cs: &[(usize, char)], i: usize) -> usize {
@@ -391,7 +470,7 @@ fn run_len(cs: &[(usize, char)], i: usize) -> usize {
 /// opened after a consumed opener were inside the closed span and stay
 /// literal, exactly as the final parse treats them.
 fn delim(
-    delims: &mut Vec<OpenDelim>,
+    delims: &mut Delims,
     cs: &[(usize, char)],
     c: char,
     run: usize,
@@ -418,11 +497,11 @@ fn delim(
     let can_close = prev.is_some_and(|c| !c.is_whitespace());
     let can_open = next.is_some_and(|c| !c.is_whitespace());
     let mut rest = run;
-    if can_close && let Some(k) = delims.iter().rposition(|d| d.ch == c) {
-        let take = rest.min(delims[k].len);
-        delims[k].len -= take;
+    if can_close && let Some(k) = delims.last_of(c) {
+        let take = rest.min(delims.list[k].len);
+        delims.list[k].len -= take;
         rest -= take;
-        let keep = if delims[k].len == 0 { k } else { k + 1 };
+        let keep = if delims.list[k].len == 0 { k } else { k + 1 };
         delims.truncate(keep);
     }
     if rest > 0 {
@@ -609,6 +688,13 @@ mod tests {
         // Escapes glued to a word are not math.
         mends("f\\(x\\) **bo", "f\\(x\\) **bo**");
         mends("arr\\[0\\] *em", "arr\\[0\\] *em*");
+        // An unclosed `\[` before prose is an escape: emphasis still mends.
+        mends(
+            "Escape \\[ in regex, **bold",
+            "Escape \\[ in regex, **bold**",
+        );
+        // Glued as the parser glues: after an operator it opens a formula.
+        mends("x=\\(*a\\) **bold", "x=\\(*a\\) **bold**");
     }
 
     #[test]
