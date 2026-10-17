@@ -384,6 +384,9 @@ fn line_height_with(
     size: f32,
     mut metrics: impl FnMut(&gpui::Font) -> (f32, f32),
 ) -> f32 {
+    if flat.math.iter().all(|slot| slot.display) {
+        return line_height;
+    }
     let mut half = 0.0f32;
     // One forward pass over lines, inline slots (by position) and runs:
     // hard-broken lines of formulas must not cost lines × slots per render.

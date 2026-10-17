@@ -209,9 +209,12 @@ pub fn truncate(
 
 /// Whether `at` falls strictly inside a formula's slot.
 fn inside_slot(flat: &FlatText, at: usize) -> bool {
+    // Slots are in text order and disjoint: the first ending past `at` is the
+    // only one that can hold it (asked per character, so no scan).
+    let i = flat.math.partition_point(|slot| slot.range.end <= at);
     flat.math
-        .iter()
-        .any(|slot| slot.range.start < at && at < slot.range.end)
+        .get(i)
+        .is_some_and(|slot| slot.range.start < at && at < slot.range.end)
 }
 
 /// The run an ellipsis standing for `omitted` is styled with: the first

@@ -667,7 +667,41 @@ fn select_dollars(
     let mut pairs: Vec<(Range<usize>, Range<usize>)> = Vec::new();
     // The opener awaiting its closer, with its container and emphasis span.
     let mut pending: Option<(Range<usize>, u32, u32)> = None;
+    // Dollars in a URL or query string (`https://x/?$select=a&$top=1`,
+    // `/items?$expand=owner`) are part of it: never delimiters. Runs come in
+    // source order, so the word before each is tracked incrementally.
+    // A word is a URL when it starts with `scheme://` (`$\text{https://…}$`
+    // is a formula that mentions one).
+    let scheme_word = |word: &[u8]| {
+        let name = word
+            .iter()
+            .take(32)
+            .take_while(|byte| byte.is_ascii_alphanumeric() || b"+.-".contains(byte))
+            .count();
+        name > 0 && word[0].is_ascii_alphabetic() && word[name..].starts_with(b"://")
+    };
+    let mut url = Vec::with_capacity(runs.len());
+    let (mut scanned, mut word_start) = (0usize, 0usize);
     for run in &runs {
+        if let Some(space) = bytes[scanned.min(run.start)..run.start]
+            .iter()
+            .rposition(u8::is_ascii_whitespace)
+        {
+            word_start = scanned.min(run.start) + space + 1;
+        }
+        scanned = scanned.max(run.start);
+        let query = run.start > 0 && matches!(bytes[run.start - 1], b'?' | b'&');
+        let word = &bytes[word_start..run.start];
+        let word = &word[word
+            .iter()
+            .take_while(|byte| b"([<\"'".contains(byte))
+            .count()..];
+        url.push(query || scheme_word(word));
+    }
+    for (run, url) in runs.iter().zip(url) {
+        if url {
+            continue;
+        }
         let mut start = run.start;
         let same = |open: &(Range<usize>, u32, u32)| open.1 == run.container && open.2 == run.frame;
         // `$a$$b$`: a `$$` glued to an inline formula's content closes it
@@ -899,7 +933,15 @@ fn prose_like(body: &str, mid_line: bool) -> bool {
     if body.bytes().any(|byte| b"\\^_{}=+<>|&".contains(&byte)) {
         return false;
     }
+    // A token mixing letters and two or more digits is a version or an
+    // architecture (`x86`, `arm64`, `win32`), not a product of variables.
+    let version = |word: &str| {
+        word.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && word.bytes().any(|byte| byte.is_ascii_alphabetic())
+            && word.bytes().filter(u8::is_ascii_digit).count() >= 2
+    };
     mid_line
+        || body.split_whitespace().any(version)
         || body
             .bytes()
             .all(|byte| byte.is_ascii_digit() || b" .,;:-".contains(&byte))
@@ -965,7 +1007,7 @@ fn rewrite_absolute_destinations(
     options: Options,
     skip: &Skip,
     to_source: impl Fn(usize) -> usize,
-) -> Option<(String, OffsetMap, Vec<(usize, usize)>)> {
+) -> Option<Rewritten<(usize, usize)>> {
     // Only an absolute destination can need the rewrite: without one, skip
     // the parse.
     let absolute = source.match_indices("](").any(|(at, _)| {
@@ -1023,7 +1065,7 @@ fn rewrite_absolute_destinations(
             e += 1;
         }
         let readable = allowed.get(a).is_some_and(|range| range.start <= pos)
-            && !excluded.get(e).is_some_and(|range| range.start <= pos);
+            && excluded.get(e).is_none_or(|range| range.start > pos);
         if readable && !escaped[pos] {
             starts.push((pos, skip_destination_spaces(bytes, pos + 2)));
         }
@@ -1057,6 +1099,10 @@ fn rewrite_absolute_destinations(
     out.push_str(&source[copied..]);
     Some((out, insertions, done))
 }
+
+/// A pre-pass's output: the rewritten text, its offset map, and what each
+/// rewrite is for the caller to check against the parse.
+type Rewritten<T> = (String, OffsetMap, Vec<T>);
 
 /// Which bytes a backslash escapes: an odd run of backslashes before a byte.
 fn escapes(bytes: &[u8]) -> Vec<bool> {
@@ -3797,6 +3843,28 @@ mod math_tests {
             }
             assert_eq!(parser.tree(), &full, "chunk {chunk}");
         }
+    }
+
+    /// Dollars inside URLs and query strings are part of them: the link
+    /// stays whole and nothing becomes a formula.
+    #[test]
+    fn dollars_in_urls_and_queries_stay_literal() {
+        let runs = para(
+            "Call https://graph.microsoft.com/v1.0/me/messages?$select=subject&$top=10 to list",
+        );
+        assert_eq!(
+            runs.iter().find_map(|run| run.style.link.as_deref()),
+            Some("https://graph.microsoft.com/v1.0/me/messages?$select=subject&$top=10")
+        );
+        for source in [
+            "Visit https://x.dev/$a$b now",
+            "GET /api/items?$select=name&$expand=owner",
+            "Program Files \\(x86\\)",
+            "built for \\(arm64\\) only",
+        ] {
+            assert_no_math(source);
+        }
+        assert_eq!(para("so \\(x2\\)"), [plain("so "), math("x2")]);
     }
 }
 

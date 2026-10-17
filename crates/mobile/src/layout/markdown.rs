@@ -26,11 +26,14 @@ pub(crate) struct Ctx<'a> {
 /// fail after real work (a runaway `\\` stack fails on its extent). An LRU
 /// of `CAP` fixed-size keys: a hash of (source, display, face, size), so its
 /// memory is `CAP × 8` bytes whatever the sources. A hash collision would
-/// show a good formula as source — at 64 bits, never in practice. Successes
+/// show one formula as another — at 64 bits with a per-process seed, never in
+/// practice. Successes
 /// are kept too, bounded by count and item bytes: a streamed token re-prepares
 /// its whole paragraph, and must not lay out every formula in it again.
 #[derive(Default)]
 pub(crate) struct MathFailures {
+    /// Seeded per process, so no one can build colliding sources offline.
+    seed: std::collections::hash_map::RandomState,
     /// Most recently used last.
     keys: std::collections::VecDeque<u64>,
     pub hits: u64,
@@ -73,11 +76,9 @@ impl MathFailures {
         }
     }
 
-    fn key(tex: &str, display: bool, face: zatex::bundled::Face, size: f32) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::hash::DefaultHasher::new();
-        (tex, display, face, size.to_bits()).hash(&mut h);
-        h.finish()
+    fn key(&self, tex: &str, display: bool, face: zatex::bundled::Face, size: f32) -> u64 {
+        use std::hash::BuildHasher;
+        self.seed.hash_one((tex, display, face, size.to_bits()))
     }
 
     /// Whether `key` failed before (and mark it recently used).
@@ -124,7 +125,7 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
     if !ctx.math.enabled {
         return None;
     }
-    let key = MathFailures::key(tex, display, ctx.math.face, size);
+    let key = ctx.math_failures.key(tex, display, ctx.math.face, size);
     if ctx.math_failures.known(key) {
         return None;
     }
@@ -505,9 +506,16 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
             let cap = ctx.typo.px(240.0);
             // A column grows past the cap to its widest formula (an atomic
             // box, padding included); a table wider than the column scrolls.
+            // Capped: a column as wide as a 2000 em formula would make the
+            // table's scrolling canvas (one backing store) gigabytes; a wider
+            // formula shrinks to fit its cell instead.
+            let formula_cap = ctx.typo.px(1200.0);
             let widest_box = |t: &PText| {
                 let spans = t.p.spans();
-                t.math.iter().map(|(s, f)| f.span() + spans[*s].pad_start + spans[*s].pad_end).fold(0f32, f32::max)
+                t.math
+                    .iter()
+                    .map(|(s, f)| (f.span() + spans[*s].pad_start + spans[*s].pad_end).min(formula_cap))
+                    .fold(0f32, f32::max)
             };
             let cols = (0..ncols)
                 .map(|c| {
