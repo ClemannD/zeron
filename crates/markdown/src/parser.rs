@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 // ---------------------------------------------------------------------------
 // Tree model
@@ -150,11 +150,15 @@ pub fn parse_full(source: &str) -> BlockTree {
 }
 
 fn parse_at(source: &str, offset: usize) -> BlockTree {
+    parse_with(source, offset, options())
+}
+
+fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
     // Pre-passes run in order, each over the previous one's output; `maps`
     // records their edits so ranges walk back through them in reverse.
     let mut text = Cow::Borrowed(source);
     let mut maps: Vec<OffsetMap> = Vec::new();
-    if let Some((rewritten, map)) = rewrite_math_delimiters(&text) {
+    if let Some((rewritten, map)) = rewrite_math_per_block(source, options) {
         text = Cow::Owned(rewritten);
         maps.push(map);
     }
@@ -162,15 +166,70 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
         text = Cow::Owned(rewritten);
         maps.push(map);
     }
-    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options())
-        .into_offset_iter()
+    // Rewrites shift every following offset; ranges come from the rewritten
+    // text and must point into the original.
+    let original = |maps: &[OffsetMap], range: Range<usize>| {
+        maps.iter()
+            .rev()
+            .fold(range, |range, map| map.original_range(range))
+    };
+    // pulldown pairs dollars across markup (`**$5** to **$10**`), so a span
+    // `not_math` rejects can't just print its source: the emphasis, links
+    // and code inside would stay literal. Escape its opening `$` and reparse
+    // until every remaining span is math. An escape reshapes only the text
+    // after it, and only a code span, autolink or raw HTML shows an escape's
+    // backslash — so within a block, later spans are escaped in the same
+    // round unless an earlier one's TeX could open one of those. Each round
+    // escapes at least one dollar; the bound only matters for pathological
+    // input, whose leftovers print as source.
+    let mut rounds = 0;
+    let events = loop {
+        let events: Vec<(Event, Range<usize>)> =
+            Parser::new_ext(&text, options).into_offset_iter().collect();
+        let mut rejected = Vec::new();
+        if rounds < 16 && text.contains('$') {
+            let mut stalled = false;
+            for (event, range) in &events {
+                match event {
+                    Event::Start(
+                        Tag::Emphasis
+                        | Tag::Strong
+                        | Tag::Strikethrough
+                        | Tag::Link { .. }
+                        | Tag::Image { .. },
+                    )
+                    | Event::End(
+                        TagEnd::Emphasis
+                        | TagEnd::Strong
+                        | TagEnd::Strikethrough
+                        | TagEnd::Link
+                        | TagEnd::Image,
+                    ) => {}
+                    Event::Start(_) | Event::End(_) => stalled = false,
+                    Event::InlineMath(tex) if !stalled => {
+                        let spelled = original(&maps, range.clone());
+                        let next = source.as_bytes().get(spelled.end).copied();
+                        if source[spelled].starts_with('$') && not_math(tex, next) {
+                            rejected.push(range.start);
+                            stalled = tex.contains(['`', '<']);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if rejected.is_empty() {
+            break events;
+        }
+        let (escaped, map) = escape_dollars(&text, &rejected);
+        text = Cow::Owned(escaped);
+        maps.push(map);
+        rounds += 1;
+    };
+    let events: Vec<(Event, Range<usize>)> = events
+        .into_iter()
         .map(|(event, range)| {
-            // Rewrites shift every following offset; ranges come from the
-            // rewritten text and must point into the original.
-            let range = maps
-                .iter()
-                .rev()
-                .fold(range, |range, map| map.original_range(range));
+            let range = original(&maps, range);
             (event, range.start + offset..range.end + offset)
         })
         .collect();
@@ -206,6 +265,22 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
     BlockTree { blocks }
 }
 
+/// Insert a backslash before the `$` at each (ascending) offset, so it reads
+/// as a literal dollar.
+fn escape_dollars(text: &str, at: &[usize]) -> (String, OffsetMap) {
+    let mut out = String::with_capacity(text.len() + at.len());
+    let mut map = OffsetMap::default();
+    let mut copied = 0;
+    for &at in at {
+        out.push_str(&text[copied..at]);
+        map.shift(out.len(), -1);
+        out.push('\\');
+        copied = at;
+    }
+    out.push_str(&text[copied..]);
+    (out, map)
+}
+
 /// The edits a rewrite pass made, as `(position, shift)` pairs in rewritten
 /// byte order: every rewritten offset past `position` maps back to the
 /// original by adding `shift` (the running total of bytes removed minus bytes
@@ -221,8 +296,12 @@ impl OffsetMap {
     /// Record `delta` original bytes more (or, negative, fewer) behind the
     /// rewritten byte at `position`.
     fn shift(&mut self, position: usize, delta: isize) {
-        let total = self.edits.last().map_or(0, |&(_, total)| total) + delta;
+        let total = self.total() + delta;
         self.edits.push((position, total));
+    }
+
+    fn total(&self) -> isize {
+        self.edits.last().map_or(0, |&(_, total)| total)
     }
 
     fn original(&self, offset: usize) -> usize {
@@ -237,16 +316,63 @@ impl OffsetMap {
     }
 }
 
+/// [`rewrite_math_delimiters`] over each top-level block on its own (each
+/// starting at its line start), so no rewrite or skipped region reaches
+/// across a block boundary: a tail reparse from any block start rewrites
+/// that tail exactly as the full parse does.
+fn rewrite_math_per_block(source: &str, options: Options) -> Option<(String, OffsetMap)> {
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return None;
+    }
+    let mut starts = vec![0];
+    let mut depth = 0usize;
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        let top = depth == 0;
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        let start = source[..range.start].rfind('\n').map_or(0, |nl| nl + 1);
+        if top && starts.last() != Some(&start) {
+            starts.push(start);
+        }
+    }
+    starts.push(source.len());
+    let mut out = String::with_capacity(source.len());
+    let mut map = OffsetMap::default();
+    let mut changed = false;
+    for block in starts.windows(2) {
+        let block = &source[block[0]..block[1]];
+        match rewrite_math_delimiters(block) {
+            Some((rewritten, edits)) => {
+                let (base, total) = (out.len(), map.total());
+                map.edits.extend(
+                    edits
+                        .edits
+                        .into_iter()
+                        .map(|(at, shift)| (base + at, total + shift)),
+                );
+                out.push_str(&rewritten);
+                changed = true;
+            }
+            None => out.push_str(block),
+        }
+    }
+    changed.then_some((out, map))
+}
+
 /// Rewrite the LaTeX delimiters models favor — `\(…\)` inline, `\[…\]`
-/// display — to the `$…$` / `$$…$$` pulldown-cmark understands. Code keeps
-/// its spelling (fences, indented lines and inline code spans are copied
-/// verbatim), an opener is rewritten only once its closer has arrived within
-/// the same paragraph (so a still-streaming formula stays literal and the
-/// rewrite is append-stable), and a backslash that is itself escaped (`\\(`)
-/// is a literal backslash, not an opener. An opener glued to a word
-/// (`arr\[0\]`, `f\(x\)`) is markdown escaping, not math, and an empty pair
-/// (`\[ \]`) is an escaped task box. Inline formulas drop the whitespace
-/// inside their delimiters, which `$…$` does not allow.
+/// display — to the `$…$` / `$$…$$` pulldown-cmark understands. Code and
+/// URLs keep their spelling (fences, indented lines, inline code spans, link
+/// destinations, autolinks and reference definitions are copied verbatim),
+/// an opener is rewritten only once its closer has arrived within the same
+/// paragraph (so a still-streaming formula stays literal and the rewrite is
+/// append-stable), and a backslash that is itself escaped (`\\(`) is a
+/// literal backslash, not an opener. An opener glued to a word or a URL
+/// (`arr\[0\]`, `f\(x\)`, `x_\(1\)`) is markdown escaping, not math, and an
+/// empty pair (`\[ \]`) is an escaped task box. Inline formulas drop the
+/// whitespace inside their delimiters, which `$…$` does not allow.
 fn rewrite_math_delimiters(source: &str) -> Option<(String, OffsetMap)> {
     if !source.contains("\\(") && !source.contains("\\[") {
         return None;
@@ -262,15 +388,19 @@ fn rewrite_math_delimiters(source: &str) -> Option<(String, OffsetMap)> {
     // (escape pairs align: every scan starts just after a `(` or `[`) and
     // fail too, so a paragraph full of unclosed openers stays linear.
     let mut misses: Vec<((u8, bool, bool), usize)> = Vec::new();
+    let mut code_spans = CodeSpans::default();
     while at < bytes.len() {
         if at == 0 || bytes[at - 1] == b'\n' {
-            if let Some(fence) = fence_open(&source[at..]) {
-                let end = skip_fenced_block(source, at, fence);
+            if let Some(end) = fence_open(&source[at..])
+                .map(|fence| skip_fenced_block(source, at, fence))
+                .or_else(|| skip_container_fence(source, at))
+            {
                 skip(&mut rewritten, source, &mut copied, end);
                 at = end;
                 continue;
             }
-            if line_is_indented_code(&source[at..]) {
+            // Indented code, and a reference definition's destination.
+            if line_is_indented_code(&source[at..]) || has_link_defs(line_of(source, at)) {
                 let end = line_end(source, at);
                 skip(&mut rewritten, source, &mut copied, end);
                 at = end;
@@ -279,29 +409,36 @@ fn rewrite_math_delimiters(source: &str) -> Option<(String, OffsetMap)> {
         }
         match bytes[at] {
             b'`' if !is_escaped(bytes, at) => {
-                let run = backtick_run(bytes, at);
-                let end = match closing_backtick_run(bytes, at + run, run) {
-                    Some(close) => close + run,
-                    None => at + run,
-                };
+                let end = code_spans.end(source, at);
+                skip(&mut rewritten, source, &mut copied, end);
+                at = end;
+            }
+            // Link destinations keep their spelling: `\(` there is an
+            // escaped paren in a URL.
+            b']' if bytes.get(at + 1) == Some(&b'(') && !is_escaped(bytes, at) => {
+                let end = destination_close(bytes, at + 2).map_or(at + 2, |close| close + 1);
+                skip(&mut rewritten, source, &mut copied, end);
+                at = end;
+            }
+            b'<' if !is_escaped(bytes, at) => {
+                let end = autolink_end(bytes, at).unwrap_or(at + 1);
                 skip(&mut rewritten, source, &mut copied, end);
                 at = end;
             }
             b'\\' if !is_escaped(bytes, at) && matches!(bytes.get(at + 1), Some(b'(' | b'[')) => {
                 let display = bytes[at + 1] == b'[';
-                let glued = at > 0 && bytes[at - 1].is_ascii_alphanumeric();
+                // Glued to a word or a URL (`f\(x\)`, `x_\(1\)`): escaping.
+                let glued = at > 0
+                    && (bytes[at - 1].is_ascii_alphanumeric()
+                        || b"_/.-:=?&#%~+@".contains(&bytes[at - 1]));
                 let closer = if display { b']' } else { b')' };
-                let line_start = source[..at].rfind('\n').map_or(0, |nl| nl + 1);
-                let line = source[line_start..].trim_start();
-                let in_quote = line.starts_with('>');
-                // An ATX heading is one line: its formula closes on it.
-                let heading = line.starts_with('#') && opens_block(line, true);
-                let key = (closer, in_quote, heading);
+                let (in_quote, one_line) = code_spans.lines.at(source, at);
+                let key = (closer, in_quote, one_line);
                 let known_miss = misses.iter().any(|&(k, stop)| k == key && at + 2 < stop);
                 let close = if glued || known_miss {
                     None
                 } else {
-                    match math_closer(source, at + 2, closer, in_quote, heading) {
+                    match math_closer(source, at + 2, closer, in_quote, one_line) {
                         Ok(close) => Some(close),
                         Err(stop) => {
                             misses.retain(|&(k, _)| k != key);
@@ -371,9 +508,13 @@ fn math_closer(
             // Escape pairs (`\\`, `\{`) step over together, so the backslash
             // of a TeX line break never starts a closer.
             b'\\' if bytes.get(at + 1) == Some(&closer) => return Ok(at),
-            b'\\' => at += 2,
+            b'\\' if bytes.get(at + 1) != Some(&b'\n') => at += 2,
+            // A link destination's escaped parens aren't closers.
+            b']' if bytes.get(at + 1) == Some(&b'(') => {
+                at = destination_close(bytes, at + 2).map_or(at + 2, |close| close + 1);
+            }
             b'\n' => {
-                if one_line || opens_block(&source[at + 1..], in_quote) {
+                if one_line || paragraph_ends(source, at, in_quote) {
                     return Err(at);
                 }
                 at += 1;
@@ -384,19 +525,40 @@ fn math_closer(
     Err(bytes.len())
 }
 
+/// Whether the paragraph holding the newline at `nl` ends there: the next
+/// line opens a block, or is a table's header row (the line after it is a
+/// delimiter row).
+fn paragraph_ends(source: &str, nl: usize, in_quote: bool) -> bool {
+    let next = &source[nl + 1..];
+    opens_block(next, in_quote)
+        || next
+            .find('\n')
+            .is_some_and(|end| delimiter_row(&next[end + 1..], in_quote))
+}
+
 /// Whether a line ends the paragraph above it: a blank line, or (after up to
-/// three spaces) a fence, an ATX heading, a list item, a thematic break, or a
-/// block quote — unless the paragraph is itself quoted, where `>` continues
-/// it. Conservative: a false positive only leaves a formula's delimiters
-/// literal.
+/// three spaces) a fence, an ATX heading, a list item, a thematic break, a
+/// setext underline, a table delimiter row, an HTML block, or a block quote —
+/// unless the paragraph is itself quoted, where `>` continues it and the
+/// rules apply to what follows the markers. Conservative: a false positive
+/// only leaves a formula's delimiters literal.
 fn opens_block(line: &str, in_quote: bool) -> bool {
     let line = &line[..line.find('\n').unwrap_or(line.len())];
     let trimmed = line.trim_start_matches(' ');
+    if line.trim().is_empty() {
+        return true;
+    }
     if line.len() - trimmed.len() > 3 {
         return false;
     }
+    let trimmed = if in_quote {
+        trimmed.trim_start_matches(['>', ' '])
+    } else {
+        trimmed
+    };
     let trimmed = trimmed.trim_end();
     let bytes = trimmed.as_bytes();
+    let underline = |mark: u8| !bytes.is_empty() && bytes.iter().all(|&byte| byte == mark);
     let spaced = |at: usize| {
         bytes
             .get(at)
@@ -420,7 +582,106 @@ fn opens_block(line: &str, in_quote: bool) -> bool {
             && spaced(digits + 1)
         || thematic(b'*')
         || thematic(b'_')
+        || underline(b'-')
+        || underline(b'=')
+        || delimiter_row(trimmed, false)
+        || bytes.first() == Some(&b'<')
+            && bytes
+                .get(1)
+                .is_some_and(|&byte| byte.is_ascii_alphabetic() || b"/!?".contains(&byte))
         || (!in_quote && bytes.first() == Some(&b'>'))
+}
+
+/// A line that could be a table's delimiter row (`|---|:-:|`, `--|--`):
+/// only pipes, dashes, colons and spaces, with at least one dash.
+fn delimiter_row(line: &str, in_quote: bool) -> bool {
+    let line = line[..line.find('\n').unwrap_or(line.len())].trim();
+    let line = if in_quote {
+        line.trim_start_matches(['>', ' '])
+    } else {
+        line
+    };
+    line.contains('-') && line.bytes().all(|byte| b"|-: \t".contains(&byte))
+}
+
+/// The line holding byte `at`, without its newline.
+fn line_of(source: &str, at: usize) -> &str {
+    let start = source[..at].rfind('\n').map_or(0, |nl| nl + 1);
+    let end = source[at..].find('\n').map_or(source.len(), |nl| at + nl);
+    &source[start..end]
+}
+
+/// The paragraph context of the line holding a forward scan's position:
+/// whether it is quoted, and whether inline spans on it must close on it —
+/// an ATX heading or a table row is one line. Cached per line, and the line
+/// start found from the bytes scanned since the last call, so asking at every
+/// opener of a long line stays linear.
+#[derive(Default)]
+struct LineContext {
+    start: usize,
+    scanned: usize,
+    context: Option<(bool, bool)>,
+}
+
+impl LineContext {
+    fn at(&mut self, source: &str, at: usize) -> (bool, bool) {
+        if let Some(nl) = source[self.scanned..at].rfind('\n') {
+            self.start = self.scanned + nl + 1;
+            self.context = None;
+        }
+        self.scanned = at;
+        *self.context.get_or_insert_with(|| {
+            let line = source[self.start..].trim_start();
+            let heading = line.starts_with('#') && opens_block(line, true);
+            (line.starts_with('>'), heading || line.starts_with('|'))
+        })
+    }
+}
+
+/// Where inline code spans end, for a forward scan. A span closes on the
+/// next backtick run of its opening length within its paragraph — code
+/// spans never cross a block boundary — or the run stays literal. A failed
+/// search is remembered per run length (with its line context): no later
+/// run of that length before where it stopped can close either, since the
+/// search would have closed on it, so a paragraph of unclosed runs stays
+/// linear.
+#[derive(Default)]
+struct CodeSpans {
+    lines: LineContext,
+    misses: Vec<((usize, bool, bool), usize)>,
+}
+
+impl CodeSpans {
+    /// The byte after the span opened by the backtick run at `at` — or after
+    /// the run itself when it never closes.
+    fn end(&mut self, source: &str, at: usize) -> usize {
+        let bytes = source.as_bytes();
+        let run = backtick_run(bytes, at);
+        let (in_quote, one_line) = self.lines.at(source, at);
+        let key = (run, in_quote, one_line);
+        if self.misses.iter().any(|&(k, stop)| k == key && at < stop) {
+            return at + run;
+        }
+        match closing_backtick_run(source, at + run, run, in_quote, one_line) {
+            Ok(close) => close + run,
+            Err(stop) => {
+                self.misses.retain(|&(k, _)| k != key);
+                self.misses.push((key, stop));
+                at + run
+            }
+        }
+    }
+}
+
+/// The end of an autolink (`<https://…>`, `<a@b.c>`) opening at `at`: no
+/// spaces or angle brackets inside, and a scheme or an address.
+fn autolink_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let len = bytes[at + 1..]
+        .iter()
+        .position(|&byte| byte == b'>' || byte == b'<' || byte.is_ascii_whitespace())?;
+    let body = &bytes[at + 1..at + 1 + len];
+    (bytes[at + 1 + len] == b'>' && body.iter().any(|&byte| byte == b':' || byte == b'@'))
+        .then_some(at + len + 2)
 }
 
 /// Wrap inline link and image destinations that spell an absolute path with
@@ -441,10 +702,13 @@ fn rewrite_absolute_destinations(source: &str) -> Option<(String, OffsetMap)> {
     // it without copying, so the next splice stays contiguous.
     let mut copied = 0usize;
     let mut at = 0usize;
+    let mut code_spans = CodeSpans::default();
     while at < bytes.len() {
         if at == 0 || bytes[at - 1] == b'\n' {
-            if let Some(fence) = fence_open(&source[at..]) {
-                let end = skip_fenced_block(source, at, fence);
+            if let Some(end) = fence_open(&source[at..])
+                .map(|fence| skip_fenced_block(source, at, fence))
+                .or_else(|| skip_container_fence(source, at))
+            {
                 skip(&mut rewritten, source, &mut copied, end);
                 at = end;
                 continue;
@@ -458,11 +722,7 @@ fn rewrite_absolute_destinations(source: &str) -> Option<(String, OffsetMap)> {
         }
         match bytes[at] {
             b'`' if !is_escaped(bytes, at) => {
-                let run = backtick_run(bytes, at);
-                let end = match closing_backtick_run(bytes, at + run, run) {
-                    Some(close) => close + run,
-                    None => at + run,
-                };
+                let end = code_spans.end(source, at);
                 skip(&mut rewritten, source, &mut copied, end);
                 at = end;
             }
@@ -561,7 +821,9 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
         return None;
     }
     let len = bytes[indent..].iter().take_while(|&&b| b == fence).count();
-    (len >= 3).then_some((fence, len))
+    // A backtick fence's info string can't hold a backtick.
+    let info = &line[indent + len..line.find('\n').unwrap_or(line.len())];
+    (len >= 3 && !(fence == b'`' && info.contains('`'))).then_some((fence, len))
 }
 
 /// The byte after a fenced block's closing line (or the end of the source for
@@ -573,20 +835,96 @@ fn skip_fenced_block(source: &str, at: usize, (fence, len): (u8, usize)) -> usiz
         let end = line_end(source, cursor);
         let line = &bytes[cursor..end];
         let indent = line.iter().take_while(|&&byte| byte == b' ').count();
-        if indent <= 3 {
-            let run = line[indent..].iter().take_while(|&&b| b == fence).count();
-            let rest = line.get(indent + run..).unwrap_or_default();
-            if run >= len
-                && rest
-                    .iter()
-                    .all(|&byte| byte == b' ' || byte == b'\n' || byte == b'\r')
-            {
-                return end;
-            }
+        if indent <= 3 && closes_fence(&line[indent..], (fence, len)) {
+            return end;
         }
         cursor = end;
     }
     bytes.len()
+}
+
+/// Whether a line (from its first non-space byte) closes a fence.
+fn closes_fence(line: &[u8], (fence, len): (u8, usize)) -> bool {
+    let run = line.iter().take_while(|&&b| b == fence).count();
+    run >= len
+        && line[run..]
+            .iter()
+            .all(|&byte| byte == b' ' || byte == b'\n' || byte == b'\r')
+}
+
+/// A fence opened inside a block quote or a list item (`> ````, `- ````):
+/// the byte after its closing line, or the start of the first line that
+/// leaves its container (unquoted, or indented less than the item's
+/// content) — the skip never reaches past the container's end.
+fn skip_container_fence(source: &str, at: usize) -> Option<usize> {
+    let line = &source[at..line_end(source, at)];
+    let (width, quoted) = container_prefix(line)?;
+    let fence = fence_open(&line[width..])?;
+    let mut cursor = line_end(source, at);
+    while cursor < source.len() {
+        let end = line_end(source, cursor);
+        let next = &source[cursor..end];
+        let body = if quoted {
+            let trimmed = next.trim_start_matches(' ');
+            if !trimmed.starts_with('>') {
+                return Some(cursor);
+            }
+            trimmed.trim_start_matches(['>', ' '])
+        } else if next.trim().is_empty() {
+            cursor = end;
+            continue;
+        } else if next.bytes().take_while(|&byte| byte == b' ').count() < width {
+            return Some(cursor);
+        } else {
+            next.trim_start_matches(' ')
+        };
+        if closes_fence(body.as_bytes(), fence) {
+            return Some(end);
+        }
+        cursor = end;
+    }
+    Some(source.len())
+}
+
+/// The width of a line's block-quote and list-item markers, and whether it
+/// is quoted; `None` without any.
+fn container_prefix(line: &str) -> Option<(usize, bool)> {
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    let mut quoted = false;
+    loop {
+        let indent = bytes[at..].iter().take_while(|&&byte| byte == b' ').count();
+        if indent > 3 {
+            break;
+        }
+        let marker = at + indent;
+        let digits = bytes[marker..]
+            .iter()
+            .take_while(|&&byte| byte.is_ascii_digit())
+            .count();
+        let len = match bytes.get(marker) {
+            Some(b'>') => {
+                quoted = true;
+                1
+            }
+            Some(b'-' | b'*' | b'+') => 1,
+            Some(b'0'..=b'9')
+                if digits <= 9 && matches!(bytes.get(marker + digits), Some(b'.' | b')')) =>
+            {
+                digits + 1
+            }
+            _ => break,
+        };
+        let spaces = bytes[marker + len..]
+            .iter()
+            .take_while(|&&byte| byte == b' ')
+            .count();
+        if bytes[marker] != b'>' && spaces == 0 {
+            break;
+        }
+        at = marker + len + spaces;
+    }
+    (at > 0).then_some((at, quoted))
 }
 
 /// Whether a line opens indented code: four leading spaces or a tab. The
@@ -619,22 +957,31 @@ fn backtick_run(bytes: &[u8], at: usize) -> usize {
     bytes[at..].iter().take_while(|&&byte| byte == b'`').count()
 }
 
-/// The start of the next backtick run as long as `run`, if any: an inline
-/// code span either closes with its own run length or stays literal.
-fn closing_backtick_run(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
+/// The start of the next backtick run as long as `run` in the paragraph —
+/// or, as `Err`, where the search stopped (see [`math_closer`]).
+fn closing_backtick_run(
+    source: &str,
+    from: usize,
+    run: usize,
+    in_quote: bool,
+    one_line: bool,
+) -> Result<usize, usize> {
+    let bytes = source.as_bytes();
     let mut at = from;
     while at < bytes.len() {
-        if bytes[at] == b'`' {
-            let len = backtick_run(bytes, at);
-            if len == run {
-                return Some(at);
+        match bytes[at] {
+            b'`' => {
+                let len = backtick_run(bytes, at);
+                if len == run {
+                    return Ok(at);
+                }
+                at += len;
             }
-            at += len;
-        } else {
-            at += 1;
+            b'\n' if one_line || paragraph_ends(source, at, in_quote) => return Err(at),
+            _ => at += 1,
         }
     }
-    None
+    Err(bytes.len())
 }
 
 fn skip_destination_spaces(bytes: &[u8], at: usize) -> usize {
@@ -1112,9 +1459,12 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 /// Whether a `$…$` span (`tex` between the dollars, `next` the byte after
 /// the closer) is really prose that happens to hold two dollar signs:
 /// - Pandoc's currency rule: a closer glued to a digit is a price (`$5-$10`);
-/// - a span ending in `/` is a path join (`$HOME/$USER`) — no formula ends so;
+/// - a span ending in `/`, `:` or `@` joins shell variables
+///   (`$HOME/$USER`, `PATH=$PATH:$HOME`, `$USER@$HOST`) — no formula ends so;
 /// - an all-caps identifier whose closer runs into another identifier is a
-///   shell variable (`$FOO$BAR`), while `$AB$` or `$n$th` stay math.
+///   shell variable (`$FOO$BAR`), while `$AB$` or `$n$th` stay math;
+/// - TeX has no use for a backtick: one inside belongs to a code span the
+///   dollars straddle (`$HOME and `$PATH``).
 fn not_math(tex: &str, next: Option<u8>) -> bool {
     let shell_name = tex.len() > 1
         && tex
@@ -1122,7 +1472,8 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         && tex.as_bytes()[0].is_ascii_uppercase();
     next.is_some_and(|b| b.is_ascii_digit())
-        || tex.ends_with('/')
+        || tex.ends_with(['/', ':', '@'])
+        || tex.contains('`')
         || (shell_name && next.is_some_and(|b| b.is_ascii_uppercase() || b == b'_'))
 }
 
@@ -1570,6 +1921,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Random documents over the characters the pre-passes and math rules
+    /// key on, streamed in every chunk size: the canonical tree must equal a
+    /// one-shot parse, and the display tree a one-shot `set_text`'s.
+    #[test]
+    fn incremental_matches_full_on_random_documents() {
+        const PIECES: &[&str] = &[
+            "\\", "(", ")", "[", "]", "$", "$$", "`", "```", "-", "=", "|", "#", ">", "*", "_",
+            "\n", "\n\n", " ", " ", "é", "漢", "x", "y", "1", ":", "/", "**", "\\(", "\\)", "\\[",
+            "\\]", "|---|", "](u)", "~~", "\n> ", "\n- ", "\n1. ", "\n    ", "\t", "<a:b>", "<p>",
+            "$5", "$HOME", "@", "'", ":-:",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failures = Vec::new();
+        for case in 0..8000 {
+            let len = 8 + (next() % 56) as usize;
+            let doc: String = (0..len)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            let full = parse_full(&doc);
+            let mut settled = IncrementalParser::new();
+            settled.set_text(&doc);
+            let chunk = 1 + case % 17;
+            let streamed = stream(chunk, &doc);
+            if streamed.tree() != &full || streamed.display_tree() != settled.display_tree() {
+                failures.push((chunk, doc));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} diverged: {failures:#?}",
+            failures.len()
+        );
     }
 
     #[test]
@@ -2272,6 +2663,49 @@ mod math_tests {
             para("the $n$th one"),
             [plain("the "), math("n"), plain("th one")]
         );
+        // Joined with `:` or `@`, as in shell lines.
+        assert_eq!(
+            para("PATH=$PATH:$HOME/bin"),
+            [plain("PATH=$PATH:$HOME/bin")]
+        );
+        assert_eq!(para("'$USER@$HOST'"), [plain("'$USER@$HOST'")]);
+        assert_eq!(
+            para("so $x$ holds"),
+            [plain("so "), math("x"), plain(" holds")]
+        );
+    }
+
+    /// Dollars that aren't math parse exactly as they did without math
+    /// support: a rejected span's markup still applies.
+    #[test]
+    fn rejected_dollar_spans_keep_their_markdown() {
+        let without_math = |source: &str| parse_with(source, 0, options() - Options::ENABLE_MATH);
+        for source in [
+            "**$5** to **$10**",
+            "from $5 to [$10](u)",
+            "costs $5 (`$4` with code)",
+            "costs $5-$10 total, between $5 and $10",
+            "$5 *a* $6 *b* $7 *c* $8",
+            "pay $5, get _$10_ back and ~~$2~~",
+            "PATH=$PATH:$HOME/bin and `$HOME`",
+            "'$USER@$HOST' **now**",
+            "> quoted $5 **b** $6\n",
+            "- $1 [x](u) $2\n- $3 *i* $4\n",
+            "| a | b |\n|---|---|\n| $5 **x** | $6 |\n",
+            "# $5 *off* $9\n",
+        ] {
+            assert_eq!(parse_full(source), without_math(source), "{source:?}");
+        }
+        // Mixed with real math, each span is judged on its own.
+        let runs = para("**$5** and $x$ then **$10**");
+        assert!(runs.iter().any(|run| run.style.bold && run.text == "$5"));
+        assert!(runs.contains(&math("x")));
+        assert!(runs.iter().any(|run| run.style.bold && run.text == "$10"));
+        // Ranges still point at the original source.
+        let source = "**$5** to **$10**\n\nnext\n";
+        let tree = parse_full(source);
+        assert_eq!(&source[tree.blocks[0].range.clone()], "**$5** to **$10**\n");
+        assert_eq!(&source[tree.blocks[1].range.clone()], "next\n");
     }
 
     #[test]
@@ -2298,7 +2732,10 @@ mod math_tests {
     #[test]
     fn unclosed_latex_openers_scan_in_linear_time() {
         // 20k openers with no closer in their paragraph: each would rescan it.
+        // Likewise a long line of backtick runs, each asking for its line's
+        // context.
         let mut source = "\\(".repeat(20_000);
+        source.push_str(&"`a` ``b ".repeat(10_000));
         source.push_str(" tail\n\nand \\(y\\) after");
         let started = std::time::Instant::now();
         let (out, _) = rewrite_math_delimiters(&source).unwrap();
@@ -2367,6 +2804,153 @@ mod math_tests {
             panic!("indented");
         };
         assert_eq!(code, "\\(x\\)");
+    }
+
+    /// Random prose where every `$` is a price (and no backslash can form a
+    /// LaTeX delimiter): whatever spans pulldown pairs, the result must match
+    /// a parse without math.
+    #[test]
+    fn random_prices_parse_as_without_math() {
+        const PIECES: &[&str] = &[
+            "$5", "$10", "$1.50", " ", " ", "a", "b c", "**", "*", "_", "~~", "`", "``", "[",
+            "](u)", "]", "(", ")", "\\*", "\n", "\n\n", "\n- ", "\n> ", "|", "é", "-", ":",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let len = 4 + (next() % 40) as usize;
+            let source: String = (0..len)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            assert_eq!(
+                parse_full(&source),
+                parse_with(&source, 0, options() - Options::ENABLE_MATH),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn latex_delimiters_never_rewrite_code_blocks() {
+        // A stray backtick run can't pair past its paragraph into a fence.
+        let tree = blocks("Wrap it in ```latex like this:\n\n```latex\n\\(x\\) and \\[y\\]\n```\n");
+        assert_eq!(
+            tree[1],
+            Block::CodeBlock {
+                language: Some("latex".into()),
+                code: "\\(x\\) and \\[y\\]".into()
+            }
+        );
+        // Fences in a quote or a list item keep their spelling too.
+        let Block::BlockQuote { children } = &blocks("> ```\n> \\(x\\)\n> ```\n")[0] else {
+            panic!("quote");
+        };
+        assert_eq!(
+            children[0],
+            Block::CodeBlock {
+                language: None,
+                code: "\\(x\\)".into()
+            }
+        );
+        let Block::List { items, .. } = &blocks("- ```\n  \\[y\\]\n  ```\n")[0] else {
+            panic!("list");
+        };
+        assert_eq!(
+            items[0][0],
+            Block::CodeBlock {
+                language: None,
+                code: "\\[y\\]".into()
+            }
+        );
+    }
+
+    #[test]
+    fn latex_delimiters_skip_link_destinations() {
+        let runs = para("[w](https://en.wikipedia.org/wiki/Foo_\\(bar\\))");
+        assert_eq!(
+            runs[0].style.link.as_deref(),
+            Some("https://en.wikipedia.org/wiki/Foo_(bar)")
+        );
+        assert_eq!(runs[0].text, "w");
+        // Escapes glued to URL and identifier characters stay escapes.
+        assert_eq!(para("x_\\(1\\) and a/\\(b\\)"), [plain("x_(1) and a/(b)")]);
+        // Autolinks and reference definitions keep their spelling.
+        let runs = para("<https://x.dev/\\(a\\)> \\(y\\)");
+        assert_eq!(runs[0].style.link.as_deref(), Some("https://x.dev/\\(a\\)"));
+        assert_eq!(runs.last(), Some(&math("y")));
+        // An opener before the link doesn't pair with a paren in its URL.
+        let runs = para("\\(x [w](https://x.dev/Foo_\\(bar\\))");
+        assert_eq!(runs[0], plain("(x "));
+        assert_eq!(
+            runs[1].style.link.as_deref(),
+            Some("https://x.dev/Foo_(bar)")
+        );
+        let runs = para("[w]\n\n[w]: https://x.dev/\\(a\\)\n");
+        assert_eq!(runs[0].style.link.as_deref(), Some("https://x.dev/(a)"));
+    }
+
+    #[test]
+    fn latex_delimiters_stop_at_setext_underlines_and_tables() {
+        // An underline ends the paragraph: no formula spans it.
+        let tree = blocks("a \\(x\n---\ny\\)\n");
+        assert_eq!(
+            tree[0],
+            Block::Heading {
+                level: 2,
+                runs: vec![plain("a (x")]
+            }
+        );
+        assert_eq!(tree[1], paragraph(vec![plain("y)")]));
+        let tree = blocks("a \\(x\n===\ny\\)\n");
+        assert!(matches!(tree[0], Block::Heading { level: 1, .. }));
+        // A table's header row starts a new block.
+        let tree = blocks("p \\(x\n| a |\n|:-:|\n| y\\) |\n");
+        assert_eq!(tree[0], paragraph(vec![plain("p (x")]));
+        assert!(matches!(tree[1], Block::Table { .. }));
+    }
+
+    /// Minimized streaming divergences (some from review, the rest from the
+    /// randomized parity test): stray backticks, setext underlines, escaped
+    /// newlines, fences in quotes and list items, HTML blocks.
+    #[test]
+    fn streamed_regressions_match_full_parse() {
+        for source in [
+            "a ` b\n\nc\n\n\\(x\\) `y`\n",
+            "a \\(x\n---\ny\\)\n\nz\n\nw\n",
+            "a \\(x\n|---|\ny\\)\n\nz\n\nw\n",
+            "Wrap it in ```latex like this:\n\n```latex\n\\(x\\) and \\[y\\]\n```\n",
+            "\\(\\\n\n=\\)\n\n](",
+            "```\\`\n>\n\\[y\\]",
+            "```\\`\n\n\\[*\\]\n\n漢|",
+            ">```\\[\\\n\\]\n\n)*",
+            ">```\n\\[>\\]```\n> ",
+            "\\(`\n    \n    \\)\n-]",
+            "1. <p>\\('\n`\\)\n- ``",
+            "1. # \\[漢\n\\]\n> ",
+            "><p>\\(\n    x\n\\)",
+            "<p\n```\n\n>\n\\(|\\)",
+            "- \\[\n    <p\n\\]\n\né\n",
+        ] {
+            let full = parse_full(source);
+            for chunk in 1..=17 {
+                let mut parser = IncrementalParser::new();
+                let mut start = 0;
+                while start < source.len() {
+                    let mut end = (start + chunk).min(source.len());
+                    while !source.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    parser.append(&source[start..end]);
+                    start = end;
+                }
+                assert_eq!(parser.tree(), &full, "chunk {chunk}: {source:?}");
+            }
+        }
     }
 
     #[test]

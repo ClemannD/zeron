@@ -18,13 +18,15 @@
 //!   completed (`**a*` → `**a**`);
 //! - inline code backtick parity (fence-shaped tails never reach here — the
 //!   parser gates mending on the last block not being a code block);
-//! - math (`$…$`, `$$…$$`) shields its TeX like a code span — `a_1` or `x^*`
-//!   inside never opens emphasis — but an unclosed formula is *not* closed:
-//!   half a formula would render broken, so it stays literal until its own
-//!   closer streams in. Only a half-streamed display closer (`$$x$`) is
-//!   completed. A display formula also ends any emphasis or link text opened
-//!   before it (closing across it would fold the formula inline), and a lone
-//!   `$` before a digit is a price, not an opener;
+//! - math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) shields its TeX like a code
+//!   span — `a_1` or `x^*` inside never opens emphasis — but an unclosed
+//!   formula is *not* closed: half a formula would render broken, so it stays
+//!   literal until its own closer streams in. Only a half-streamed display
+//!   closer (`$$x$`) is completed. A display formula also ends any emphasis
+//!   or link text opened before it (closing across it would fold the formula
+//!   inline). A lone `$` before a digit is a price and one before a shell
+//!   variable (`$HOME/bin`) is prose, not openers, and an unclosed inline
+//!   formula with no closer ahead shields only its own line;
 //! - links/images: the URL never renders — `[text](partial` and a bare
 //!   `[text` both mend to `[text](`[`PENDING_LINK_URL`]`)`, so the link text
 //!   shows styled immediately and the settling URL can't collapse the line;
@@ -83,11 +85,38 @@ pub fn close_hanging(text: &str) -> Option<String> {
     // Char index of a lone `$` ending open display math — the first half of
     // its closing `$$`.
     let mut half_closer: Option<usize> = None;
+    // Open `\(…` or `\[…` formula: the char that closes it after a `\`.
+    // Shields like `math`, and is never closed either.
+    let mut latex: Option<char> = None;
+    // The last places an inline formula could still close: an unclosed one
+    // with no closer ahead shields only its own line.
+    let last_dollar = cs
+        .iter()
+        .enumerate()
+        .rposition(|(j, &(_, c))| c == '$' && j > 0 && !cs[j - 1].1.is_whitespace());
+    let last_paren = cs.windows(2).rposition(|w| w[0].1 == '\\' && w[1].1 == ')');
 
     let mut i = 0;
     while i < n {
         let c = cs[i].1;
         if code.is_none() && c == '\\' {
+            let next = at(i + 1);
+            if let Some(closer) = latex {
+                if next == Some(closer) {
+                    latex = None;
+                }
+            } else if math.is_none()
+                && matches!(next, Some('(' | '['))
+                && !i.checked_sub(1).is_some_and(|p| glued_to_word(cs[p].1))
+            {
+                // The parser reads `\(…\)` / `\[…\]` as math (and a
+                // display formula ends emphasis opened before it, like `$$`).
+                if next == Some('[') {
+                    delims.clear();
+                    brackets.clear();
+                }
+                latex = Some(if next == Some('(') { ')' } else { ']' });
+            }
             // Escaped char: both literal; the escapee still counts as content.
             if i + 1 < n {
                 last_content = Some(i + 1);
@@ -96,7 +125,21 @@ pub fn close_hanging(text: &str) -> Option<String> {
             i += 2;
             continue;
         }
+        if let Some(closer) = latex {
+            if c == '\n' && closer == ')' && last_paren.is_none_or(|last| last < i) {
+                latex = None;
+            } else if !c.is_whitespace() {
+                last_content = Some(i);
+            }
+            i += 1;
+            continue;
+        }
         if let Some((open, _)) = math {
+            if c == '\n' && open == 1 && last_dollar.is_none_or(|last| last < i) {
+                math = None;
+                i += 1;
+                continue;
+            }
             if c == '$' {
                 let run = run_len(&cs, i);
                 // Inline math closes on a `$` glued to its content; display
@@ -144,7 +187,9 @@ pub fn close_hanging(text: &str) -> Option<String> {
                     delims.clear();
                     brackets.clear();
                     math = Some((2, i + run));
-                } else if next.is_some_and(|c| !c.is_whitespace() && !c.is_ascii_digit()) {
+                } else if next.is_some_and(|c| !c.is_whitespace() && !c.is_ascii_digit())
+                    && !shell_variable(&cs[i + 1..])
+                {
                     math = Some((1, i + run));
                 }
                 last_content = Some(i + run - 1);
@@ -256,6 +301,27 @@ pub fn close_hanging(text: &str) -> Option<String> {
     // same reason).
     let end = text.trim_end().len();
     Some(format!("{}{closers}{}", &text[..end], &text[end..]))
+}
+
+/// Whether the text after a `$` spells a shell variable rather than a
+/// formula: an all-caps name (`$HOME`, `$PATH_2`) that ends the text or runs
+/// into a space or a joining character, where `$ABC$` would close a formula.
+fn shell_variable(after: &[(usize, char)]) -> bool {
+    let name = after
+        .iter()
+        .take_while(|&&(_, c)| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        .count();
+    name > 0
+        && !after[0].1.is_ascii_digit()
+        && after.get(name).is_none_or(|&(_, c)| {
+            c.is_whitespace() || matches!(c, '/' | ':' | '@' | '.' | ',' | ';' | '\'' | '"' | ')')
+        })
+}
+
+/// A character an escaped `\(` or `\[` glued to is markdown escaping, not
+/// math (mirrors the parser's rewrite).
+fn glued_to_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_/.-:=?&#%~+@".contains(c)
 }
 
 fn run_len(cs: &[(usize, char)], i: usize) -> usize {
@@ -449,6 +515,43 @@ mod tests {
         mends("$$x^2$", "$$x^2$$");
         mends("$$\nx_1\n$", "$$\nx_1\n$$");
         stays("$$x$$");
+    }
+
+    #[test]
+    fn shell_variables_open_no_formula() {
+        mends(
+            "set $HOME and [docs](https://x.dev/lo",
+            "set $HOME and [docs](zeron:pending-link)",
+        );
+        mends("echo $PATH:$HOME/bin **bo", "echo $PATH:$HOME/bin **bo**");
+        mends("'$USER@$HOST' then *em", "'$USER@$HOST' then *em*");
+        // All-caps formulas still shield.
+        stays("so $ABC_*");
+        stays("so $X_1$ and $A_i *b");
+    }
+
+    #[test]
+    fn unclosed_inline_math_shields_only_its_line() {
+        mends("cost $x_1\n**bold", "cost $x_1\n**bold**");
+        // A closer further down keeps the formula open across the line.
+        stays("so $x\n_1$ done");
+        stays("so \\(x\n_1\\) done");
+        mends("so \\(x_1\nthen **bo", "so \\(x_1\nthen **bo**");
+        // Display math stays shielded to the end.
+        stays("$$\nx_1 *\ny");
+    }
+
+    #[test]
+    fn latex_delimiters_shield_like_dollars() {
+        mends("\\(x^*\\) then **bo", "\\(x^*\\) then **bo**");
+        mends("\\[x_*\\] then *em", "\\[x_*\\] then *em*");
+        stays("so \\(a_1 * b");
+        stays("so \\[\\sum_{i} x_i^*");
+        // A display formula ends emphasis opened before it.
+        stays("**a \\[x\\] b");
+        // Escapes glued to a word are not math.
+        mends("f\\(x\\) **bo", "f\\(x\\) **bo**");
+        mends("arr\\[0\\] *em", "arr\\[0\\] *em*");
     }
 
     #[test]
