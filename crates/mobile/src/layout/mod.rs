@@ -27,7 +27,7 @@ use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_text::WidthCache;
 
 use display::{DisplayBuilder, MathFace, RowDisplay};
-use markdown::{Ctx, MathSettings, Px};
+use markdown::{Ctx, MathFailures, MathSettings, Px};
 pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
@@ -546,6 +546,8 @@ pub(crate) struct Worker {
     input: TranscriptInput,
     width: f32,
     math: MathSettings,
+    /// Formulas zatex rejected (bounded; see `MathFailures`).
+    math_failures: MathFailures,
     revision: u64,
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
@@ -567,6 +569,7 @@ impl Worker {
             input: TranscriptInput::default(),
             width: 0.0,
             math: MathSettings::default(),
+            math_failures: MathFailures::default(),
             revision: 0,
             shared,
             listener: Some(listener),
@@ -677,6 +680,7 @@ impl Worker {
                 typo: &mut self.typo,
                 cache: &mut self.cache,
                 math: self.math,
+                math_failures: &mut self.math_failures,
             };
             self.builder.build(&mut ctx, &self.input)
         };

@@ -776,6 +776,70 @@ fn invalid_math_falls_back_to_source() {
     assert!(d.boxes.iter().any(|b| b.color == display::ColorRole::CodeBackground));
 }
 
+/// A runaway formula (the reviewer's `\\`×8000: thousands of empty lines)
+/// is rejected by its extent and shows as source — no taller than that
+/// source as inline code (~10,000pt at 390pt), not a ~198,000pt canvas; as
+/// display math it's a one-line `math` code block.
+#[test]
+fn runaway_math_falls_back_to_a_bounded_row() {
+    let tex = r"\\".repeat(8000);
+    let height = |md: &str| {
+        let mut w = worker(390.0);
+        w.input = transcript_one(md);
+        let frame = w.pass();
+        let d = frame.display(0).unwrap();
+        assert!(d.glyphs.is_empty(), "rendered as source");
+        assert!(d.text.contains(&tex[..64]), "source shown");
+        assert!((frame.total - d.height) < 100.0, "one row");
+        (d.height, w.math_failures.len())
+    };
+    let (inline, failures) = height(&format!("Hi ${tex}$"));
+    assert_eq!(failures, 1);
+    let (code, _) = height(&format!("Hi `{tex}`"));
+    assert!(inline <= code + 1.0 && inline < 12_000.0, "inline {inline} vs code {code}");
+    // Long display source wraps rather than becoming one huge scrolling line.
+    let (display, failures) = height(&format!("$${tex}$$"));
+    assert_eq!(failures, 1);
+    assert!(display < 12_000.0, "display {display}");
+    let d = rows_of(&format!("$${tex}$$"), 390.0).remove(0);
+    assert!(d.scrollers.iter().all(|s| s.content_width < 5_000.0), "{:?}", d.scrollers.iter().map(|s| s.content_width).collect::<Vec<_>>());
+    // Short failures keep the `math` code block (its label and bare source).
+    let d = rows_of(r"$$\foo{x}$$", 390.0).remove(0);
+    assert!(d.text.contains("math") && d.text.contains(r"\foo{x}") && !d.text.contains("$$"), "{}", d.text);
+}
+
+/// A formula zatex rejected is remembered: preparing its row again skips
+/// layout; the memory stays bounded at `CAP` keys, oldest out first.
+#[test]
+fn failed_formulas_are_cached_and_bounded() {
+    let md = r"Bad $\foo{x}$ and again $\foo{x}$, display: ";
+    let mut w = worker(390.0);
+    w.input = transcript_one(&format!("{md}\n\n$$\\foo{{x}}$$"));
+    let first = w.pass().display(0).unwrap();
+    // Inline and display are separate keys; the repeat is a hit.
+    assert_eq!(w.math_failures.len(), 2);
+    assert_eq!(w.math_failures.hits, 1);
+    w.rebuild();
+    let again = w.pass().display(0).unwrap();
+    assert_eq!(w.math_failures.len(), 2);
+    assert_eq!(w.math_failures.hits, 4, "all three formulas skipped layout");
+    assert_eq!(first.text, again.text, "same fallback");
+    // Another face or size is another key.
+    assert!(w.set_math(MathSettings::new(true, zatex::bundled::Face::StixTwo, 100)));
+    w.pass();
+    assert_eq!(w.math_failures.len(), 4);
+    // Bounded: past CAP the oldest are evicted.
+    let many: String = (0..MathFailures::CAP + 50).map(|i| format!("$\\foo{{{i}}}$ ")).collect();
+    w.input = transcript_one(&many);
+    w.pass();
+    assert_eq!(w.math_failures.len(), MathFailures::CAP);
+    // Good formulas are never recorded.
+    let mut ok = worker(390.0);
+    ok.input = transcript_one(r"Fine $x^2$ here.");
+    ok.pass();
+    assert_eq!(ok.math_failures.len(), 0);
+}
+
 /// Half-streamed formulas fall back to their source and settle into the same
 /// rows a fresh parse lays out.
 #[test]

@@ -12,6 +12,10 @@ final class RowModel: @unchecked Sendable {
     let boxesByLayer: [[Int]]
     /// Math glyphs per layer.
     let glyphsByLayer: [[Int]]
+    /// The math fonts those glyphs name, by table index — resolved here, off
+    /// the main thread (a face's first use copies its ~1–2 MB out of the
+    /// core), so drawing only reads loaded fonts.
+    private let mathFonts: [UInt8: CTFont]
     /// Overflow fades per layer, each with the runs it masks. Those runs are
     /// painted through the fade instead of in the plain pass.
     let fadesByLayer: [[(fade: Int, runs: [Int])]]
@@ -43,10 +47,16 @@ final class RowModel: @unchecked Sendable {
             boxes[box.scroller.map { Int($0) + 1 } ?? 0].append(i)
         }
         var glyphs = Array(repeating: [Int](), count: layers)
+        var mathFonts: [UInt8: CTFont] = [:]
+        var unknown = Set<UInt8>()
         for (i, g) in display.glyphs.enumerated() {
             glyphs[g.scroller.map { Int($0) + 1 } ?? 0].append(i)
+            if mathFonts[g.font] == nil, !unknown.contains(g.font) {
+                if let font = Fonts.mathFont(g.font) { mathFonts[g.font] = font } else { unknown.insert(g.font) }
+            }
         }
         self.glyphsByLayer = glyphs
+        self.mathFonts = mathFonts
         var fades = Array(repeating: [(fade: Int, runs: [Int])](), count: layers)
         var faded = Set<Int>()
         for (fi, f) in display.fades.enumerated() {
@@ -91,7 +101,7 @@ final class RowModel: @unchecked Sendable {
     /// scaled from the face's reference size to the glyph's.
     private func drawGlyph(_ i: Int, in ctx: CGContext) {
         let g = display.glyphs[i]
-        guard let font = Fonts.mathFont(g.font) else { return }
+        guard let font = mathFonts[g.font] else { return }
         var glyph = CGGlyph(g.glyph)
         var origin = CGPoint.zero
         let scale = CGFloat(g.size) / Fonts.mathReferenceSize

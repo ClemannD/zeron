@@ -6,7 +6,7 @@
 //! same geometry as primitives. One routine for both means a row's measured
 //! height and its painted content can never disagree.
 
-use zeron_markdown::parser::{Block, InlineRun, TableAlign};
+use zeron_markdown::parser::{Block, InlineRun, InlineStyle, TableAlign};
 use zeron_text::{InlineBox, OverflowWrap, PrepareOptions, Prepared, Span, WhiteSpace, WidthCache, line_growth};
 
 use super::display::{ColorRole, Decoration, DisplayBuilder, TextRun, WidgetKind};
@@ -16,6 +16,77 @@ pub(crate) struct Ctx<'a> {
     pub typo: &'a mut Typography,
     pub cache: &'a mut WidthCache,
     pub math: MathSettings,
+    pub math_failures: &'a mut MathFailures,
+}
+
+/// Formulas zatex rejected, so preparing their rows again (a rebuild, a
+/// streaming update, the same bad formula repeated) skips straight to the
+/// source fallback instead of paying the failure again — some inputs only
+/// fail after real work (a runaway `\\` stack fails on its extent). An LRU
+/// of `CAP` fixed-size keys: a hash of (source, display, face, size), so its
+/// memory is `CAP × 8` bytes whatever the sources. A hash collision would
+/// show a good formula as source — at 64 bits, never in practice. Successes
+/// aren't kept: their rows hold them.
+#[derive(Default)]
+pub(crate) struct MathFailures {
+    /// Most recently used last.
+    keys: std::collections::VecDeque<u64>,
+    pub hits: u64,
+}
+
+impl MathFailures {
+    pub const CAP: usize = 256;
+
+    fn key(tex: &str, display: bool, face: zatex::bundled::Face, size: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        (tex, display, face, size.to_bits()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Whether `key` failed before (and mark it recently used).
+    fn known(&mut self, key: u64) -> bool {
+        let Some(i) = self.keys.iter().rposition(|k| *k == key) else { return false };
+        self.keys.remove(i);
+        self.keys.push_back(key);
+        self.hits += 1;
+        true
+    }
+
+    fn insert(&mut self, key: u64) {
+        if self.keys.len() >= Self::CAP {
+            self.keys.pop_front();
+        }
+        self.keys.push_back(key);
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
+/// `tex` laid out per the math settings at `size`, or None for its source
+/// fallback (math off, or zatex can't render it — remembered in
+/// `ctx.math_failures`).
+/// Longest display-math source shown as a (non-wrapping) `math` code block
+/// when it can't be typeset; longer source wraps as inline code instead.
+const MATH_SOURCE_BLOCK_MAX: usize = 512;
+
+fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<zatex::Formula> {
+    if !ctx.math.enabled {
+        return None;
+    }
+    let key = MathFailures::key(tex, display, ctx.math.face, size);
+    if ctx.math_failures.known(key) {
+        return None;
+    }
+    let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
+    let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok();
+    if formula.is_none() {
+        ctx.math_failures.insert(key);
+    }
+    formula
 }
 
 /// How formulas render: in `face` when `enabled`, else as their source (an
@@ -170,9 +241,7 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         // zatex can't render (an unknown command, a half-streamed formula),
         // or any with math rendering off, shows as a code chip, delimiters
         // and all, so nothing is lost.
-        let formula = (s.math && ctx.math.enabled)
-            .then(|| zatex::bundled::layout(&content, ctx.math.face, &zatex::Options::inline(math_size)).ok())
-            .flatten();
+        let formula = if s.math { layout_math(ctx, &content, false, math_size) } else { None };
         let chip = s.code || (s.math && formula.is_none());
         let style = if chip {
             code
@@ -306,14 +375,23 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
         Block::CodeBlock { language, code } => PBlock::Code(Box::new(prepare_code(ctx, language.as_deref(), code))),
         // Laid out once here, at body size (scaled per the math setting);
         // source zatex can't render (or any, with math rendering off) shows
-        // as a `math` code block.
-        Block::Math { tex } => match ctx.math.enabled.then(|| zatex::bundled::layout(tex, ctx.math.face, &zatex::Options::display(ctx.math.size(ctx.typo.px(TYPE.body.0))))) {
-            Some(Ok(formula)) => PBlock::Math(Box::new(PMath {
-                formula,
-                color: if muted { ColorRole::TextSecondary } else { ColorRole::Text },
-            })),
-            _ => PBlock::Code(Box::new(prepare_code(ctx, Some("math"), tex))),
-        },
+        // as a `math` code block — or, when long, as wrapping code text: a
+        // code block never wraps, and its scroller's canvas spans the whole
+        // line (a 16 KB formula would be a ~360 MB backing store at @3x).
+        Block::Math { tex } => {
+            let size = ctx.math.size(ctx.typo.px(TYPE.body.0));
+            match layout_math(ctx, tex, true, size) {
+                Some(formula) => PBlock::Math(Box::new(PMath {
+                    formula,
+                    color: if muted { ColorRole::TextSecondary } else { ColorRole::Text },
+                })),
+                None if tex.len() <= MATH_SOURCE_BLOCK_MAX => PBlock::Code(Box::new(prepare_code(ctx, Some("math"), tex))),
+                None => {
+                    let source = InlineRun { text: format!("$${tex}$$"), style: InlineStyle { code: true, ..InlineStyle::default() } };
+                    PBlock::Text(prepare_runs(ctx, &[source], TextKind::Body, muted))
+                }
+            }
+        }
         Block::BlockQuote { children } => PBlock::Quote(
             children.iter().map(|b| prepare_block(ctx, b, depth, true)).collect(),
         ),

@@ -67,8 +67,9 @@ enum Fonts {
 
     /// The core's math faces, by table index (0 Fira Math, 1 STIX Two Math,
     /// …, whichever face the setting picks; glyph ids index these exact
-    /// bytes), each at `mathReferenceSize`. Loaded when a glyph first names
-    /// its index — a face nobody picks is never copied out of the core — and
+    /// bytes), each at `mathReferenceSize`. Loaded when a row model first
+    /// names its index (models build on the prefetch queue, so drawing never
+    /// pays the copy) — a face nobody picks is never copied out of the core — and
     /// kept; a failed load is remembered as nil so it's never retried. Never
     /// registered: they're drawn by glyph id, not by name. Glyphs draw at any
     /// size by scaling the context — no per-size fonts, since shrunk formulas
@@ -81,7 +82,8 @@ enum Fonts {
     static let mathReferenceSize: CGFloat = 16
 
     /// Math font `index` at `mathReferenceSize` (nil: unknown face).
-    /// Thread-safe: prefetch and drawing both resolve glyph fonts.
+    /// Thread-safe: row models resolve glyph fonts on the prefetch queue (and
+    /// on main for a row needed before its prefetch lands).
     static func mathFont(_ index: UInt8) -> CTFont? {
         mathLock.lock()
         defer { mathLock.unlock() }
