@@ -875,6 +875,26 @@ pub fn table_columns(content_widths: &[f32]) -> TableColumns {
     }
 }
 
+/// `runs` (covering a text in order) cut to the byte range `range` of it.
+fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for run in runs {
+        let (start, end) = (at.max(range.start), (at + run.len).min(range.end));
+        if start < end {
+            out.push(TextRun {
+                len: end - start,
+                ..run.clone()
+            });
+        }
+        at += run.len;
+        if at >= range.end {
+            break;
+        }
+    }
+    out
+}
+
 /// Element/cache discriminator for a table cell (row-major under the block ix).
 fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
     ix * 100_000 + r * 100 + c
@@ -922,6 +942,7 @@ fn render_table(
     // column may not shrink below it (its slot would wrap and the formula
     // paint over the next column).
     let mut widest_formula = vec![0.0f32; cols];
+    let cell_font_size = crate::typography::ui_rems(MD_TEXT_SIZE).to_pixels(window.rem_size());
     for (r, row) in all.iter().enumerate() {
         let weight = if has_header && r == 0 {
             TABLE_HEADER_WEIGHT
@@ -935,9 +956,26 @@ fn render_table(
                 continue;
             };
             let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
-            for slot in &flat.math {
-                let span = super::math::span(&slot.formula);
-                let width = (span.end - span.start) * slot.scale * MD_TEXT_SIZE;
+            // The unbreakable word around each inline formula (its slot's
+            // NBSPs plus any text glued to it: `cost=$F$`), shaped at the
+            // size the cell really sets (`MD_TEXT_SIZE` rems).
+            for slot in flat.math.iter().filter(|slot| !slot.display) {
+                let breaks = |c: char| c.is_whitespace() && c != '\u{A0}';
+                let start = flat.text[..slot.range.start]
+                    .char_indices()
+                    .rev()
+                    .find(|&(_, c)| breaks(c))
+                    .map_or(0, |(at, c)| at + c.len_utf8());
+                let end = flat.text[slot.range.end..]
+                    .find(breaks)
+                    .map_or(flat.text.len(), |at| slot.range.end + at);
+                let word = &flat.text[start..end];
+                let runs = slice_runs(&flat.runs, start..end);
+                let width = f32::from(
+                    text_system
+                        .shape_line(word.to_string().into(), cell_font_size, &runs, None)
+                        .width(),
+                );
                 if width.is_finite() {
                     widest_formula[c] = widest_formula[c].max(width.ceil());
                 }
@@ -1004,6 +1042,10 @@ fn render_table(
         let mut row_el = div().flex().flex_row();
         for (c, cell_flat) in row.iter().enumerate() {
             let mut cell = div()
+                // A cell's content never paints into its neighbors: a formula
+                // whose slot still wraps (a narrow viewport) is cut at the
+                // cell, not drawn over the next column.
+                .overflow_hidden()
                 .flex_grow(geo.naturals[c])
                 .flex_shrink(geo.naturals[c])
                 .flex_basis(px(0.0))

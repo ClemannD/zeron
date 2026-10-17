@@ -1175,3 +1175,18 @@ fn oversized_formulas_show_as_source() {
     let d = rows_of(r"$$\sum_{i=1}^n i = \frac{n(n+1)}{2}$$", 390.0).remove(0);
     assert!(!d.glyphs.is_empty());
 }
+
+/// A table's rows share one scrolling canvas, so a tall formula in a cell
+/// shows as source; the same formula in prose still renders. Long display
+/// derivations narrower than the column render (only area is capped).
+#[test]
+fn table_cells_hold_formulas_short_and_long_derivations_render() {
+    let tall = r"\begin{matrix}a\\b\\c\\d\\e\\f\\g\\h\end{matrix}";
+    let cell = rows_of(&format!("| t | v |\n|---|---|\n| x | ${tall}$ |"), 390.0).remove(0);
+    assert!(cell.glyphs.is_empty(), "tall cell formula shows as source");
+    let prose = rows_of(&format!("so ${tall}$ here"), 390.0).remove(0);
+    assert!(!prose.glyphs.is_empty(), "in prose it renders");
+    let rows: String = (0..40).map(|i| format!("a_{{{i}}} &= \\frac{{b_{i}}}{{c_{i}}} \\\\ ")).collect();
+    let d = rows_of(&format!("$$\\begin{{aligned}}{rows}\\end{{aligned}}$$"), 390.0).remove(0);
+    assert!(!d.glyphs.is_empty(), "a 40-row derivation renders");
+}

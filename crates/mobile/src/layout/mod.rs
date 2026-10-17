@@ -684,6 +684,7 @@ impl Worker {
                 cache: &mut self.cache,
                 math: self.math,
                 math_failures: &mut self.math_failures,
+                in_table: false,
             };
             self.builder.build(&mut ctx, &self.input)
         };

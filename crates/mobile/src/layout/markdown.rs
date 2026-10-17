@@ -18,6 +18,9 @@ pub(crate) struct Ctx<'a> {
     pub cache: &'a mut WidthCache,
     pub math: MathSettings,
     pub math_failures: &'a mut MathFailures,
+    /// Preparing a table cell: a scrolling table is one canvas as wide and
+    /// tall as all its rows, so formulas there are held shorter.
+    pub in_table: bool,
 }
 
 /// Formulas zatex rejected, so preparing their rows again (a rebuild, a
@@ -39,44 +42,62 @@ pub(crate) struct MathFailures {
     pub hits: u64,
     /// Formulas served from `laid` instead of laid out again.
     pub laid_hits: u64,
-    /// Laid-out formulas by the same key, least recently used first.
-    laid: std::collections::HashMap<u64, Arc<zatex::Formula>>,
-    laid_order: std::collections::VecDeque<u64>,
+    /// Laid-out formulas by the same key, with the tick of their last use;
+    /// `laid_order` holds (key, tick) uses oldest first, stale entries
+    /// skipped, so a hit is O(1).
+    laid: std::collections::HashMap<u64, (Arc<zatex::Formula>, u64)>,
+    laid_order: std::collections::VecDeque<(u64, u64)>,
     laid_bytes: usize,
+    tick: u64,
 }
 
 impl MathFailures {
     pub const CAP: usize = 256;
-    const LAID_CAP: usize = 1024;
+    const LAID_CAP: usize = 4096;
     const LAID_BYTES: usize = 8 << 20;
 
-    fn laid(&mut self, key: u64) -> Option<Arc<zatex::Formula>> {
-        let formula = self.laid.get(&key)?.clone();
-        if let Some(i) = self.laid_order.iter().rposition(|k| *k == key) {
-            self.laid_order.remove(i);
+    fn bytes(formula: &zatex::Formula) -> usize {
+        formula.items.len() * std::mem::size_of::<zatex::Item>()
+    }
+
+    fn touch(&mut self, key: u64) -> u64 {
+        self.tick += 1;
+        self.laid_order.push_back((key, self.tick));
+        // Stale uses pile up with hits; compact once they outnumber the live.
+        if self.laid_order.len() > 4 * Self::LAID_CAP.max(self.laid.len()) {
+            let laid = &self.laid;
+            self.laid_order.retain(|(key, tick)| laid.get(key).is_some_and(|entry| entry.1 == *tick));
         }
-        self.laid_order.push_back(key);
+        self.tick
+    }
+
+    fn laid(&mut self, key: u64) -> Option<Arc<zatex::Formula>> {
+        let formula = self.laid.get(&key)?.0.clone();
+        let tick = self.touch(key);
+        if let Some(entry) = self.laid.get_mut(&key) {
+            entry.1 = tick;
+        }
         self.laid_hits += 1;
         Some(formula)
     }
 
     fn keep(&mut self, key: u64, formula: Arc<zatex::Formula>) {
-        let bytes = |f: &zatex::Formula| f.items.len() * std::mem::size_of::<zatex::Item>();
-        self.laid_bytes += bytes(&formula);
-        if let Some(old) = self.laid.insert(key, formula) {
-            self.laid_bytes -= bytes(&old);
-        } else {
-            self.laid_order.push_back(key);
+        self.laid_bytes += Self::bytes(&formula);
+        let tick = self.touch(key);
+        if let Some((old, _)) = self.laid.insert(key, (formula, tick)) {
+            self.laid_bytes -= Self::bytes(&old);
         }
         while self.laid.len() > Self::LAID_CAP || self.laid_bytes > Self::LAID_BYTES {
-            let Some(old) = self.laid_order.pop_front() else { break };
-            if let Some(old) = self.laid.remove(&old) {
-                self.laid_bytes -= bytes(&old);
+            let Some((old, tick)) = self.laid_order.pop_front() else { break };
+            if self.laid.get(&old).is_some_and(|entry| entry.1 == tick)
+                && let Some((old, _)) = self.laid.remove(&old)
+            {
+                self.laid_bytes -= Self::bytes(&old);
             }
         }
     }
 
-    fn key(&self, tex: &str, display: bool, face: zatex::bundled::Face, size: f32) -> u64 {
+    fn key(&self, tex: &str, display: (bool, bool), face: zatex::bundled::Face, size: f32) -> u64 {
         use std::hash::BuildHasher;
         self.seed.hash_one((tex, display, face, size.to_bits()))
     }
@@ -110,22 +131,24 @@ impl MathFailures {
 /// when it can't be typeset; longer source wraps as inline code instead.
 const MATH_SOURCE_BLOCK_MAX: usize = 512;
 
-/// Most a display formula may cover, in points², and its widest and tallest:
-/// a display formula wider than the column scrolls in one canvas, so its
-/// whole area is a backing store (1.5M pt² is ~54 MB at @3x; real display
-/// math is well under a third of that).
+/// Most a display formula may cover, in points², and its widest: a display
+/// formula wider than the column scrolls in one canvas, so its whole area is
+/// a backing store (1.5M pt² is ~54 MB at @3x; real display math — a long
+/// `aligned` derivation included — is well under a third of that).
 const MATH_MAX_AREA: f32 = 1.5e6;
 const MATH_MAX_WIDTH: f32 = 8000.0;
-const MATH_MAX_HEIGHT: f32 = 2000.0;
 /// Tallest inline formula, in ems: shrinking one to fit its line scales its
-/// paint, not the line it grew.
+/// paint, not the line it grew. In a table cell, whose rows all share one
+/// scrolling canvas, a formula is held to a few lines.
 const MATH_MAX_INLINE_EMS: f32 = 30.0;
+const MATH_MAX_CELL_EMS: f32 = 6.0;
 
 fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc<zatex::Formula>> {
     if !ctx.math.enabled {
         return None;
     }
-    let key = ctx.math_failures.key(tex, display, ctx.math.face, size);
+    // Acceptance differs in a table cell, so it's part of the key.
+    let key = ctx.math_failures.key(tex, (display, ctx.in_table), ctx.math.face, size);
     if ctx.math_failures.known(key) {
         return None;
     }
@@ -135,9 +158,10 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
     let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
     let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok().filter(|f| {
         if display {
-            f.span() <= MATH_MAX_WIDTH && f.height() <= MATH_MAX_HEIGHT && f.span() * f.height() <= MATH_MAX_AREA
+            f.span() <= MATH_MAX_WIDTH && f.span() * f.height() <= MATH_MAX_AREA
         } else {
-            f.height() <= MATH_MAX_INLINE_EMS * size
+            let ems = if ctx.in_table { MATH_MAX_CELL_EMS } else { MATH_MAX_INLINE_EMS };
+            f.height() <= ems * size
         }
     });
     match formula {
@@ -500,7 +524,9 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
             let mut cells = Vec::with_capacity(rows.len() + 1);
             cells.push(header.iter().map(|c| prepare_runs(ctx, c, TextKind::TableHeader, muted)).collect::<Vec<_>>());
             for row in rows {
+                ctx.in_table = true;
                 cells.push(row.iter().map(|c| prepare_runs(ctx, c, TextKind::Body, muted)).collect());
+                ctx.in_table = false;
             }
             let ncols = cells.iter().map(Vec::len).max().unwrap_or(0);
             let cap = ctx.typo.px(240.0);
