@@ -9,11 +9,12 @@ protocol AppRouter: AnyObject {
     func showSearch()
 }
 
-/// iPad shell: Zeron mobile with a sidebar. The sidebar is the phone's
+/// The app's shell: Zeron mobile with a sidebar. The sidebar is the phone's
 /// Sessions page (same rows, sections, wallpaper) over a bottom toolbar;
 /// the main column shows the open session or the phone's new-session page.
-/// Compact widths (Slide Over, narrow Split View) collapse to the iPhone tab
-/// shell.
+/// It shows when the window is regular in both directions (iPad, an unfolded
+/// iPhone Duo); anything else (iPhone, the Duo folded, Slide Over, narrow
+/// Split View) collapses to the iPhone tab shell.
 final class SplitRootController: UISplitViewController, UISplitViewControllerDelegate, AppRouter {
     private let app: AppModel
     private let sidebar: SidebarViewController
@@ -35,9 +36,10 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         delegate = self
         preferredDisplayMode = .oneBesideSecondary
         preferredSplitBehavior = .tile
-        // About a phone's width, so the rows read as they do on iPhone.
+        // About a phone's width, so the rows read as they do on iPhone
+        // (narrower on narrow windows: see viewWillLayoutSubviews).
         preferredPrimaryColumnWidth = 360
-        minimumPrimaryColumnWidth = 320
+        minimumPrimaryColumnWidth = 280
         maximumPrimaryColumnWidth = 400
         primaryBackgroundStyle = .none
         // No toggle button (the phone has none); ⌘B still hides the sidebar.
@@ -47,7 +49,37 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         detail.navigationBar.tintColor = Palette.text
         setViewController(detail, for: .secondary)
         setViewController(tabs, for: .compact)
-        showDraft(prompt: nil, focus: false)
+        // A phone in landscape is compact in height but can be regular in
+        // width (the larger models); it keeps the tab shell. The split
+        // collapses on its own horizontal class, so pin that to compact.
+        registerForTraitChanges([UITraitVerticalSizeClass.self]) { (self: SplitRootController, _) in
+            self.syncCollapse()
+        }
+        syncCollapse()
+    }
+
+    private func syncCollapse() {
+        if traitCollection.verticalSizeClass == .compact {
+            traitOverrides.horizontalSizeClass = .compact
+        } else if traitOverrides.contains(UITraitHorizontalSizeClass.self) {
+            traitOverrides.remove(UITraitHorizontalSizeClass.self)
+        }
+    }
+
+    /// The main column starts on the new-session page, built only once the
+    /// sidebar is actually on screen (an iPhone may never expand).
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        if !isCollapsed, detail.viewControllers.isEmpty { showDraft(prompt: nil, focus: false) }
+    }
+
+    /// Narrow regular windows (the unfolded iPhone Duo is 669pt wide in
+    /// portrait) give the sidebar less so the session column keeps room for
+    /// a readable transcript and composer.
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let width = min(360, max(minimumPrimaryColumnWidth, view.bounds.width - 380))
+        if preferredPrimaryColumnWidth != width { preferredPrimaryColumnWidth = width }
     }
 
     override var keyCommands: [UIKeyCommand]? {
