@@ -253,8 +253,11 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         let span = match formula {
             Some(f) => {
                 text.push('\u{FFFC}');
+                // Everything the formula paints, not just its advance:
+                // negative space or overhanging ink must not reach the text
+                // beside it.
                 let b = InlineBox {
-                    width: f.width,
+                    width: f.span(),
                     ascent: f.ascent,
                     descent: f.descent,
                 };
@@ -441,7 +444,7 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
             // box, padding included); a table wider than the column scrolls.
             let widest_box = |t: &PText| {
                 let spans = t.p.spans();
-                t.math.iter().map(|(s, f)| f.width + spans[*s].pad_start + spans[*s].pad_end).fold(0f32, f32::max)
+                t.math.iter().map(|(s, f)| f.span() + spans[*s].pad_start + spans[*s].pad_end).fold(0f32, f32::max)
             };
             let cols = (0..ncols)
                 .map(|c| {
@@ -678,8 +681,9 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
                 // descent·s ≤ descent) sits on the same baseline inside them,
                 // so measured and painted heights can't disagree.
                 let avail = x + width - text_x - span.pad_end;
-                let scale = if formula.width > avail && avail > 0.0 { avail / formula.width } else { 1.0 };
-                out.formula(formula, text_x, baseline, scale, paint.color, start);
+                let span = formula.span();
+                let scale = if span > avail && avail > 0.0 { avail / span } else { 1.0 };
+                out.formula(formula, text_x - formula.left * scale, baseline, scale, paint.color, start);
                 // Decorations cross the formula like the text around it
                 // (the painter's run offsets: strike 5 above, underline 2 below).
                 let dy = match paint.decoration {
@@ -688,7 +692,7 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
                     Decoration::Underline => Some(2.0),
                 };
                 if let Some(dy) = dy {
-                    out.formula_fill(text_x, baseline + dy, formula.width * scale, 1.0, paint.color, start);
+                    out.formula_fill(text_x, baseline + dy, span * scale, 1.0, paint.color, start);
                 }
             } else {
                 out.runs.push(TextRun {
@@ -842,16 +846,18 @@ fn place_math(m: &PMath, px: Px, x: f32, y: f32, width: f32, out: Option<&mut Di
     let h = f.height() + pad * 2.0;
     let Some(out) = out else { return h };
     let start = out.push_text("\u{FFFC}");
-    if f.width > width {
+    // Placed by everything it paints (negative space, overhanging ink),
+    // not just its advance.
+    let span = f.span();
+    if span > width {
         // Too wide for the column: scroll it, like a code block. Side
-        // padding keeps ink overhanging the advance (italic tails, big
-        // operators) inside the viewport at both scroll ends.
+        // padding keeps the edges off the viewport's at both scroll ends.
         let side = px.v(4.0);
-        out.begin_scroller(x, y, width, h, f.width + side * 2.0);
-        out.formula(f, side, pad + f.ascent, 1.0, m.color, start);
+        out.begin_scroller(x, y, width, h, span + side * 2.0);
+        out.formula(f, side - f.left, pad + f.ascent, 1.0, m.color, start);
         out.end_scroller();
     } else {
-        out.formula(f, x + (width - f.width) / 2.0, y + pad + f.ascent, 1.0, m.color, start);
+        out.formula(f, x + (width - span) / 2.0 - f.left, y + pad + f.ascent, 1.0, m.color, start);
     }
     h
 }

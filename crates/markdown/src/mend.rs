@@ -65,6 +65,25 @@ struct OpenDelim {
 /// Repair hanging inline markers in a streaming block's source. Returns
 /// `None` when the text needs no repair (the overwhelmingly common case).
 pub fn close_hanging(text: &str) -> Option<String> {
+    mend(text, false).0
+}
+
+/// [`close_hanging`] that also keeps a trailing lone `$` literal: `None`
+/// unless the text ends in one that closes no formula this scan opened
+/// (`$5 to $`, `**$5** to **$`, `$HOME and $`) — the parse could still pair
+/// it with an earlier dollar and flash the prose between as a formula until
+/// the next character shows it's a price. The caller keeps it only where
+/// that `$` really closes a formula in the parse.
+pub fn close_hanging_dollar(text: &str) -> Option<String> {
+    match mend(text, true) {
+        (Some(mended), true) => Some(mended),
+        _ => None,
+    }
+}
+
+/// The mended text (`None` when nothing changes), and whether the text ends
+/// in an ambiguous lone `$` (escaped in the result when `escape_dollar`).
+fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     let cs: Vec<(usize, char)> = text.char_indices().collect();
     let n = cs.len();
     let at = |i: usize| cs.get(i).map(|&(_, c)| c);
@@ -254,7 +273,10 @@ pub fn close_hanging(text: &str) -> Option<String> {
     // Text ends inside a link/image URL: drop the partial URL, keep the text.
     if let Some(close) = pending_url {
         let byte = cs[close].0;
-        return Some(format!("{}]({PENDING_LINK_URL})", &text[..byte]));
+        return (
+            Some(format!("{}]({PENDING_LINK_URL})", &text[..byte])),
+            false,
+        );
     }
 
     // Collect closers innermost-first (descending open position). A `[` open
@@ -283,10 +305,8 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let closers: String = pending.into_iter().map(|(_, s)| s).collect();
 
     // A lone `$` ending the stream that closes no formula this scan opened
-    // (`$5 to $`, `**$5** to **$`, `$HOME and $`) would still pair with an
-    // earlier dollar in the parse and flash that prose as a formula until the
-    // next character shows it's a price; it stays a literal `$` until then.
-    // A formula that does close there (`$x$`) renders at once.
+    // (see [`close_hanging_dollar`]). A formula that does close there (`$x$`)
+    // renders at once.
     let trailing_dollar = n > 0
         && cs[n - 1].1 == '$'
         && (n < 2 || cs[n - 2].1 != '$')
@@ -301,7 +321,8 @@ pub fn close_hanging(text: &str) -> Option<String> {
         && math.is_none()
         && latex.is_none()
         && inline_closed != Some(n - 1);
-    let text: std::borrow::Cow<str> = if trailing_dollar {
+    let escape = trailing_dollar && escape_dollar;
+    let text: std::borrow::Cow<str> = if escape {
         let at = cs[n - 1].0;
         format!("{}\\$", &text[..at]).into()
     } else {
@@ -316,23 +337,27 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let setext = setext_partial(text);
 
     if closers.is_empty() && !setext {
-        return trailing_dollar.then(|| text.to_owned());
+        return (escape.then(|| text.to_owned()), trailing_dollar);
     }
     if setext {
         // Closers belong to the paragraph content above the underline line.
         let nl = text.rfind('\n');
-        return Some(match (nl, closers.is_empty()) {
+        let mended = match (nl, closers.is_empty()) {
             (Some(nl), false) => {
                 format!("{}{closers}{}\u{200B}", &text[..nl], &text[nl..])
             }
             _ => format!("{text}\u{200B}"),
-        });
+        };
+        return (Some(mended), trailing_dollar);
     }
     // Insert before trailing whitespace: a closer after a trailing space is
     // not right-flanking and would not close (remend trims the space for the
     // same reason).
     let end = text.trim_end().len();
-    Some(format!("{}{closers}{}", &text[..end], &text[end..]))
+    (
+        Some(format!("{}{closers}{}", &text[..end], &text[end..])),
+        trailing_dollar,
+    )
 }
 
 /// Whether the text after a `$` spells a shell variable rather than a

@@ -176,12 +176,26 @@ pub struct Formula {
     pub ascent: f32,
     /// Extent below the baseline, points.
     pub descent: f32,
+    /// Leftmost and rightmost extent of everything the formula paints,
+    /// together with its advance box (so `left <= min(0, width)` and
+    /// `right >= max(0, width)`), in points from the origin. Hosts reserve
+    /// `right - left` and put the origin `-left` in from the slot's left
+    /// edge, so neither negative space nor overhanging ink paints over the
+    /// text beside a formula.
+    pub left: f32,
+    pub right: f32,
     pub items: Vec<Item>,
 }
 
 impl Formula {
     pub fn height(&self) -> f32 {
         self.ascent + self.descent
+    }
+
+    /// The width a host reserves: everything painted plus the advance box
+    /// (see [`Formula::left`]).
+    pub fn span(&self) -> f32 {
+        self.right - self.left
     }
 
     /// Streams every glyph outline and rule as paths, the formula's baseline
@@ -393,17 +407,15 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
     // Hosts size a formula's slot, line or row from its box, so the box must
     // hold all of its ink: anything painted outside would land on the
     // surrounding text (a negative row gap moves a whole row out of the box:
-    // `\text{Approve}\\[-40em]\\`). Vertically the box grows to cover the
-    // ink; horizontally the advance is TeX's (negative space can shrink it
-    // below the ink), so ink reaching more than an em past it is refused.
+    // `\text{Approve}\\[-40em]\\`; negative space moves ink left of the
+    // origin). Vertically the box grows to cover the ink; horizontally the
+    // advance stays TeX's and `left`/`right` report the painted extent.
     let ink = ink_bounds(&b.items, font);
     let ascent = b.h.max(ink.top);
     let descent = b.d.max(ink.bottom).max(-ascent);
-    let overhang = options.size;
-    let fits = b.w.abs() <= w
-        && ascent + descent <= h
-        && ink.left >= b.w.min(0.0) - overhang
-        && ink.right <= b.w.max(0.0) + overhang;
+    let left = ink.left.min(b.w).min(0.0);
+    let right = ink.right.max(b.w).max(0.0);
+    let fits = b.w.abs() <= w && right - left <= w && ascent + descent <= h;
     if !fits {
         return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
     }
@@ -414,6 +426,8 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
         width: b.w,
         ascent,
         descent,
+        left,
+        right,
         items,
     })
 }

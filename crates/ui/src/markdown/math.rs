@@ -290,7 +290,9 @@ fn math_face(font: u8) -> Option<&'static ttf_parser::Face<'static>> {
 /// its advance box, widened wherever negative space sets an item outside it
 /// (`a\hspace{-3em}b` has a negative advance and a glyph left of the origin).
 pub(crate) fn span(formula: &Formula) -> Range<f32> {
-    let mut span = 0.0f32.min(formula.width)..formula.width.max(0.0);
+    // zatex's own painted extent (glyph bounds), widened by advances below.
+    let mut span =
+        formula.left.min(formula.width).min(0.0)..formula.right.max(formula.width).max(0.0);
     for item in &formula.items {
         let (left, right) = match *item {
             Item::Glyph {
@@ -1028,6 +1030,8 @@ mod tests {
             width,
             ascent: 0.75,
             descent: 0.25,
+            left: 0.0,
+            right: width,
             items: vec![Item::Rule {
                 x: 0.0,
                 y: -0.75,

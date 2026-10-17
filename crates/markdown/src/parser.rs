@@ -237,23 +237,28 @@ fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
     };
     let mut kept: Vec<(Event, Range<usize>)> = Vec::with_capacity(events.len());
     for (event, range) in events {
+        let range = original(&maps, range);
+        let range = range.start + offset..range.end + offset;
         // pulldown-cmark can emit a task marker after its item has closed (an
-        // item holding only a nested list: `- [x] *`), so it lands in the
-        // next paragraph and would check that one off. A marker belongs right
-        // at the start of its item (tight) or of the item's first paragraph.
+        // item holding only a nested list or a heading: `- [x] *`), so it
+        // lands in a later paragraph or item and would check that one off. A
+        // marker belongs right at the start of its own item (tight) or of the
+        // item's first paragraph, inside that item's source.
         if matches!(event, Event::TaskListMarker(_)) {
             let n = kept.len();
-            let item_start = |back: usize| {
-                n.checked_sub(back)
-                    .is_some_and(|i| matches!(kept[i].0, Event::Start(Tag::Item)))
+            let item = |back: usize| {
+                n.checked_sub(back).and_then(|i| match &kept[i] {
+                    (Event::Start(Tag::Item), item) => Some(item.clone()),
+                    _ => None,
+                })
             };
             let paragraph = matches!(kept.last(), Some((Event::Start(Tag::Paragraph), _)));
-            if !(item_start(1) || paragraph && item_start(2)) {
+            let owner = item(1).or_else(|| paragraph.then(|| item(2)).flatten());
+            if !owner.is_some_and(|item| item.start <= range.start && range.end <= item.end) {
                 continue;
             }
         }
-        let range = original(&maps, range);
-        kept.push((event, range.start + offset..range.end + offset));
+        kept.push((event, range));
     }
     let events = kept;
     let mut cur = Cursor {
@@ -468,6 +473,7 @@ fn rewrite_math_delimiters(source: &str, options: Options) -> Option<(String, Of
             || words.glued(bytes, at)
             || body.trim().is_empty()
             || has_unescaped_dollar(body)
+            || prose_like(body)
         {
             i += 1;
             continue;
@@ -533,6 +539,25 @@ impl WordScan {
         };
         prev.is_ascii_alphanumeric() || prev == b'_' || (self.slash && !prev.is_ascii_whitespace())
     }
+}
+
+/// Whether a delimited body reads as prose, not TeX: a citation or equation
+/// number (`\[1\]`, `\(2.3\)`) or words (`\[Online\]`, `\(optional\)`,
+/// `\(see above\)`) are markdown escapes of brackets and parens around text.
+/// TeX has a command, an operator, a brace or only short variable names.
+fn prose_like(body: &str) -> bool {
+    let body = body.trim();
+    if !body
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b" .,;:'!?-".contains(&byte))
+    {
+        return false;
+    }
+    body.bytes()
+        .all(|byte| byte.is_ascii_digit() || b".,-".contains(&byte))
+        || body
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| word.len() >= 4)
 }
 
 /// Whether `body` holds a `$` that isn't backslash-escaped.
@@ -1429,25 +1454,31 @@ impl IncrementalParser {
             .map(|b| b.range.start)
             .find(|&start| start < last_start)
             .unwrap_or(0);
-        // Lazy continuation reaches further: a quote or list directly above
-        // (no blank line between) can still absorb the lines below it once
-        // later text changes their reading — `>a\n|b\n>|-c` streams through
-        // a table that splits `|b` out of the quote, and `c` folds all three
-        // back into one. Reparse from the first block of such a run.
-        while let Some(above) = self
-            .tree
-            .blocks
-            .iter()
-            .rev()
-            .find(|b| b.range.start < boundary)
-            .filter(|b| matches!(b.block, Block::BlockQuote { .. } | Block::List { .. }))
+        // Lazy continuation reaches one block further: a paragraph (or
+        // table, heading) right under a quote or list, with no blank line
+        // between, can still fold back into it once later text changes its
+        // reading — `>a\n|b\n>|-c` streams through a table that splits `|b`
+        // out of the quote, and `c` folds all three back into one. Reparse
+        // from that container too. One step only: the container's own extent
+        // was settled while it was in the window, and a run of containers
+        // (`- a\n* b\n…`) never re-merges, so this stays O(tail).
+        let blocks = &self.tree.blocks;
+        if let Some(at) = blocks.iter().position(|b| b.range.start == boundary)
+            && at > 0
+            && !matches!(
+                blocks[at].block,
+                Block::BlockQuote { .. } | Block::List { .. }
+            )
+            && matches!(
+                blocks[at - 1].block,
+                Block::BlockQuote { .. } | Block::List { .. }
+            )
         {
-            let between = &self.source[above.range.start..boundary];
-            let content = between.trim_end().len();
-            if between[content..].matches('\n').count() >= 2 {
-                break;
+            let above = blocks[at - 1].range.start;
+            let between = &self.source[above..boundary];
+            if between[between.trim_end().len()..].matches('\n').count() < 2 {
+                boundary = above;
             }
-            boundary = above.range.start;
         }
         let boundary = self.source[..boundary]
             .rfind('\n')
@@ -1485,7 +1516,21 @@ impl IncrementalParser {
             return;
         }
         let start = last.range.start;
-        let Some(mended) = crate::mend::close_hanging(&self.source[start..]) else {
+        let tail = &self.source[start..];
+        let mut mended = crate::mend::close_hanging(tail);
+        // A trailing lone `$` may yet be a price; keep it literal while it
+        // would close a formula in the parse (`$5 to $`). In code or raw HTML
+        // it is plain text already, and stays as written.
+        if let Some(escaped) = crate::mend::close_hanging_dollar(tail) {
+            let plain = mended.as_deref().unwrap_or(tail);
+            self.last_parse_bytes += escaped.len() + plain.len();
+            if formulas(&parse_at(&escaped, start).blocks)
+                < formulas(&parse_at(plain, start).blocks)
+            {
+                mended = Some(escaped);
+            }
+        }
+        let Some(mended) = mended else {
             return;
         };
         // Count toward the O(tail) instrumentation — this is real parse work,
@@ -1506,6 +1551,27 @@ impl IncrementalParser {
             .map_or(0, |i| i + 1);
         self.display_tail = Some(tail);
     }
+}
+
+/// How many formulas (inline runs and display blocks) `blocks` hold.
+fn formulas(blocks: &[Arc<TopBlock>]) -> usize {
+    fn runs(runs: &[InlineRun]) -> usize {
+        runs.iter().filter(|run| run.style.math).count()
+    }
+    fn in_block(block: &Block) -> usize {
+        match block {
+            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r),
+            Block::BlockQuote { children } => children.iter().map(in_block).sum(),
+            Block::List { items, .. } => items.iter().flatten().map(in_block).sum(),
+            Block::Table { header, rows, .. } => {
+                header.iter().map(|cell| runs(cell)).sum::<usize>()
+                    + rows.iter().flatten().map(|cell| runs(cell)).sum::<usize>()
+            }
+            Block::Math { .. } => 1,
+            Block::CodeBlock { .. } | Block::Rule => 0,
+        }
+    }
+    blocks.iter().map(|top| in_block(&top.block)).sum()
 }
 
 /// Conservative detector for link-reference-definition lines
@@ -2086,6 +2152,7 @@ mod tests {
             "- a\n|b\n- |-c",
             "- [x] *\n\nb\n>-",
             "- [x] >\n\na\n\n*\n",
+            "- [x] #\n>\n- =",
         ] {
             let full = parse_full(source);
             for chunk in 1..=6 {
@@ -2972,6 +3039,33 @@ mod math_tests {
         let mut parser = IncrementalParser::new();
         parser.set_text("so $x^2$");
         assert!(format!("{:?}", parser.display_tree()).contains("math: true"));
+        // Where that `$` is plain text anyway (code, raw HTML) it stays as
+        // written, never as `\$`.
+        for source in ["- item\n\n      echo $", "<div>cost $", "`a $"] {
+            let mut parser = IncrementalParser::new();
+            parser.set_text(source);
+            let shown = format!("{:?}", parser.display_tree());
+            assert!(!shown.contains("\\\\$"), "{source:?}: {shown}");
+        }
+    }
+
+    /// Markdown escapes around prose — citations, numbers, words — stay
+    /// brackets and parens; TeX-looking bodies are math.
+    #[test]
+    fn escaped_brackets_around_prose_stay_text() {
+        for source in [
+            "See \\[1\\] for details.",
+            "Pandoc \\[Online\\] style.",
+            "Value \\(optional\\) here.",
+            "Like \\(see above\\) and \\(2.3\\).",
+        ] {
+            assert_no_math(source);
+        }
+        assert_eq!(para("so \\(x\\)"), [plain("so "), math("x")]);
+        assert_eq!(para("so \\(ab\\)"), [plain("so "), math("ab")]);
+        assert_eq!(para("so \\(3x\\)"), [plain("so "), math("3x")]);
+        assert_eq!(para("so \\(\\text{cost}\\)"), [plain("so "), math("\\text{cost}")]);
+        assert_eq!(blocks("\\[ x^2 \\]"), [display("x^2")]);
     }
 }
 

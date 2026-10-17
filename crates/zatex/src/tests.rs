@@ -554,8 +554,8 @@ fn runaway_sizes_are_too_large() {
 }
 
 /// Hosts size a formula's slot from its box, so nothing may paint outside
-/// it: vertically the box grows to the ink, horizontally ink may overhang
-/// the advance by at most an em, and anything else is refused.
+/// it: vertically the box grows to the ink, and horizontally `left`/`right`
+/// cover the ink and the advance box.
 #[test]
 fn the_box_holds_all_ink() {
     let options = Options::inline(16.0);
@@ -564,8 +564,14 @@ fn the_box_holds_all_ink() {
         let ink = crate::ink_bounds(&f.items, stix());
         assert!(ink.top <= f.ascent + 1e-3, "{src}: ink above the box");
         assert!(ink.bottom <= f.descent + 1e-3, "{src}: ink below the box");
-        assert!(ink.left >= f.width.min(0.0) - 16.0 - 1e-3, "{src}");
-        assert!(ink.right <= f.width.max(0.0) + 16.0 + 1e-3, "{src}");
+        assert!(
+            ink.left >= f.left - 1e-3 && f.left <= f.width.min(0.0),
+            "{src}"
+        );
+        assert!(
+            ink.right <= f.right + 1e-3 && f.right >= f.width.max(0.0),
+            "{src}"
+        );
         f
     };
     // A negative row gap moves a row out of the TeX box; the box follows.
@@ -581,13 +587,18 @@ fn the_box_holds_all_ink() {
     ] {
         check(src);
     }
+    // Negative space: the reported extent covers ink left of the origin and
+    // the negative advance.
+    let left = check(r"\hspace{-1em}x");
+    assert!(left.left < -0.4 * 16.0 && left.width < 0.0, "{}", left.left);
+    let hidden = check(r"\hspace{-100em}\hspace{-100em}");
+    assert!(hidden.span() >= 199.0 * 16.0, "{}", hidden.span());
     for src in [
-        r"x\\[-100em]x\\[-100em]x\\[-100em]x",
-        r"a\hspace{-50em}b\hspace{50em}",
-        r"\hspace{30em}\hspace{-60em}x\hspace{30em}",
+        r"x\\[-100em]x\\[-100em]x\\[-100em]x".to_owned(),
+        r"\hspace{-100em}".repeat(25),
     ] {
         assert_eq!(
-            layout(src, stix(), &options)
+            layout(&src, stix(), &options)
                 .map(|_| ())
                 .map_err(|e| e.kind),
             Err(ErrorKind::TooLarge),
