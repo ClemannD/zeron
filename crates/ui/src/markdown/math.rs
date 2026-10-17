@@ -385,31 +385,48 @@ fn line_height_with(
     mut metrics: impl FnMut(&gpui::Font) -> (f32, f32),
 ) -> f32 {
     let mut half = 0.0f32;
+    // One forward pass over lines, inline slots (by position) and runs:
+    // hard-broken lines of formulas must not cost lines × slots per render.
+    let mut slots: Vec<&MathSlot> = flat.math.iter().filter(|slot| !slot.display).collect();
+    slots.sort_by_key(|slot| slot.range.start);
+    let mut next_slot = 0;
+    let (mut first_run, mut first_run_at) = (0, 0);
     let mut start = 0;
     for line in flat.text.split('\n') {
         let range = start..start + line.len();
         start = range.end + 1;
-        let mut slots = flat
-            .math
-            .iter()
-            .filter(|slot| !slot.display && range.contains(&slot.range.start))
-            .peekable();
-        if slots.peek().is_none() {
+        while next_slot < slots.len() && slots[next_slot].range.start < range.start {
+            next_slot += 1;
+        }
+        let begin = next_slot;
+        while next_slot < slots.len() && range.contains(&slots[next_slot].range.start) {
+            next_slot += 1;
+        }
+        let line_slots = &slots[begin..next_slot];
+        if line_slots.is_empty() {
             continue;
         }
+        while first_run < flat.runs.len() && first_run_at + flat.runs[first_run].len <= range.start
+        {
+            first_run_at += flat.runs[first_run].len;
+            first_run += 1;
+        }
         let (mut ascent, mut descent) = (0.0f32, 0.0f32);
-        let mut at = 0;
-        for run in &flat.runs {
+        let mut at = first_run_at;
+        for run in &flat.runs[first_run..] {
+            if at >= range.end {
+                break;
+            }
             let run_range = at..at + run.len;
             at = run_range.end;
-            if run_range.start < range.end && run_range.end > range.start {
+            if run_range.end > range.start {
                 let (run_ascent, run_descent) = metrics(&run.font);
                 ascent = ascent.max(run_ascent);
                 descent = descent.max(run_descent);
             }
         }
         let lift = (ascent - descent) / 2.0;
-        for slot in slots {
+        for slot in line_slots {
             let (ascent, descent) = (
                 slot.formula.ascent * slot.scale,
                 slot.formula.descent * slot.scale,

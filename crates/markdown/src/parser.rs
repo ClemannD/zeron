@@ -1319,9 +1319,16 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
                 Tag::Image {
                     dest_url, title, ..
                 } => {
+                    // Alt text is plain: a formula in it keeps its `$…$`.
                     let alt: String = parse_inline_container(cur, style)
                         .iter()
-                        .map(|run| run.text.as_str())
+                        .map(|run| {
+                            if run.style.math {
+                                format!("${}$", run.text)
+                            } else {
+                                run.text.clone()
+                            }
+                        })
                         .collect();
                     inner.image = Some(InlineImage {
                         source: dest_url.to_string(),
@@ -3314,6 +3321,15 @@ mod math_tests {
         // A `](` with no link to finish never shows the brackets it got.
         let tree = format!("{:?}", parse_full("see ](/abs path/a b.png) here"));
         assert!(!tree.contains('<'), "{tree}");
+    }
+
+    #[test]
+    fn image_alt_text_keeps_its_formula_spelling() {
+        let runs = para("![img $a$](u)");
+        assert_eq!(
+            runs[0].style.image.as_ref().map(|image| image.alt.as_str()),
+            Some("img $a$")
+        );
     }
 
     #[test]

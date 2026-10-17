@@ -415,7 +415,12 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
     let descent = b.d.max(ink.bottom).max(-ascent);
     let left = ink.left.min(b.w).min(0.0);
     let right = ink.right.max(b.w).max(0.0);
-    let fits = b.w.abs() <= w && right - left <= w && ascent + descent <= h;
+    // Room is bounded by the source too: real TeX sets well under an em or
+    // two per byte (`\quad` is one em in five), while spacing alone
+    // (`\hspace{100em}`, `\\[100em]`) would make a few bytes reserve a
+    // page of blank slot, line or row in every host.
+    let budget = (20.0 + 2.0 * source.len() as f32) * options.size;
+    let fits = b.w.abs() <= w && right - left <= w.min(budget) && ascent + descent <= h.min(budget);
     if !fits {
         return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
     }

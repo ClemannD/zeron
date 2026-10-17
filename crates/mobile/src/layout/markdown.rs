@@ -626,6 +626,13 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
     }
     let base16 = out.push_text(t.p.text());
     let spans = t.p.spans();
+    // Each span's formula, if it is one: one lookup per fragment, not a scan.
+    let mut formulas: Vec<Option<&zatex::Formula>> = vec![None; spans.len()];
+    for (span, formula) in &t.math {
+        if let Some(slot) = formulas.get_mut(*span) {
+            *slot = Some(formula);
+        }
+    }
     let mut top = y;
     for line in &lines {
         let (above, below) = line_growth(t.p.line_box_extents(line), t.lh, t.base);
@@ -673,7 +680,7 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
             }
             let start = base16 + f.utf16.start as u32;
             // A formula's placeholder is never drawn as text.
-            if let Some((_, formula)) = t.math.iter().find(|(span, _)| *span == f.span) {
+            if let Some(formula) = formulas.get(f.span).copied().flatten() {
                 // A formula wider than the column (alone on its line — it's
                 // atomic) shrinks to fit. Only the paint scales: the line's
                 // extents stay those of the unscaled box in both the measure

@@ -544,8 +544,13 @@ fn runaway_sizes_are_too_large() {
     // A kern out and back still lands its items far away.
     let hidden = format!("{}b{}", r"\kern99em".repeat(30), r"\kern-99em".repeat(30));
     assert_eq!(err(&hidden), ErrorKind::TooLarge);
+    // Room is bounded by the source: a few bytes of spacing can't reserve a
+    // page of blank slot.
+    assert_eq!(err(r"\kern50em x"), ErrorKind::TooLarge);
+    assert_eq!(err(&r"\hspace{100em}".repeat(19)), ErrorKind::TooLarge);
+    assert_eq!(err(r"a\\[100em]b"), ErrorKind::TooLarge);
     // Ordinary large formulas are fine.
-    assert!(layout(r"\kern50em x", stix(), &Options::default()).is_ok());
+    assert!(layout(r"\kern10em x", stix(), &Options::default()).is_ok());
     let matrix = format!(
         "\\begin{{pmatrix}}{}\\end{{pmatrix}}",
         "1 \\\\ ".repeat(100)
@@ -591,11 +596,12 @@ fn the_box_holds_all_ink() {
     // the negative advance.
     let left = check(r"\hspace{-1em}x");
     assert!(left.left < -0.4 * 16.0 && left.width < 0.0, "{}", left.left);
-    let hidden = check(r"\hspace{-100em}\hspace{-100em}");
-    assert!(hidden.span() >= 199.0 * 16.0, "{}", hidden.span());
+    let hidden = check(r"\hspace{-30em}\hspace{-30em}");
+    assert!(hidden.span() >= 59.0 * 16.0, "{}", hidden.span());
     for src in [
         r"x\\[-100em]x\\[-100em]x\\[-100em]x".to_owned(),
         r"\hspace{-100em}".repeat(25),
+        r"\hspace{-100em}\hspace{-100em}".to_owned(),
     ] {
         assert_eq!(
             layout(&src, stix(), &options)
