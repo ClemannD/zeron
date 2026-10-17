@@ -1143,3 +1143,35 @@ fn scrolling_display_math_pads_its_sides() {
     assert!(left >= 3.0, "{left}");
     assert!(s.content_width > s.w);
 }
+
+/// Laid-out formulas are reused: a rebuild (or a streamed token
+/// re-preparing its paragraph) doesn't lay any of them out again.
+#[test]
+fn laid_out_formulas_are_reused() {
+    let mut w = worker(390.0);
+    w.input = transcript_one(r"Fine $x^2$ and $\frac{a}{b}$ here.");
+    let first = w.pass().display(0).unwrap();
+    assert_eq!(w.math_failures.laid_hits, 0);
+    w.rebuild();
+    let again = w.pass().display(0).unwrap();
+    assert_eq!(w.math_failures.laid_hits, 2, "both formulas came from the cache");
+    assert_eq!(first.glyphs.len(), again.glyphs.len());
+}
+
+/// Formulas zatex accepts but this host can't afford show as source: an
+/// inline one taller than a line can hold, or display math whose scrolling
+/// canvas would be an outsized backing store.
+#[test]
+fn oversized_formulas_show_as_source() {
+    for md in [
+        r"Tall $\begin{matrix}x\\[40em]y\end{matrix}$ inline",
+        r"$$\hspace{70em}\hspace{70em}\begin{matrix}x\\[45em]y\end{matrix}$$",
+    ] {
+        let d = rows_of(md, 390.0).remove(0);
+        assert!(d.glyphs.is_empty(), "rendered as source: {md}");
+        assert!(d.height < 2_000.0, "{md}: {}", d.height);
+    }
+    // Ordinary display math still renders.
+    let d = rows_of(r"$$\sum_{i=1}^n i = \frac{n(n+1)}{2}$$", 390.0).remove(0);
+    assert!(!d.glyphs.is_empty());
+}

@@ -918,6 +918,10 @@ fn render_table(
     let text_system = window.text_system();
     let mut flats: Vec<Vec<Option<Rc<FlatText>>>> = Vec::with_capacity(all.len());
     let mut content = vec![0.0f32; cols];
+    // Per column, the widest inline formula: a formula is atomic, so its
+    // column may not shrink below it (its slot would wrap and the formula
+    // paint over the next column).
+    let mut widest_formula = vec![0.0f32; cols];
     for (r, row) in all.iter().enumerate() {
         let weight = if has_header && r == 0 {
             TABLE_HEADER_WEIGHT
@@ -931,6 +935,13 @@ fn render_table(
                 continue;
             };
             let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
+            for slot in &flat.math {
+                let span = super::math::span(&slot.formula);
+                let width = (span.end - span.start) * slot.scale * MD_TEXT_SIZE;
+                if width.is_finite() {
+                    widest_formula[c] = widest_formula[c].max(width.ceil());
+                }
+            }
             if !flat.text.is_empty() {
                 // Intrinsic table proportions use the same bounded link presentation;
                 // each cell then resolves its exact width during measured layout.
@@ -968,7 +979,13 @@ fn render_table(
         }
         flats.push(out);
     }
-    let geo = table_columns(&content);
+    let mut geo = table_columns(&content);
+    for (minimum, widest) in geo.minimums.iter_mut().zip(&widest_formula) {
+        if *widest > 0.0 {
+            *minimum = minimum.max(widest + 2.0 * TABLE_CELL_PADDING);
+        }
+    }
+    geo.min_table_width = geo.minimums.iter().sum();
 
     // Frameless flat-hairline chrome: 1px rules under the header and between
     // rows are the only paint (`table.gap` = 1, borderColor white@10%); the

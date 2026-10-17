@@ -6,6 +6,7 @@
 //! same geometry as primitives. One routine for both means a row's measured
 //! height and its painted content can never disagree.
 
+use std::sync::Arc;
 use zeron_markdown::parser::{Block, InlineRun, InlineStyle, TableAlign};
 use zeron_text::{InlineBox, OverflowWrap, PrepareOptions, Prepared, Span, WhiteSpace, WidthCache, line_growth};
 
@@ -26,16 +27,51 @@ pub(crate) struct Ctx<'a> {
 /// of `CAP` fixed-size keys: a hash of (source, display, face, size), so its
 /// memory is `CAP × 8` bytes whatever the sources. A hash collision would
 /// show a good formula as source — at 64 bits, never in practice. Successes
-/// aren't kept: their rows hold them.
+/// are kept too, bounded by count and item bytes: a streamed token re-prepares
+/// its whole paragraph, and must not lay out every formula in it again.
 #[derive(Default)]
 pub(crate) struct MathFailures {
     /// Most recently used last.
     keys: std::collections::VecDeque<u64>,
     pub hits: u64,
+    /// Formulas served from `laid` instead of laid out again.
+    pub laid_hits: u64,
+    /// Laid-out formulas by the same key, least recently used first.
+    laid: std::collections::HashMap<u64, Arc<zatex::Formula>>,
+    laid_order: std::collections::VecDeque<u64>,
+    laid_bytes: usize,
 }
 
 impl MathFailures {
     pub const CAP: usize = 256;
+    const LAID_CAP: usize = 1024;
+    const LAID_BYTES: usize = 8 << 20;
+
+    fn laid(&mut self, key: u64) -> Option<Arc<zatex::Formula>> {
+        let formula = self.laid.get(&key)?.clone();
+        if let Some(i) = self.laid_order.iter().rposition(|k| *k == key) {
+            self.laid_order.remove(i);
+        }
+        self.laid_order.push_back(key);
+        self.laid_hits += 1;
+        Some(formula)
+    }
+
+    fn keep(&mut self, key: u64, formula: Arc<zatex::Formula>) {
+        let bytes = |f: &zatex::Formula| f.items.len() * std::mem::size_of::<zatex::Item>();
+        self.laid_bytes += bytes(&formula);
+        if let Some(old) = self.laid.insert(key, formula) {
+            self.laid_bytes -= bytes(&old);
+        } else {
+            self.laid_order.push_back(key);
+        }
+        while self.laid.len() > Self::LAID_CAP || self.laid_bytes > Self::LAID_BYTES {
+            let Some(old) = self.laid_order.pop_front() else { break };
+            if let Some(old) = self.laid.remove(&old) {
+                self.laid_bytes -= bytes(&old);
+            }
+        }
+    }
 
     fn key(tex: &str, display: bool, face: zatex::bundled::Face, size: f32) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -73,7 +109,18 @@ impl MathFailures {
 /// when it can't be typeset; longer source wraps as inline code instead.
 const MATH_SOURCE_BLOCK_MAX: usize = 512;
 
-fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<zatex::Formula> {
+/// Most a display formula may cover, in points², and its widest and tallest:
+/// a display formula wider than the column scrolls in one canvas, so its
+/// whole area is a backing store (1.5M pt² is ~54 MB at @3x; real display
+/// math is well under a third of that).
+const MATH_MAX_AREA: f32 = 1.5e6;
+const MATH_MAX_WIDTH: f32 = 8000.0;
+const MATH_MAX_HEIGHT: f32 = 2000.0;
+/// Tallest inline formula, in ems: shrinking one to fit its line scales its
+/// paint, not the line it grew.
+const MATH_MAX_INLINE_EMS: f32 = 30.0;
+
+fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc<zatex::Formula>> {
     if !ctx.math.enabled {
         return None;
     }
@@ -81,12 +128,28 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<zat
     if ctx.math_failures.known(key) {
         return None;
     }
-    let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
-    let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok();
-    if formula.is_none() {
-        ctx.math_failures.insert(key);
+    if let Some(formula) = ctx.math_failures.laid(key) {
+        return Some(formula);
     }
-    formula
+    let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
+    let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok().filter(|f| {
+        if display {
+            f.span() <= MATH_MAX_WIDTH && f.height() <= MATH_MAX_HEIGHT && f.span() * f.height() <= MATH_MAX_AREA
+        } else {
+            f.height() <= MATH_MAX_INLINE_EMS * size
+        }
+    });
+    match formula {
+        Some(formula) => {
+            let formula = Arc::new(formula);
+            ctx.math_failures.keep(key, formula.clone());
+            Some(formula)
+        }
+        None => {
+            ctx.math_failures.insert(key);
+            None
+        }
+    }
 }
 
 /// How formulas render: in `face` when `enabled`, else as their source (an
@@ -141,7 +204,7 @@ pub(crate) struct PText {
     pub badges: Vec<(usize, String)>,
     /// Spans that are inline formulas (an inline box over one U+FFFC), with
     /// each one's layout.
-    pub math: Vec<(usize, zatex::Formula)>,
+    pub math: Vec<(usize, Arc<zatex::Formula>)>,
 }
 
 pub(crate) struct PCode {
@@ -154,7 +217,7 @@ pub(crate) struct PCode {
 
 /// Display math: the formula, centered in the column (scrolling when wider).
 pub(crate) struct PMath {
-    pub formula: zatex::Formula,
+    pub formula: Arc<zatex::Formula>,
     pub color: ColorRole,
 }
 
@@ -630,7 +693,7 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
     let mut formulas: Vec<Option<&zatex::Formula>> = vec![None; spans.len()];
     for (span, formula) in &t.math {
         if let Some(slot) = formulas.get_mut(*span) {
-            *slot = Some(formula);
+            *slot = Some(&**formula);
         }
     }
     let mut top = y;

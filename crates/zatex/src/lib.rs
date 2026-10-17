@@ -70,8 +70,9 @@ pub struct Options {
     /// already fill 512 KB). Run layout on a thread with a few MB of stack —
     /// not a 512 KB secondary or dispatch-queue thread.
     pub max_depth: usize,
-    /// Most items a formula may emit (bounds memory and paint time); layout
-    /// work is bounded at a few times this.
+    /// Most items a formula may emit (bounds memory and paint time), and at
+    /// most 64 plus 8 per source byte; layout work is bounded at a few times
+    /// this.
     pub max_items: usize,
     /// Widest accepted formula, in ems. Anything wider (or any item farther
     /// out) is [`ErrorKind::TooLarge`], so hosts never size a slot, row or
@@ -386,7 +387,12 @@ pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formul
     } else {
         ast::Style::Text
     };
-    let mut ctx = layout::Ctx::new(font, options.size, options.max_items);
+    // Items are bounded by the source too: real TeX emits about one per
+    // character plus a few per stretchy delimiter, while nested `\left(`
+    // around a tall body multiplied 434 bytes into 18,000 items — paint and
+    // memory every host pays per formula.
+    let max_items = options.max_items.min(64 + 8 * source.len());
+    let mut ctx = layout::Ctx::new(font, options.size, max_items);
     let b = ctx.list(&nodes, layout::St::new(style)).map_err(|mut e| {
         match e.kind {
             ErrorKind::TooLarge => e.range = 0..source.len(),
