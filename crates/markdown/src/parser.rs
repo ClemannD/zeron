@@ -795,12 +795,12 @@ impl UrlWords {
             self.start = from + space + 1;
             self.start += bytes[self.start..at]
                 .iter()
-                .take_while(|byte| byte.is_ascii_punctuation())
+                .take_while(|byte| b"([<\"'*_~".contains(byte))
                 .count();
         } else if self.scanned == 0 {
             self.start += bytes[self.start..at]
                 .iter()
-                .take_while(|byte| byte.is_ascii_punctuation())
+                .take_while(|byte| b"([<\"'*_~".contains(byte))
                 .count();
         }
         self.scanned = self.scanned.max(at);
@@ -4063,6 +4063,10 @@ mod math_tests {
             assert_no_math(source);
         }
         assert_eq!(para("so \\(x2\\)"), [plain("so "), math("x2")]);
+        // A table pipe isn't part of the URL word: the formula cell keeps
+        // its math.
+        let tree = format!("{:?}", parse_full("|https://a.com|$x^2$|\n|-|-|\n"));
+        assert!(tree.contains("math: true"), "{tree}");
     }
 
     /// Round-6 review: prose and shell shapes that once swallowed text.
