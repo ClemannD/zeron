@@ -161,13 +161,18 @@ const MATH_MAX_WIDTH: f32 = 8000.0;
 /// paint, not the line it grew. In a table cell, whose rows all share one
 /// scrolling canvas, a formula is held to a few lines.
 const MATH_MAX_INLINE_EMS: f32 = 30.0;
-const MATH_MAX_CELL_EMS: f32 = 10.0;
+const MATH_MAX_CELL_EMS: f32 = 12.0;
 /// Every formula in a row shares one backing store's budget, in points²
 /// (~144 MB at @3x, about what a long code block or wide table costs). A
-/// formula is charged its height across at least a typical column, since a
-/// tall inline one grows its whole line.
+/// formula is charged its own area plus the band it opens across the row: a
+/// display formula its whole height, an inline one what it grows its line
+/// by — across the widest row a device shows (an iPad's), as preparing is
+/// width-independent.
 const MATH_ROW_AREA: f32 = 4e6;
-const MATH_ROW_WIDTH: f32 = 400.0;
+const MATH_ROW_WIDTH: f32 = 1400.0;
+/// Largest table canvas (points²) set with its formulas: about a wide text
+/// table's. A table past it shows its formulas as source.
+const MATH_TABLE_AREA: f32 = 4e6;
 
 fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc<zatex::Formula>> {
     if !ctx.math.enabled {
@@ -179,7 +184,7 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
         return None;
     }
     if let Some(formula) = ctx.math_failures.laid(key) {
-        return charge(ctx, formula);
+        return charge(ctx, formula, display);
     }
     let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
     let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok().filter(|f| {
@@ -194,7 +199,7 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
         Some(formula) => {
             let formula = Arc::new(formula);
             ctx.math_failures.keep(key, formula.clone());
-            charge(ctx, formula)
+            charge(ctx, formula, display)
         }
         None => {
             ctx.math_failures.insert(key);
@@ -205,8 +210,13 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
 
 /// `formula` if its row's budget ([`MATH_ROW_AREA`]) still holds it, charged
 /// to that budget; past it, the formula shows as source.
-fn charge(ctx: &mut Ctx, formula: Arc<zatex::Formula>) -> Option<Arc<zatex::Formula>> {
-    let cost = formula.height() * formula.span().max(ctx.typo.px(MATH_ROW_WIDTH));
+fn charge(ctx: &mut Ctx, formula: Arc<zatex::Formula>, display: bool) -> Option<Arc<zatex::Formula>> {
+    let band = if display {
+        formula.height()
+    } else {
+        (formula.height() - ctx.typo.px(TYPE.body.1)).max(0.0)
+    };
+    let cost = formula.span() * formula.height() + band * ctx.typo.px(MATH_ROW_WIDTH);
     if ctx.math_area + cost > MATH_ROW_AREA {
         return None;
     }
@@ -558,45 +568,74 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
             PBlock::List { items, marker_w }
         }
         Block::Table { header, rows, align } => {
-            let mut cells = Vec::with_capacity(rows.len() + 1);
-            ctx.in_table = true;
-            cells.push(header.iter().map(|c| prepare_runs(ctx, c, TextKind::TableHeader, muted)).collect::<Vec<_>>());
-            for row in rows {
-                ctx.in_table = true;
-                cells.push(row.iter().map(|c| prepare_runs(ctx, c, TextKind::Body, muted)).collect());
-                ctx.in_table = false;
+            let (table, area) = prepare_table(ctx, header, rows, align, muted);
+            // A table is one scrolling canvas as wide as all its columns and
+            // as tall as all its rows: formulas that widen a column or raise
+            // a row multiply across the whole table. Past the budget it's set
+            // with its formulas as source, i.e. as a text table.
+            let math = table.cells.iter().flatten().any(|cell| !cell.math.is_empty());
+            if math && area > MATH_TABLE_AREA {
+                let enabled = std::mem::replace(&mut ctx.math.enabled, false);
+                let (plain, _) = prepare_table(ctx, header, rows, align, muted);
+                ctx.math.enabled = enabled;
+                PBlock::Table(Box::new(plain))
+            } else {
+                PBlock::Table(Box::new(table))
             }
-            let ncols = cells.iter().map(Vec::len).max().unwrap_or(0);
-            let cap = ctx.typo.px(240.0);
-            // A column grows past the cap to its widest formula (an atomic
-            // box, padding included); a table wider than the column scrolls.
-            // Capped: a column as wide as a 2000 em formula would make the
-            // table's scrolling canvas (one backing store) gigabytes; a wider
-            // formula shrinks to fit its cell instead.
-            let formula_cap = ctx.typo.px(1200.0);
-            let widest_box = |t: &PText| {
-                let spans = t.p.spans();
-                t.math
-                    .iter()
-                    .map(|(s, f)| (f.span() + spans[*s].pad_start + spans[*s].pad_end).min(formula_cap))
-                    .fold(0f32, f32::max)
-            };
-            let cols = (0..ncols)
-                .map(|c| {
-                    let (min, max, boxed) = cells.iter().filter_map(|r| r.get(c)).fold((0f32, 0f32, 0f32), |(mn, mx, bx), t| {
-                        (mn.max(t.p.min_content_width()), mx.max(t.p.max_content_width()), bx.max(widest_box(t)))
-                    });
-                    max.min(cap).max(min.min(cap)).max(boxed).max(ctx.typo.px(24.0)).ceil()
-                })
-                .collect();
-            PBlock::Table(Box::new(PTable {
-                cells,
-                align: align.clone(),
-                cols,
-            }))
         }
         Block::Rule => PBlock::Rule,
     }
+}
+
+/// A table's prepared cells and column widths, and the area (points²) of
+/// the canvas it sets: every column (padding included) across, every row
+/// down — independent of the width it's shown at.
+fn prepare_table(
+    ctx: &mut Ctx,
+    header: &[Vec<InlineRun>],
+    rows: &[Vec<Vec<InlineRun>>],
+    align: &[TableAlign],
+    muted: bool,
+) -> (PTable, f32) {
+    let mut cells = Vec::with_capacity(rows.len() + 1);
+    // Restored after the table (a header-only table has no rows to reset
+    // it), so the blocks after it keep their own limits.
+    let outer = std::mem::replace(&mut ctx.in_table, true);
+    cells.push(header.iter().map(|c| prepare_runs(ctx, c, TextKind::TableHeader, muted)).collect::<Vec<_>>());
+    for row in rows {
+        cells.push(row.iter().map(|c| prepare_runs(ctx, c, TextKind::Body, muted)).collect());
+    }
+    ctx.in_table = outer;
+    let ncols = cells.iter().map(Vec::len).max().unwrap_or(0);
+    let cap = ctx.typo.px(240.0);
+    // A column grows past the cap to its widest formula (an atomic box,
+    // padding included); a table wider than the column scrolls. Capped: a
+    // wider formula shrinks to fit its cell instead.
+    let formula_cap = ctx.typo.px(1200.0);
+    let widest_box = |t: &PText| {
+        let spans = t.p.spans();
+        t.math
+            .iter()
+            .map(|(s, f)| (f.span() + spans[*s].pad_start + spans[*s].pad_end).min(formula_cap))
+            .fold(0f32, f32::max)
+    };
+    let cols: Vec<f32> = (0..ncols)
+        .map(|c| {
+            let (min, max, boxed) = cells.iter().filter_map(|r| r.get(c)).fold((0f32, 0f32, 0f32), |(mn, mx, bx), t| {
+                (mn.max(t.p.min_content_width()), mx.max(t.p.max_content_width()), bx.max(widest_box(t)))
+            });
+            max.min(cap).max(min.min(cap)).max(boxed).max(ctx.typo.px(24.0)).ceil()
+        })
+        .collect();
+    let (pad_x, pad_y) = (ctx.typo.px(geom::CELL_PAD_X), ctx.typo.px(geom::CELL_PAD_Y));
+    let width: f32 = cols.iter().map(|w| w + pad_x * 2.0).sum();
+    let height: f32 = cells
+        .iter()
+        .map(|row| {
+            row.iter().zip(&cols).map(|(cell, w)| place_text(cell, 0.0, 0.0, *w, None)).fold(0f32, f32::max) + pad_y * 2.0
+        })
+        .sum();
+    (PTable { cells, align: align.to_vec(), cols }, width * height)
 }
 
 fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {

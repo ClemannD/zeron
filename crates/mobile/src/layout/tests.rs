@@ -1228,3 +1228,31 @@ fn a_rows_formulas_share_one_budget() {
     let rendered = d.glyphs.len() / one.glyphs.len();
     assert!(rendered < 40, "budget stops the row's formulas: {rendered}");
 }
+
+/// A header-only table leaves the cell limit behind it: the paragraph after
+/// keeps the prose limit.
+#[test]
+fn a_header_only_table_leaves_prose_limits_alone() {
+    let tall = r"\begin{matrix}a\\b\\c\\d\\e\\f\\g\\h\\i\\j\\k\\l\\m\\n\end{matrix}";
+    let alone = rows_of(&format!("so ${tall}$ here"), 390.0).remove(0);
+    assert!(!alone.glyphs.is_empty());
+    let rows = rows_of(&format!("| h |\n|---|\n\nso ${tall}$ here"), 390.0);
+    let after = rows.last().unwrap();
+    assert_eq!(after.glyphs.len(), alone.glyphs.len(), "the paragraph after renders as on its own");
+}
+
+/// A table's canvas is all its columns by all its rows: formulas that widen
+/// columns and raise rows multiply. Past its budget the table sets its
+/// formulas as source, as a text table; a small math table still renders.
+#[test]
+fn math_tables_keep_a_bounded_canvas() {
+    let wide = r"$\hspace{35em}x$";
+    let tall = r"$\begin{matrix}a\\[7.5em]b\end{matrix}$";
+    let header = format!("|{}|\n|{}|\n", vec![wide; 10].join("|"), vec!["---"; 10].join("|"));
+    let body: String = (0..28).map(|_| format!("|{}|\n", vec![tall; 10].join("|"))).collect();
+    let d = rows_of(&format!("{header}{body}"), 390.0).remove(0);
+    let canvas: f32 = d.scrollers.iter().map(|s| s.content_width * s.h).sum::<f32>().max(390.0 * d.height);
+    assert!(canvas < 8e6, "table canvas {canvas} pt²");
+    let small = rows_of("| a | b |\n|---|---|\n| $x^2$ | $\\frac{1}{2}$ |", 390.0).remove(0);
+    assert!(!small.glyphs.is_empty(), "a small math table renders its formulas");
+}

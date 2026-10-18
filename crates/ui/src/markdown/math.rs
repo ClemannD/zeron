@@ -40,7 +40,7 @@ const CACHE_CAPACITY: usize = 4096;
 
 /// Tallest inline formula, in ems of its text: a text element has one line
 /// height, so a taller one would open every line of its paragraph.
-pub(crate) const MAX_INLINE_EMS: f32 = 8.0;
+pub(crate) const MAX_INLINE_EMS: f32 = 12.0;
 /// The bytes those formulas may hold (sources plus laid-out items). Most are
 /// a few hundred bytes, but a long valid source lays out to thousands of
 /// items, so count alone doesn't bound memory.
@@ -290,36 +290,12 @@ fn math_face(font: u8) -> Option<&'static ttf_parser::Face<'static>> {
         .as_ref()
 }
 
-/// The horizontal extent `formula` paints over, in ems from its origin:
-/// its advance box, widened wherever negative space sets an item outside it
-/// (`a\hspace{-3em}b` has a negative advance and a glyph left of the origin).
+/// The horizontal extent `formula` paints over, in ems from its origin: its
+/// advance box widened to everything it paints (zatex's `left`/`right`
+/// cover every glyph's ink and rule), so negative space or an overhang never
+/// paints past its slot. O(1), as it's asked every frame per formula.
 pub(crate) fn span(formula: &Formula) -> Range<f32> {
-    // zatex's own painted extent (glyph bounds), widened by advances below.
-    let mut span =
-        formula.left.min(formula.width).min(0.0)..formula.right.max(formula.width).max(0.0);
-    for item in &formula.items {
-        let (left, right) = match *item {
-            Item::Glyph {
-                font,
-                glyph,
-                x,
-                size,
-                ..
-            } => {
-                let advance = math_face(font)
-                    .and_then(|face| {
-                        let advance = face.glyph_hor_advance(ttf_parser::GlyphId(glyph))?;
-                        Some(f32::from(advance) / f32::from(face.units_per_em()))
-                    })
-                    .unwrap_or(0.0);
-                (x, x + advance * size)
-            }
-            Item::Rule { x, width, .. } => (x, x + width),
-        };
-        span.start = span.start.min(left);
-        span.end = span.end.max(right);
-    }
-    span
+    formula.left.min(formula.width).min(0.0)..formula.right.max(formula.width).max(0.0)
 }
 
 /// The widest (and tallest) a formula may set, in ems of the surrounding
@@ -813,8 +789,13 @@ impl Element for MathGlyphs {
             // slot that wrapped, a column narrower than the formula): shrink
             // it to fit, as nothing beside a formula may be painted over.
             let room = f32::from(bounds.origin.x + bounds.size.width - rect.origin.x);
+            // No room left on its row (a slot past the element's edge):
+            // nothing it painted could stay inside, so it isn't painted.
+            if room <= 0.0 {
+                continue;
+            }
             let wide = f32::from(math_size) * (span.end - span.start);
-            if room > 0.0 && wide > room {
+            if wide > room {
                 math_size *= room / wide;
             }
             let baseline = if slot.display {
@@ -828,8 +809,12 @@ impl Element for MathGlyphs {
             };
             // Centered in the slot's slack by what it paints.
             let scale = f32::from(math_size);
+            // Never past the room left: centering in a slot wider than the
+            // row can't push the formula over the element's edge.
+            let painted = scale * (span.end - span.start);
             let slack = if rects.len() == 1 {
-                (f32::from(rect.size.width) - scale * (span.end - span.start)).max(0.0) / 2.0
+                ((f32::from(rect.size.width) - painted).max(0.0) / 2.0)
+                    .min((room - painted).max(0.0))
             } else {
                 0.0
             };

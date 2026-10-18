@@ -439,6 +439,11 @@ impl RenderOptions {
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
+    /// Display formulas by block, with the source they were laid out from:
+    /// a screenful of large ones can outgrow the shared formula cache, which
+    /// would then lay every one out again each frame.
+    display:
+        HashMap<(SharedString, usize, usize), (String, Option<std::sync::Arc<zatex::Formula>>)>,
     /// The [`crate::theme::style_generation`] these entries were shaped under.
     generation: u32,
     /// The math style `flats` were laid out in.
@@ -459,17 +464,20 @@ impl RenderCache {
     pub(crate) fn retain_rows(&mut self, rows: &std::collections::HashSet<SharedString>) {
         self.flats.retain(|(row, _, _), _| rows.contains(row));
         self.code.retain(|(row, _, _), _| rows.contains(row));
+        self.display.retain(|(row, _, _), _| rows.contains(row));
     }
 
     /// Drop every cached entry for `row`.
     pub fn invalidate_row(&mut self, row: &str) {
         self.flats.retain(|(r, _, _), _| r.as_ref() != row);
         self.code.retain(|(r, _, _), _| r.as_ref() != row);
+        self.display.retain(|(r, _, _), _| r.as_ref() != row);
     }
 
     pub fn clear(&mut self) {
         self.flats.clear();
         self.code.clear();
+        self.display.clear();
     }
 
     /// Drop every entry if the resolved text style changed since shaping. Cheap
@@ -489,6 +497,7 @@ impl RenderCache {
     fn sync_math(&mut self, math: super::math::MathStyle) {
         if self.math != math {
             self.flats.clear();
+            self.display.clear();
             self.math = math;
         }
     }
@@ -797,11 +806,28 @@ fn render_math_block(
     highlight: CodeHighlight,
 ) -> AnyElement {
     let math = opts.math;
-    let Some(formula) = math
-        .enabled
-        .then(|| super::math::formula(tex, true, math.face))
-        .flatten()
-    else {
+    let lay_out = || {
+        math.enabled
+            .then(|| super::math::formula(tex, true, math.face))
+            .flatten()
+    };
+    let formula = match &opts.cache {
+        Some(cache) => {
+            let mut cache = cache.borrow_mut();
+            cache.sync_style();
+            cache.sync_math(math);
+            let entry = cache
+                .display
+                .entry((opts.row_key.clone(), top_ix, ix))
+                .or_insert_with(|| (tex.to_owned(), lay_out()));
+            if entry.0 != tex {
+                *entry = (tex.to_owned(), lay_out());
+            }
+            entry.1.clone()
+        }
+        None => lay_out(),
+    };
+    let Some(formula) = formula else {
         return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
     };
     let line_height =
@@ -963,22 +989,25 @@ fn render_table(
             // a bounded length: past it the formula's own width stands in
             // (cells clip what they paint either way).
             const MAX_SHAPED_WORD: usize = 512;
+            // Where GPUI's wrapper breaks: after an ASCII space (or a
+            // newline). Found once per cell, then by binary search per slot.
+            let breaks: Vec<usize> = flat
+                .text
+                .bytes()
+                .enumerate()
+                .filter(|&(_, byte)| byte == b' ' || byte == b'\n')
+                .map(|(at, _)| at)
+                .collect();
             let mut measured = None;
             for slot in flat.math.iter().filter(|slot| !slot.display) {
-                // Where GPUI's wrapper breaks: after an ASCII space.
-                let breaks = |c: char| c == ' ' || c == '\n';
-                let start = flat.text[..slot.range.start]
-                    .char_indices()
-                    .rev()
-                    .find(|&(_, c)| breaks(c))
-                    .map_or(0, |(at, c)| at + c.len_utf8());
+                let before = breaks.partition_point(|&at| at < slot.range.start);
+                let start = before.checked_sub(1).map_or(0, |i| breaks[i] + 1);
                 if measured == Some(start) {
                     continue;
                 }
                 measured = Some(start);
-                let end = flat.text[slot.range.end..]
-                    .find(breaks)
-                    .map_or(flat.text.len(), |at| slot.range.end + at);
+                let after = breaks.partition_point(|&at| at < slot.range.end);
+                let end = breaks.get(after).copied().unwrap_or(flat.text.len());
                 let width = if end - start <= MAX_SHAPED_WORD {
                     let runs = slice_runs(&flat.runs, start..end);
                     f32::from(
@@ -1205,6 +1234,14 @@ fn flatten_runs_weighted(
         .any(|run| run.style.file_label.is_some() || run.style.math);
     let mut source = String::new();
     let mut omissions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    // Slots are placed by left-to-right glyph positions: in a paragraph with
+    // right-to-left text a formula would land on the words or vanish, so
+    // there its source shows instead.
+    let rtl = runs.iter().any(|run| {
+        run.text.chars().any(|c| {
+            matches!(c, '\u{0590}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}')
+        })
+    });
     for run in runs {
         if run.text.is_empty() {
             continue;
@@ -1213,13 +1250,14 @@ fn flatten_runs_weighted(
         // zatex can't render, too big to set, or any with math off, shows
         // that source as inline code instead.
         let formula = run.style.math.then(|| {
-            math_style
-                .enabled
+            (math_style.enabled && !rtl)
                 .then(|| super::math::formula(&run.text, false, math_style.face))
                 .flatten()
                 // An inline formula taller than a few lines would open every
                 // line of its paragraph (one line height per element).
-                .filter(|formula| formula.height() <= super::math::MAX_INLINE_EMS)
+                .filter(|formula| {
+                    formula.height() * math_style.scale() <= super::math::MAX_INLINE_EMS
+                })
                 .and_then(|formula| {
                     let slot = super::math::slot_text(&formula, math_style.scale())?;
                     Some((formula, slot))
