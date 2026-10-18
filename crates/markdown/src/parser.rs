@@ -719,6 +719,8 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
         name > 0 && word[0].is_ascii_alphabetic() && word[name..].starts_with(b"://")
     };
     let mut url = Vec::with_capacity(runs.len());
+    // The current word's start past its opening brackets and quotes, found
+    // once per word (a word of `(((…` before many dollars stays linear).
     let (mut scanned, mut word_start) = (0usize, 0usize);
     for run in &runs {
         if let Some(space) = bytes[scanned.min(run.start)..run.start]
@@ -726,17 +728,25 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
             .rposition(u8::is_ascii_whitespace)
         {
             word_start = scanned.min(run.start) + space + 1;
+            word_start += bytes[word_start..run.start]
+                .iter()
+                .take_while(|byte| b"([<\"'".contains(byte))
+                .count();
+        } else if scanned == 0 && run.start > 0 {
+            word_start += bytes[word_start..run.start]
+                .iter()
+                .take_while(|byte| b"([<\"'".contains(byte))
+                .count();
         }
         scanned = scanned.max(run.start);
         // A query parameter (`?$select`, `&$top`) or a Perl sigil (`@$ref`,
-        // `%$ref`).
-        let query = run.start > 0 && matches!(bytes[run.start - 1], b'?' | b'&' | b'@' | b'%');
-        let word = &bytes[word_start..run.start];
-        let word = &word[word
-            .iter()
-            .take_while(|byte| b"([<\"'".contains(byte))
-            .count()..];
-        url.push(query || scheme_word(word));
+        // `%$ref`) — not a TeX escape before the closer (`$50\%$`).
+        let sigil = |at: usize| {
+            at > 0
+                && matches!(bytes[at - 1], b'?' | b'&' | b'@' | b'%')
+                && !(at > 1 && bytes[at - 2] == b'\\')
+        };
+        url.push(sigil(run.start) || scheme_word(&bytes[word_start.min(run.start)..run.start]));
     }
     for (run, url) in runs.iter().zip(url) {
         if url {
@@ -770,8 +780,15 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
             pending = None;
             let tex = &source[open.0.end..start];
             let next = bytes.get(run.end).copied();
+            // Shell and code identifiers: `TOKEN=$TOKEN -e ID=$ID`, R's
+            // `df$col`, Vue's `this.$refs` — an opener glued to a word, `.`
+            // or `=` whose closer runs into another identifier.
+            let prev = open.0.start.checked_sub(1).map(|at| bytes[at]);
+            let identifiers = prev
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b"_.=".contains(&b))
+                && next.is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
             let formula = if len == 1 {
-                !not_math(tex, next)
+                !identifiers && !not_math(tex, next)
             } else {
                 !display_prose(tex, next)
             };
@@ -882,18 +899,18 @@ fn rewrite_math_delimiters(
             if !skip.off(to_source(backslash)) && !words.glued(bytes, backslash) {
                 pending[kind] = Some((backslash, text.frame));
             }
-        } else if let Some((open, frame)) = pending[kind]
+        } else if let Some((open, frame)) = pending[kind].take()
+            // A closer in another emphasis span drops its opener (it never
+            // pairs past one).
             && frame == text.frame
-        {
-            pending[kind] = None;
-            if math_body(
+            && math_body(
                 &source[open + 2..backslash],
                 display,
                 display && mid_line(bytes, open),
-            ) {
-                pairs.push((open, backslash, display));
-                pending = [None, None];
-            }
+            )
+        {
+            pairs.push((open, backslash, display));
+            pending = [None, None];
         }
     }
     if pairs.is_empty() {
@@ -1791,8 +1808,10 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
         || braced
         || unbalanced
         || amount
-        // Regex anchors: `/x$/i or /y$/g`, `'a$|b$'`.
-        || tex.starts_with('/')
+        // Regex anchors: `/x$/i or /y$/g`, `'a$|b$'`, `grep 'foo$' a &&
+        // grep 'bar$'`; and spans ending on an operator (`x=$a y=$b`).
+        || tex.starts_with(['/', '\''])
+        || tex.ends_with(['=', '+', '.'])
         || (tex.starts_with('|') && !tex.ends_with('|'))
 }
 
@@ -2159,11 +2178,17 @@ impl IncrementalParser {
             let top = Arc::make_mut(top);
             // Display ranges point back into the unmended source; synthetic
             // closers at the end clamp away — onto a char boundary.
-            let mut end = top.range.end.min(self.source.len());
-            while !self.source.is_char_boundary(end) {
-                end -= 1;
-            }
-            top.range.end = end.max(top.range.start);
+            // (A synthetic block past the end — the setext guard's zero-width
+            // space — gets an empty range at the end.)
+            let clamp = |at: usize| {
+                let mut at = at.min(self.source.len());
+                while !self.source.is_char_boundary(at) {
+                    at -= 1;
+                }
+                at
+            };
+            let start = clamp(top.range.start);
+            top.range = start..clamp(top.range.end).max(start);
         }
         self.display_from = self
             .tree
@@ -4071,6 +4096,57 @@ mod math_tests {
             .collect();
         let tree = format!("{:?}", parse_full(&source));
         assert!(!tree.contains("item15item16"), "{tree}");
+    }
+
+    /// Round-7 review: code and shell identifiers, quoted anchors, escaped
+    /// percentages, emphasis-crossing pairs, a long run of opening brackets.
+    #[test]
+    fn identifiers_anchors_and_escaped_percent() {
+        for source in [
+            "docker run -e TOKEN=$TOKEN -e ID=$ID image",
+            "--user=$USER --home=$HOME",
+            "DB_URL=$DB_URL, API_KEY=$API_KEY",
+            "make CC=$CC CXX=$CXX",
+            "x=$a y=$b",
+            "use df$col and df$other",
+            "this.$refs.input and call this.$emit(e)",
+            "grep 'foo$' a.txt && grep 'bar$' b.txt",
+            "'^v[0-9]+$' for tags and '^release-.*$'",
+            "use \\(.*\\) to: s/\\(.*\\)/",
+        ] {
+            assert_no_math(source);
+        }
+        assert_eq!(
+            para("rate $50\\%$ up"),
+            [plain("rate "), math("50\\%"), plain(" up")]
+        );
+        assert_eq!(
+            para("so $\\&$ too"),
+            [plain("so "), math("\\&"), plain(" too")]
+        );
+        assert_eq!(para("$n$th"), [math("n"), plain("th")]);
+        let started = std::time::Instant::now();
+        parse_full(&format!(
+            "{}{}",
+            "(".repeat(64 << 10),
+            "$a".repeat(32 << 10)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn display_ranges_stay_in_bounds_while_streaming() {
+        for source in ["***o\r\n=", "- [ ] ``\n-", "- [ ] <!--[\n-"] {
+            let mut parser = IncrementalParser::new();
+            parser.set_text(source);
+            for top in &parser.display_tree().blocks {
+                assert!(
+                    source.get(top.range.clone()).is_some(),
+                    "{source:?}: {:?}",
+                    top.range
+                );
+            }
+        }
     }
 }
 
