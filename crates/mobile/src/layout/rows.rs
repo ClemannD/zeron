@@ -484,6 +484,8 @@ impl RowBuilder {
                 .map(|(_, core)| core.clone());
             let core = reuse.unwrap_or_else(|| {
                 let id = format!("{pkey}.{bi}");
+                // Each block is its own row: its formulas share one budget.
+                ctx.math_area = 0.0;
                 let content = prepare_block(ctx, &block.block, 0, false);
                 Arc::new(RowCore {
                     key: row_key(&id),

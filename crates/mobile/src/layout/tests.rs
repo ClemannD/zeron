@@ -1165,7 +1165,7 @@ fn laid_out_formulas_are_reused() {
 fn oversized_formulas_show_as_source() {
     for md in [
         r"Tall $\begin{matrix}x\\[40em]y\end{matrix}$ inline",
-        r"$$\hspace{70em}\hspace{70em}\begin{matrix}x\\[45em]y\end{matrix}$$",
+        r"$$\hspace{70em}\hspace{70em}\begin{matrix}x\\[95em]y\end{matrix}$$",
     ] {
         let d = rows_of(md, 390.0).remove(0);
         assert!(d.glyphs.is_empty(), "rendered as source: {md}");
@@ -1181,9 +1181,16 @@ fn oversized_formulas_show_as_source() {
 /// derivations narrower than the column render (only area is capped).
 #[test]
 fn table_cells_hold_formulas_short_and_long_derivations_render() {
-    let tall = r"\begin{matrix}a\\b\\c\\d\\e\\f\\g\\h\end{matrix}";
+    let tall = r"\begin{matrix}a\\b\\c\\d\\e\\f\\g\\h\\i\\j\\k\\l\\m\\n\end{matrix}";
     let cell = rows_of(&format!("| t | v |\n|---|---|\n| x | ${tall}$ |"), 390.0).remove(0);
     assert!(cell.glyphs.is_empty(), "tall cell formula shows as source");
+    let header = rows_of(&format!("| ${tall}$ |\n|---|\n| x |"), 390.0).remove(0);
+    assert!(header.glyphs.is_empty(), "header cells are held short too");
+    // Ordinary cell math still renders.
+    let vector = rows_of(r"| v |
+|---|
+| $\begin{pmatrix}1\\2\\3\\4\\5\end{pmatrix}$ |", 390.0).remove(0);
+    assert!(!vector.glyphs.is_empty(), "a 5-row vector fits a cell");
     let prose = rows_of(&format!("so ${tall}$ here"), 390.0).remove(0);
     assert!(!prose.glyphs.is_empty(), "in prose it renders");
     let rows: String = (0..40).map(|i| format!("a_{{{i}}} &= \\frac{{b_{i}}}{{c_{i}}} \\\\ ")).collect();
@@ -1207,4 +1214,17 @@ fn formula_cache_stays_bounded_through_compactions() {
     let (live, uses, bytes) = w.math_failures.laid_stats();
     assert!(live <= 4096 && bytes <= 8 << 20, "{live} formulas, {bytes} bytes");
     assert!(uses >= live, "every live formula keeps a use: {uses} < {live}");
+}
+
+/// A row's formulas share one canvas budget: past it, the rest show as
+/// source instead of each adding a full-size backing store.
+#[test]
+fn a_rows_formulas_share_one_budget() {
+    let wide = r"$$\hspace{60em}\hspace{60em}\begin{matrix}x\\[30em]y\end{matrix}$$";
+    let list: String = (0..40).map(|_| format!("- {wide}\n")).collect();
+    let one = rows_of(&format!("- {wide}\n"), 390.0).remove(0);
+    assert!(!one.glyphs.is_empty(), "one of them alone renders");
+    let d = rows_of(&list, 390.0).remove(0);
+    let rendered = d.glyphs.len() / one.glyphs.len();
+    assert!(rendered < 40, "budget stops the row's formulas: {rendered}");
 }

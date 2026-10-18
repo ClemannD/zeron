@@ -965,7 +965,8 @@ fn render_table(
             const MAX_SHAPED_WORD: usize = 512;
             let mut measured = None;
             for slot in flat.math.iter().filter(|slot| !slot.display) {
-                let breaks = |c: char| c.is_whitespace() && c != '\u{A0}';
+                // Where GPUI's wrapper breaks: after an ASCII space.
+                let breaks = |c: char| c == ' ' || c == '\n';
                 let start = flat.text[..slot.range.start]
                     .char_indices()
                     .rev()
@@ -1071,7 +1072,16 @@ fn render_table(
                 .p(px(TABLE_CELL_PADDING))
                 .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
                 .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT));
-            cell = match align.get(c).copied().unwrap_or_default() {
+            // A centered or right-aligned line shifts its glyphs but not the
+            // slot positions formulas are placed by: cells with formulas
+            // stay left-aligned so the two agree.
+            let holds_formula = cell_flat.as_ref().is_some_and(|flat| !flat.math.is_empty());
+            let align = if holds_formula {
+                TableAlign::Left
+            } else {
+                align.get(c).copied().unwrap_or_default()
+            };
+            cell = match align {
                 TableAlign::Left => cell,
                 TableAlign::Center => cell.text_center(),
                 TableAlign::Right => cell.text_right(),
@@ -1207,6 +1217,9 @@ fn flatten_runs_weighted(
                 .enabled
                 .then(|| super::math::formula(&run.text, false, math_style.face))
                 .flatten()
+                // An inline formula taller than a few lines would open every
+                // line of its paragraph (one line height per element).
+                .filter(|formula| formula.height() <= super::math::MAX_INLINE_EMS)
                 .and_then(|formula| {
                     let slot = super::math::slot_text(&formula, math_style.scale())?;
                     Some((formula, slot))

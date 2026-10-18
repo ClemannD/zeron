@@ -21,6 +21,9 @@ pub(crate) struct Ctx<'a> {
     /// Preparing a table cell: a scrolling table is one canvas as wide and
     /// tall as all its rows, so formulas there are held shorter.
     pub in_table: bool,
+    /// Canvas area the current row's formulas take, in points² (reset per
+    /// row): a row is one backing store, so its formulas share a budget.
+    pub math_area: f32,
 }
 
 /// Formulas zatex rejected, so preparing their rows again (a rebuild, a
@@ -150,15 +153,21 @@ const MATH_SOURCE_BLOCK_MAX: usize = 512;
 
 /// Most a display formula may cover, in points², and its widest: a display
 /// formula wider than the column scrolls in one canvas, so its whole area is
-/// a backing store (1.5M pt² is ~54 MB at @3x; real display math — a long
-/// `aligned` derivation included — is well under a third of that).
-const MATH_MAX_AREA: f32 = 1.5e6;
+/// a backing store (3M pt² is ~108 MB at @3x; a 40-row `aligned` derivation
+/// at 200% is under two thirds of that).
+const MATH_MAX_AREA: f32 = 3e6;
 const MATH_MAX_WIDTH: f32 = 8000.0;
 /// Tallest inline formula, in ems: shrinking one to fit its line scales its
 /// paint, not the line it grew. In a table cell, whose rows all share one
 /// scrolling canvas, a formula is held to a few lines.
 const MATH_MAX_INLINE_EMS: f32 = 30.0;
-const MATH_MAX_CELL_EMS: f32 = 6.0;
+const MATH_MAX_CELL_EMS: f32 = 10.0;
+/// Every formula in a row shares one backing store's budget, in points²
+/// (~144 MB at @3x, about what a long code block or wide table costs). A
+/// formula is charged its height across at least a typical column, since a
+/// tall inline one grows its whole line.
+const MATH_ROW_AREA: f32 = 4e6;
+const MATH_ROW_WIDTH: f32 = 400.0;
 
 fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc<zatex::Formula>> {
     if !ctx.math.enabled {
@@ -170,7 +179,7 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
         return None;
     }
     if let Some(formula) = ctx.math_failures.laid(key) {
-        return Some(formula);
+        return charge(ctx, formula);
     }
     let options = if display { zatex::Options::display(size) } else { zatex::Options::inline(size) };
     let formula = zatex::bundled::layout(tex, ctx.math.face, &options).ok().filter(|f| {
@@ -185,13 +194,24 @@ fn layout_math(ctx: &mut Ctx, tex: &str, display: bool, size: f32) -> Option<Arc
         Some(formula) => {
             let formula = Arc::new(formula);
             ctx.math_failures.keep(key, formula.clone());
-            Some(formula)
+            charge(ctx, formula)
         }
         None => {
             ctx.math_failures.insert(key);
             None
         }
     }
+}
+
+/// `formula` if its row's budget ([`MATH_ROW_AREA`]) still holds it, charged
+/// to that budget; past it, the formula shows as source.
+fn charge(ctx: &mut Ctx, formula: Arc<zatex::Formula>) -> Option<Arc<zatex::Formula>> {
+    let cost = formula.height() * formula.span().max(ctx.typo.px(MATH_ROW_WIDTH));
+    if ctx.math_area + cost > MATH_ROW_AREA {
+        return None;
+    }
+    ctx.math_area += cost;
+    Some(formula)
 }
 
 /// How formulas render: in `face` when `enabled`, else as their source (an
@@ -539,6 +559,7 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
         }
         Block::Table { header, rows, align } => {
             let mut cells = Vec::with_capacity(rows.len() + 1);
+            ctx.in_table = true;
             cells.push(header.iter().map(|c| prepare_runs(ctx, c, TextKind::TableHeader, muted)).collect::<Vec<_>>());
             for row in rows {
                 ctx.in_table = true;

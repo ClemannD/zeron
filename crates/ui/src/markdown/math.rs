@@ -36,7 +36,11 @@ use super::render::{FlatText, range_rects};
 
 /// Formulas kept laid out, across faces and styles: enough for every formula
 /// on screen plus recent scrollback.
-const CACHE_CAPACITY: usize = 1024;
+const CACHE_CAPACITY: usize = 4096;
+
+/// Tallest inline formula, in ems of its text: a text element has one line
+/// height, so a taller one would open every line of its paragraph.
+pub(crate) const MAX_INLINE_EMS: f32 = 8.0;
 /// The bytes those formulas may hold (sources plus laid-out items). Most are
 /// a few hundred bytes, but a long valid source lays out to thousands of
 /// items, so count alone doesn't bound memory.
@@ -779,7 +783,7 @@ impl Element for MathGlyphs {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
@@ -801,7 +805,18 @@ impl Element for MathGlyphs {
                 continue;
             };
             let formula = &slot.formula;
-            let math_size = font_size * slot.scale;
+            // What it paints, not its advance (negative space can shrink
+            // that below zero).
+            let span = span(formula);
+            let mut math_size = font_size * slot.scale;
+            // Wider than the room from its slot to the element's edge (a
+            // slot that wrapped, a column narrower than the formula): shrink
+            // it to fit, as nothing beside a formula may be painted over.
+            let room = f32::from(bounds.origin.x + bounds.size.width - rect.origin.x);
+            let wide = f32::from(math_size) * (span.end - span.start);
+            if room > 0.0 && wide > room {
+                math_size *= room / wide;
+            }
             let baseline = if slot.display {
                 rect.origin.y
                     + (line_height - math_size * formula.height()) / 2.0
@@ -811,9 +826,7 @@ impl Element for MathGlyphs {
                 let line = &line.unwrapped_layout;
                 rect.origin.y + (line_height - line.ascent - line.descent) / 2.0 + line.ascent
             };
-            // Centered in the slot's slack by what it paints, not its
-            // advance, which negative space can shrink below zero.
-            let span = span(formula);
+            // Centered in the slot's slack by what it paints.
             let scale = f32::from(math_size);
             let slack = if rects.len() == 1 {
                 (f32::from(rect.size.width) - scale * (span.end - span.start)).max(0.0) / 2.0

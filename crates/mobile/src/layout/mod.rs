@@ -685,6 +685,7 @@ impl Worker {
                 math: self.math,
                 math_failures: &mut self.math_failures,
                 in_table: false,
+                math_area: 0.0,
             };
             self.builder.build(&mut ctx, &self.input)
         };
