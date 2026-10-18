@@ -220,13 +220,16 @@ impl<'f> Ctx<'f> {
         Ok(())
     }
 
+    /// A filled rule; one over negative-width content (`\overline{\hspace{-5em}}`)
+    /// draws nothing, as in TeX, rather than leaving hosts to disagree on a
+    /// negative rectangle.
     fn rule(&mut self, x: f32, y: f32, width: f32, height: f32) -> R<Item> {
         self.count(1)?;
         Ok(Item::Rule {
             x,
             y,
-            width,
-            height,
+            width: width.max(0.0),
+            height: height.max(0.0),
         })
     }
 

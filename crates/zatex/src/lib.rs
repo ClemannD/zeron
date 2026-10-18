@@ -294,6 +294,8 @@ pub enum ErrorKind {
     TooLarge,
     /// [`Options::size`] isn't a positive, finite number.
     BadSize,
+    /// Layout failed unexpectedly (a bug): the host shows the source.
+    Internal,
 }
 
 impl Error {
@@ -327,6 +329,7 @@ impl std::fmt::Display for Error {
             TooDeep => f.write_str("formula nested too deeply"),
             TooLarge => f.write_str("formula too large"),
             BadSize => f.write_str("font size must be positive and finite"),
+            Internal => f.write_str("formula could not be laid out"),
         }?;
         write!(f, " at {}..{}", self.range.start, self.range.end)
     }
@@ -373,8 +376,17 @@ fn token_at(source: &str, start: usize) -> Range<usize> {
     start..start + len
 }
 
-/// Lays out TeX math `source` (without `$` delimiters) in `font`.
+/// Lays out TeX math `source` (without `$` delimiters) in `font`. Hosts run
+/// this on agent output in their render paths, so a panic (a layout bug) is
+/// an [`ErrorKind::Internal`] error rather than a crash.
 pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lay_out(source, font, options)
+    }))
+    .unwrap_or_else(|_| Err(Error::new(ErrorKind::Internal, 0..source.len())))
+}
+
+fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
     if source.len() > options.max_bytes {
         return Err(Error::new(ErrorKind::TooLong, 0..source.len()));
     }

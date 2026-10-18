@@ -780,7 +780,8 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
 /// Tracks, for dollar spans in source order, whether each opens inside a URL
 /// word (`scheme://…`) or right after a query or sigil character (`?$top`,
 /// `&$x`, `@$ref`, `%$h` — but not TeX's `\%$`). Each word's start (past
-/// opening brackets and quotes) is found once, so it stays linear.
+/// leading brackets, quotes and emphasis: `**https://…`) is found once, so
+/// it stays linear.
 #[derive(Default)]
 struct UrlWords {
     scanned: usize,
@@ -794,12 +795,12 @@ impl UrlWords {
             self.start = from + space + 1;
             self.start += bytes[self.start..at]
                 .iter()
-                .take_while(|byte| b"([<\"'".contains(byte))
+                .take_while(|byte| byte.is_ascii_punctuation())
                 .count();
         } else if self.scanned == 0 {
             self.start += bytes[self.start..at]
                 .iter()
-                .take_while(|byte| b"([<\"'".contains(byte))
+                .take_while(|byte| byte.is_ascii_punctuation())
                 .count();
         }
         self.scanned = self.scanned.max(at);
@@ -4053,6 +4054,8 @@ mod math_tests {
         );
         for source in [
             "Visit https://x.dev/$a$b now",
+            "**https://example.com/$id$/x**",
+            "(_https://example.com/$a$b_)",
             "GET /api/items?$select=name&$expand=owner",
             "Program Files \\(x86\\)",
             "built for \\(arm64\\) only",

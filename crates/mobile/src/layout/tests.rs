@@ -1248,8 +1248,8 @@ fn a_header_only_table_leaves_prose_limits_alone() {
 fn math_tables_keep_a_bounded_canvas() {
     let wide = r"$\hspace{35em}x$";
     let tall = r"$\begin{matrix}a\\[7.5em]b\end{matrix}$";
-    let header = format!("|{}|\n|{}|\n", vec![wide; 10].join("|"), vec!["---"; 10].join("|"));
-    let body: String = (0..28).map(|_| format!("|{}|\n", vec![tall; 10].join("|"))).collect();
+    let header = format!("|{}|\n|{}|\n", [wide; 10].join("|"), ["---"; 10].join("|"));
+    let body: String = (0..28).map(|_| format!("|{}|\n", [tall; 10].join("|"))).collect();
     let d = rows_of(&format!("{header}{body}"), 390.0).remove(0);
     let canvas: f32 = d.scrollers.iter().map(|s| s.content_width * s.h).sum::<f32>().max(390.0 * d.height);
     assert!(canvas < 8e6, "table canvas {canvas} pt²");

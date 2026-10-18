@@ -619,3 +619,19 @@ fn the_box_holds_all_ink() {
         Err(ErrorKind::TooLarge)
     );
 }
+
+#[test]
+fn rules_over_negative_content_are_empty() {
+    for tex in [
+        r"\overline{\hspace{-5em}}",
+        r"\sqrt{\hspace{-2em}}",
+        r"\frac{\hspace{-3em}}{\hspace{-3em}}",
+        r"\boxed{\hspace{-4em}}",
+    ] {
+        for item in &inline(tex).items {
+            if let Item::Rule { width, height, .. } = item {
+                assert!(*width >= 0.0 && *height >= 0.0, "{tex}: {item:?}");
+            }
+        }
+    }
+}
