@@ -58,6 +58,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
+    private var composerRest: NSLayoutConstraint?
     private var backgroundObserver: NSObjectProtocol?
 
     deinit {
@@ -174,8 +175,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             composer.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             composer.widthAnchor.constraint(lessThanOrEqualToConstant: 768),
             fill,
-            composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
         ])
+        composerRest = pinAboveKeyboard(composer)
         if draft.projectId == nil, draft.hostId == nil { draft.projectId = app.projectOptions.first?.id }
         if draft.projectId == nil, draft.hostId == nil {
             // No projects yet: run on the first reachable host.
@@ -217,6 +218,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if focusOnAppear { composer.becomeFirstResponder() }
+    }
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        composerRest?.constant = -composerRestGap
     }
 
     override func viewDidLayoutSubviews() {
