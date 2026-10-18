@@ -1190,3 +1190,21 @@ fn table_cells_hold_formulas_short_and_long_derivations_render() {
     let d = rows_of(&format!("$$\\begin{{aligned}}{rows}\\end{{aligned}}$$"), 390.0).remove(0);
     assert!(!d.glyphs.is_empty(), "a 40-row derivation renders");
 }
+
+/// The formula cache stays within its bounds through many compactions:
+/// every live entry keeps a use record, so eviction can always reach it.
+#[test]
+fn formula_cache_stays_bounded_through_compactions() {
+    let mut w = worker(390.0);
+    for round in 0..12 {
+        let md: String = (0..1500).map(|i| format!("$x_{{{}}}$ ", round * 1500 + i)).collect();
+        w.input = transcript_one(&md);
+        w.pass();
+        // Hit the newest ones again: uses pile up and force compactions.
+        w.rebuild();
+        w.pass();
+    }
+    let (live, uses, bytes) = w.math_failures.laid_stats();
+    assert!(live <= 4096 && bytes <= 8 << 20, "{live} formulas, {bytes} bytes");
+    assert!(uses >= live, "every live formula keeps a use: {uses} < {live}");
+}

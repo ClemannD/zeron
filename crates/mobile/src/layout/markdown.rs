@@ -63,12 +63,27 @@ impl MathFailures {
     fn touch(&mut self, key: u64) -> u64 {
         self.tick += 1;
         self.laid_order.push_back((key, self.tick));
-        // Stale uses pile up with hits; compact once they outnumber the live.
+        self.tick
+    }
+
+    /// Drop stale uses once they outnumber the live entries. Called only
+    /// after the entry just touched holds its new tick, so its own use is
+    /// never the one dropped (an entry without a use could never be evicted).
+    #[cfg(test)]
+    pub fn laid_stats(&self) -> (usize, usize, usize) {
+        let live_uses = self
+            .laid_order
+            .iter()
+            .filter(|(key, tick)| self.laid.get(key).is_some_and(|entry| entry.1 == *tick))
+            .count();
+        (self.laid.len(), live_uses, self.laid_bytes)
+    }
+
+    fn compact(&mut self) {
         if self.laid_order.len() > 4 * Self::LAID_CAP.max(self.laid.len()) {
             let laid = &self.laid;
             self.laid_order.retain(|(key, tick)| laid.get(key).is_some_and(|entry| entry.1 == *tick));
         }
-        self.tick
     }
 
     fn laid(&mut self, key: u64) -> Option<Arc<zatex::Formula>> {
@@ -77,6 +92,7 @@ impl MathFailures {
         if let Some(entry) = self.laid.get_mut(&key) {
             entry.1 = tick;
         }
+        self.compact();
         self.laid_hits += 1;
         Some(formula)
     }
@@ -87,6 +103,7 @@ impl MathFailures {
         if let Some((old, _)) = self.laid.insert(key, (formula, tick)) {
             self.laid_bytes -= Self::bytes(&old);
         }
+        self.compact();
         while self.laid.len() > Self::LAID_CAP || self.laid_bytes > Self::LAID_BYTES {
             let Some((old, tick)) = self.laid_order.pop_front() else { break };
             if self.laid.get(&old).is_some_and(|entry| entry.1 == tick)

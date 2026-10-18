@@ -958,7 +958,12 @@ fn render_table(
             let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
             // The unbreakable word around each inline formula (its slot's
             // NBSPs plus any text glued to it: `cost=$F$`), shaped at the
-            // size the cell really sets (`MD_TEXT_SIZE` rems).
+            // size the cell really sets (`MD_TEXT_SIZE` rems) — once per
+            // word, however many formulas it glues together, and only up to
+            // a bounded length: past it the formula's own width stands in
+            // (cells clip what they paint either way).
+            const MAX_SHAPED_WORD: usize = 512;
+            let mut measured = None;
             for slot in flat.math.iter().filter(|slot| !slot.display) {
                 let breaks = |c: char| c.is_whitespace() && c != '\u{A0}';
                 let start = flat.text[..slot.range.start]
@@ -966,16 +971,29 @@ fn render_table(
                     .rev()
                     .find(|&(_, c)| breaks(c))
                     .map_or(0, |(at, c)| at + c.len_utf8());
+                if measured == Some(start) {
+                    continue;
+                }
+                measured = Some(start);
                 let end = flat.text[slot.range.end..]
                     .find(breaks)
                     .map_or(flat.text.len(), |at| slot.range.end + at);
-                let word = &flat.text[start..end];
-                let runs = slice_runs(&flat.runs, start..end);
-                let width = f32::from(
-                    text_system
-                        .shape_line(word.to_string().into(), cell_font_size, &runs, None)
-                        .width(),
-                );
+                let width = if end - start <= MAX_SHAPED_WORD {
+                    let runs = slice_runs(&flat.runs, start..end);
+                    f32::from(
+                        text_system
+                            .shape_line(
+                                flat.text[start..end].to_string().into(),
+                                cell_font_size,
+                                &runs,
+                                None,
+                            )
+                            .width(),
+                    )
+                } else {
+                    let span = super::math::span(&slot.formula);
+                    (span.end - span.start) * slot.scale * f32::from(cell_font_size)
+                };
                 if width.is_finite() {
                     widest_formula[c] = widest_formula[c].max(width.ceil());
                 }
