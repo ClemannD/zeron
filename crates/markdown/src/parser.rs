@@ -220,8 +220,9 @@ fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
         };
         let mut formulas = Vec::new();
         let mut destinations = Vec::new();
-        // Links and images a math-free reading has: none may be lost.
-        let mut links: Vec<usize> = Vec::new();
+        // Links and images the source's first reading has: no formula may
+        // break one.
+        let mut links: Vec<Range<usize>> = Vec::new();
         if let Some(pass) = select_dollars(source, options, &skip) {
             text = Cow::Owned(pass.text);
             maps.push(pass.map);
@@ -237,7 +238,7 @@ fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
                     links = pass
                         .links
                         .iter()
-                        .map(|&at| to_source(&maps, at..at).start)
+                        .map(|range| to_source(&maps, range.clone()))
                         .collect();
                 }
                 text = Cow::Owned(pass.text);
@@ -317,7 +318,7 @@ fn failed_rewrites(
     events: &[(Event, Range<usize>)],
     formulas: &[Range<usize>],
     destinations: &[(usize, usize)],
-    links: &[usize],
+    links: &[Range<usize>],
 ) -> Vec<usize> {
     if formulas.is_empty() && destinations.is_empty() {
         return Vec::new();
@@ -343,7 +344,9 @@ fn failed_rewrites(
             .filter(|(_, end)| !ends.contains(end))
             .map(|&(at, _)| at),
     );
-    // A formula that ate part of a link (`[a $[$] b](u)`) broke it.
+    // A formula that ate part of a link (`[a $[$] b](u)`) broke it: a link
+    // the first reading had is gone, and a formula overlaps where it was.
+    // (One a destination rewrite displaced — nested links — isn't theirs.)
     if !formulas.is_empty() {
         let starts: std::collections::HashSet<usize> = events
             .iter()
@@ -352,7 +355,14 @@ fn failed_rewrites(
             })
             .map(|(_, range)| range.start)
             .collect();
-        failed.extend(links.iter().filter(|at| !starts.contains(at)));
+        let mut sorted: Vec<&Range<usize>> = formulas.iter().collect();
+        sorted.sort_by_key(|pair| pair.start);
+        for link in links.iter().filter(|link| !starts.contains(&link.start)) {
+            let i = sorted.partition_point(|pair| pair.end <= link.start);
+            if sorted.get(i).is_some_and(|pair| pair.start < link.end) {
+                failed.push(link.start);
+            }
+        }
     }
     failed
 }
@@ -558,32 +568,32 @@ impl OffsetMap {
 /// One stretch of inline text pulldown-cmark reads in a source: a `Text`
 /// event's range; the inline container holding it (paragraph, heading, table
 /// cell, list item text, link text — an id that changes at every block, link
-/// or raw-HTML boundary); the innermost emphasis span around it (a delimiter
-/// pair must share one, so it never straddles `**` and leaves half of it
-/// behind); and whether its first byte is backslash-escaped. Code (fenced or
-/// indented, in any container), raw HTML, autolinks, link destinations,
-/// reference labels and definitions never produce such text, so a rewrite
-/// that only touches it can't reach them.
+/// or raw-HTML boundary); and whether its first byte is backslash-escaped.
+/// Code (fenced or indented, in any container), raw HTML, autolinks, link
+/// destinations, reference labels and definitions never produce such text,
+/// so a rewrite that only touches it can't reach them.
 struct InlineText {
     range: Range<usize>,
     container: u32,
-    frame: u32,
     escaped: bool,
 }
 
-fn inline_texts(source: &str, options: Options) -> (Vec<InlineText>, Vec<usize>) {
+/// What one parse of a source says about its inline content: its text
+/// stretches and its links and images.
+struct Inlines {
+    texts: Vec<InlineText>,
+    links: Vec<Range<usize>>,
+}
+
+fn inline_texts(source: &str, options: Options) -> Inlines {
     let bytes = source.as_bytes();
     let mut texts = Vec::new();
-    // Where each link and image starts.
-    let mut link_starts = Vec::new();
+    let mut links = Vec::new();
     let mut container = 0u32;
     // Code blocks, autolinks and reference links: text that keeps its
     // spelling.
     let mut literal = 0usize;
-    let mut links: Vec<bool> = Vec::new();
-    // Open emphasis spans, innermost last, by id.
-    let mut frames: Vec<u32> = Vec::new();
-    let mut next_frame = 0u32;
+    let mut kept: Vec<bool> = Vec::new();
     // End of the last inline event: an escape's backslash is the one byte no
     // event covers right before the escaped character.
     let mut covered = 0usize;
@@ -601,23 +611,18 @@ fn inline_texts(source: &str, options: Options) -> (Vec<InlineText>, Vec<usize>)
             // the label its definition must match, rewritten it would match
             // none.
             Event::Start(Tag::Link { link_type, .. } | Tag::Image { link_type, .. }) => {
-                link_starts.push(range.start);
+                links.push(range.clone());
                 let keep = !matches!(link_type, LinkType::Inline);
                 literal += usize::from(keep);
-                links.push(keep);
+                kept.push(keep);
                 container += 1;
             }
             Event::End(TagEnd::Link | TagEnd::Image) => {
-                literal -= usize::from(links.pop().unwrap_or(false));
+                literal -= usize::from(kept.pop().unwrap_or(false));
                 container += 1;
             }
-            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough) => {
-                next_frame += 1;
-                frames.push(next_frame);
-            }
-            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
-                frames.pop();
-            }
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough)
+            | Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {}
             Event::Start(_) | Event::End(_) => container += 1,
             Event::InlineHtml(_) | Event::Html(_) => {
                 container += 1;
@@ -631,7 +636,6 @@ fn inline_texts(source: &str, options: Options) -> (Vec<InlineText>, Vec<usize>)
                     texts.push(InlineText {
                         range: range.clone(),
                         container,
-                        frame: frames.last().copied().unwrap_or(0),
                         escaped: at > covered && bytes[at - 1] == b'\\',
                     });
                 }
@@ -640,21 +644,23 @@ fn inline_texts(source: &str, options: Options) -> (Vec<InlineText>, Vec<usize>)
             _ => covered = covered.max(range.end),
         }
     }
-    (texts, link_starts)
+    Inlines { texts, links }
 }
 
 /// Which dollars are formula delimiters, decided once from a math-free parse
 /// so pulldown-cmark never pairs the rest: every other `$` in inline text is
-/// escaped (returned with its map, plus each kept pair's original range for
-/// the caller to check against the parse). A run of one `$` opens before a
-/// non-space and closes after one; `$$` opens and closes display math;
-/// longer runs are literal. An opener pairs with the next closer of its kind
-/// in the same inline container and emphasis span, unless the span is prose
-/// ([`not_math`], [`display_prose`]) — then the opener stays a literal `$`
-/// and the closer may open the next pair, as Pandoc reads `$5 and $10`.
-/// Dollars in code, raw HTML or URLs are not inline text and keep their
-/// spelling. Where `skip` turns rewriting off, every dollar stays literal.
-/// Linear: each span is checked once.
+/// escaped (returned with its map, each kept pair's original range for the
+/// caller to check against the parse, and the parse's links — a formula
+/// mustn't break one). A run of one `$` opens before a non-space and closes
+/// after one; `$$` opens and closes display math; longer runs are literal.
+/// An opener pairs with the next closer of its kind in the same inline
+/// container (TeX's own `*` and `_` may look like emphasis to this parse:
+/// `$x^*$ and $y^*$` still pairs), unless the span reads as prose, shell or
+/// code ([`dollar_prose`]) — then the opener stays a literal `$` and the
+/// closer may open the next pair, as Pandoc reads `$5 and $10`. Dollars in
+/// code, raw HTML or URLs aren't inline text (or are skipped) and keep their
+/// spelling; where `skip` turns rewriting off, every dollar stays literal.
+/// One parse, linear: each span is checked once.
 fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<FormulaPass> {
     if !source.contains('$') {
         return None;
@@ -664,10 +670,9 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
         start: usize,
         end: usize,
         container: u32,
-        frame: u32,
     }
+    let Inlines { texts, links } = inline_texts(source, options - Options::ENABLE_MATH);
     let mut runs = Vec::new();
-    let (texts, links) = inline_texts(source, options - Options::ENABLE_MATH);
     for text in texts {
         let mut at = text.range.start;
         // An escaped `$` (`\$`) starts its own text and stays literal.
@@ -687,7 +692,6 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
                 start,
                 end: at,
                 container: text.container,
-                frame: text.frame,
             });
         }
     }
@@ -703,57 +707,16 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
     let space_after = |at: usize| source[at..].chars().next().is_none_or(char::is_whitespace);
     // Kept delimiter pairs: (opener, closer) byte ranges.
     let mut pairs: Vec<(Range<usize>, Range<usize>)> = Vec::new();
-    // The opener awaiting its closer, with its container and emphasis span.
-    let mut pending: Option<(Range<usize>, u32, u32)> = None;
-    // Dollars in a URL or query string (`https://x/?$select=a&$top=1`,
-    // `/items?$expand=owner`) are part of it: never delimiters. Runs come in
-    // source order, so the word before each is tracked incrementally.
-    // A word is a URL when it starts with `scheme://` (`$\text{https://…}$`
-    // is a formula that mentions one).
-    let scheme_word = |word: &[u8]| {
-        let name = word
-            .iter()
-            .take(32)
-            .take_while(|byte| byte.is_ascii_alphanumeric() || b"+.-".contains(byte))
-            .count();
-        name > 0 && word[0].is_ascii_alphabetic() && word[name..].starts_with(b"://")
-    };
-    let mut url = Vec::with_capacity(runs.len());
-    // The current word's start past its opening brackets and quotes, found
-    // once per word (a word of `(((…` before many dollars stays linear).
-    let (mut scanned, mut word_start) = (0usize, 0usize);
+    // The opener awaiting its closer, with its container.
+    let mut pending: Option<(Range<usize>, u32)> = None;
+    let mut words = UrlWords::default();
     for run in &runs {
-        if let Some(space) = bytes[scanned.min(run.start)..run.start]
-            .iter()
-            .rposition(u8::is_ascii_whitespace)
-        {
-            word_start = scanned.min(run.start) + space + 1;
-            word_start += bytes[word_start..run.start]
-                .iter()
-                .take_while(|byte| b"([<\"'".contains(byte))
-                .count();
-        } else if scanned == 0 && run.start > 0 {
-            word_start += bytes[word_start..run.start]
-                .iter()
-                .take_while(|byte| b"([<\"'".contains(byte))
-                .count();
-        }
-        scanned = scanned.max(run.start);
-        // A query parameter (`?$select`, `&$top`) or a Perl sigil (`@$ref`,
-        // `%$ref`) — not a TeX escape before the closer (`$50\%$`).
-        let sigil = |at: usize| {
-            at > 0
-                && matches!(bytes[at - 1], b'?' | b'&' | b'@' | b'%')
-                && !(at > 1 && bytes[at - 2] == b'\\')
-        };
-        url.push(sigil(run.start) || scheme_word(&bytes[word_start.min(run.start)..run.start]));
-    }
-    for (run, url) in runs.iter().zip(url) {
-        if url {
+        // Part of a URL or query string, or a sigil: never a delimiter.
+        if words.url(bytes, run.start) {
             continue;
         }
         let mut start = run.start;
-        let same = |open: &(Range<usize>, u32, u32)| open.1 == run.container && open.2 == run.frame;
+        let same = |open: &(Range<usize>, u32)| open.1 == run.container;
         // `$a$$b$`: a `$$` glued to an inline formula's content closes it
         // and opens the next.
         if run.end - start == 2
@@ -761,7 +724,7 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
             && open.0.len() == 1
             && same(&open)
             && !space_before(start)
-            && !not_math(&source[open.0.end..start], Some(b'$'))
+            && !dollar_prose(source, open.0.start..start + 1, false)
         {
             pairs.push((open.0, start..start + 1));
             pending = None;
@@ -778,28 +741,14 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
             && (len == 2 || !space_before(start))
         {
             pending = None;
-            let tex = &source[open.0.end..start];
-            let next = bytes.get(run.end).copied();
-            // Shell and code identifiers: `TOKEN=$TOKEN -e ID=$ID`, R's
-            // `df$col`, Vue's `this.$refs` — an opener glued to a word, `.`
-            // or `=` whose closer runs into another identifier.
-            let prev = open.0.start.checked_sub(1).map(|at| bytes[at]);
-            let identifiers = prev
-                .is_some_and(|b| b.is_ascii_alphanumeric() || b"_.=".contains(&b))
-                && next.is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
-            let formula = if len == 1 {
-                !identifiers && !not_math(tex, next)
-            } else {
-                !display_prose(tex, next)
-            };
-            if formula {
+            if !dollar_prose(source, open.0.start..run.end, len == 2) {
                 pairs.push((open.0, start..run.end));
                 continue;
             }
         }
         let opens = len == 2 || !space_after(run.end);
         if opens && !skip.off(start) {
-            pending = Some((start..run.end, run.container, run.frame));
+            pending = Some((start..run.end, run.container));
         } else if pending.as_ref().is_some_and(|open| open.1 != run.container) {
             pending = None;
         }
@@ -826,6 +775,69 @@ fn select_dollars(source: &str, options: Options, skip: &Skip) -> Option<Formula
         pairs,
         links,
     })
+}
+
+/// Tracks, for dollar spans in source order, whether each opens inside a URL
+/// word (`scheme://…`) or right after a query or sigil character (`?$top`,
+/// `&$x`, `@$ref`, `%$h` — but not TeX's `\%$`). Each word's start (past
+/// opening brackets and quotes) is found once, so it stays linear.
+#[derive(Default)]
+struct UrlWords {
+    scanned: usize,
+    start: usize,
+}
+
+impl UrlWords {
+    fn url(&mut self, bytes: &[u8], at: usize) -> bool {
+        let from = self.scanned.min(at);
+        if let Some(space) = bytes[from..at].iter().rposition(u8::is_ascii_whitespace) {
+            self.start = from + space + 1;
+            self.start += bytes[self.start..at]
+                .iter()
+                .take_while(|byte| b"([<\"'".contains(byte))
+                .count();
+        } else if self.scanned == 0 {
+            self.start += bytes[self.start..at]
+                .iter()
+                .take_while(|byte| b"([<\"'".contains(byte))
+                .count();
+        }
+        self.scanned = self.scanned.max(at);
+        let sigil = at > 0
+            && matches!(bytes[at - 1], b'?' | b'&' | b'@' | b'%')
+            && !(at > 1 && bytes[at - 2] == b'\\');
+        let word = &bytes[self.start.min(at)..at];
+        let name = word
+            .iter()
+            .take(32)
+            .take_while(|byte| byte.is_ascii_alphanumeric() || b"+.-".contains(byte))
+            .count();
+        let scheme = name > 0 && word[0].is_ascii_alphabetic() && word[name..].starts_with(b"://");
+        sigil || scheme
+    }
+}
+
+/// Whether the dollar span `spelled` (in `source`, delimiters included)
+/// reads as prose, shell or code rather than a formula ([`not_math`],
+/// [`display_prose`]), judged with its neighbours: an identifier glued to
+/// both sides (`TOKEN=$TOKEN -e ID=$ID`, R's `df$col`, Vue's `this.$refs`),
+/// or a quoted string interpolating one (`"$name$suffix"`).
+fn dollar_prose(source: &str, spelled: Range<usize>, display: bool) -> bool {
+    let bytes = source.as_bytes();
+    let delimiter = if display { 2 } else { 1 };
+    if spelled.len() < 2 * delimiter {
+        return true;
+    }
+    let tex = &source[spelled.start + delimiter..spelled.end - delimiter];
+    let prev = spelled.start.checked_sub(1).map(|at| bytes[at]);
+    let next = bytes.get(spelled.end).copied();
+    if display {
+        return display_prose(tex, next);
+    }
+    let word_after = next.is_some_and(|b| b.is_ascii_alphanumeric());
+    let glued = prev.is_some_and(|b| b.is_ascii_alphanumeric() || b"=.".contains(&b));
+    let quoted = prev.is_some_and(|b| b"\"'".contains(&b));
+    ((glued || quoted) && word_after) || not_math(tex, next)
 }
 
 /// Whether a `$$…$$` span is prose, not display math: blank, a code span it
@@ -878,11 +890,10 @@ fn rewrite_math_delimiters(
     let bytes = source.as_bytes();
     let mut words = WordScan::default();
     let mut pairs: Vec<(usize, usize, bool)> = Vec::new();
-    // The latest opener of each kind (inline, display) awaiting its closer,
-    // with its emphasis span.
-    let mut pending: [Option<(usize, u32)>; 2] = [None, None];
+    // The latest opener of each kind (inline, display) awaiting its closer.
+    let mut pending: [Option<usize>; 2] = [None, None];
     let mut container = None;
-    let (texts, links) = inline_texts(source, options);
+    let Inlines { texts, links } = inline_texts(source, options);
     for text in texts {
         let at = text.range.start;
         if !text.escaped || !matches!(bytes[at], b'(' | b'[' | b')' | b']') {
@@ -897,12 +908,9 @@ fn rewrite_math_delimiters(
         let kind = usize::from(display);
         if matches!(bytes[at], b'(' | b'[') {
             if !skip.off(to_source(backslash)) && !words.glued(bytes, backslash) {
-                pending[kind] = Some((backslash, text.frame));
+                pending[kind] = Some(backslash);
             }
-        } else if let Some((open, frame)) = pending[kind].take()
-            // A closer in another emphasis span drops its opener (it never
-            // pairs past one).
-            && frame == text.frame
+        } else if let Some(open) = pending[kind].take()
             && math_body(
                 &source[open + 2..backslash],
                 display,
@@ -964,6 +972,8 @@ fn math_body(body: &str, display: bool, mid_line: bool) -> bool {
     let inner = body.trim();
     if inner.is_empty()
         || body.contains('`')
+        || body.contains("**")
+        || body.contains("__")
         || body.contains("://")
         || has_unescaped(body, b'$')
         || has_unescaped(body, b'%')
@@ -976,6 +986,10 @@ fn math_body(body: &str, display: bool, mid_line: bool) -> bool {
         if lead.contains('\n') || trail.contains('\n') {
             return false;
         }
+    }
+    // A one-character display body is an escaped checkbox (`\[x\] Done`).
+    if display && inner.chars().count() <= 1 {
+        return false;
     }
     let escaping = inner
         .bytes()
@@ -1188,7 +1202,7 @@ struct FormulaPass {
     text: String,
     map: OffsetMap,
     pairs: Vec<Range<usize>>,
-    links: Vec<usize>,
+    links: Vec<Range<usize>>,
 }
 
 /// Which bytes a backslash escapes: an odd run of backslashes before a byte.
@@ -1778,13 +1792,26 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         && tex.as_bytes()[0].is_ascii_uppercase();
-    // `${PREFIX}${NAME}`: a braced shell name.
-    let braced = tex.len() > 3
-        && tex.starts_with('{')
-        && tex.ends_with('}')
-        && tex[1..tex.len() - 1]
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    // `${PREFIX}${NAME}`, `${arr[0]}`: a braced shell expansion; `$(CC)`: a
+    // Make variable.
+    let wrapped = |open: char, close: char, allowed: &dyn Fn(u8) -> bool| {
+        tex.len() >= 3
+            && tex.starts_with(open)
+            && tex.ends_with(close)
+            && tex[1..tex.len() - 1].bytes().all(allowed)
+    };
+    let braced = wrapped('{', '}', &|b| {
+        b.is_ascii_alphanumeric() || b"_[].".contains(&b)
+    });
+    let make = wrapped('(', ')', &|b| {
+        b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+    });
+    // A sign raised or lowered onto what precedes it: `\mathbb{Z}^+`.
+    let script_sign = {
+        let mut before = tex.chars();
+        before.next_back();
+        before.as_str().ends_with(['^', '_', '{'])
+    };
     // `($foo) or ($bar)`: a bracket closed before any opened.
     let mut depth = 0i32;
     let unbalanced = tex.bytes().any(|b| {
@@ -1806,13 +1833,28 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
         || tex.contains(['`', '"'])
         || (shell_name && next.is_some_and(|b| b.is_ascii_uppercase() || b == b'_'))
         || braced
+        || make
         || unbalanced
         || amount
-        // Regex anchors: `/x$/i or /y$/g`, `'a$|b$'`, `grep 'foo$' a &&
-        // grep 'bar$'`; and spans ending on an operator (`x=$a y=$b`).
+        // Markdown, not TeX: emphasis runs (`**bold $x** y$`).
+        || tex.contains("**")
+        || tex.contains("__")
+        // Regex anchors: `/x$/i or /y$/g`, `grep 'foo$' a && grep 'bar$'`,
+        // `'a$|b$'` (a bar-led span with no space, closed by a quote — not
+        // `$|x - y| < \delta$`).
         || tex.starts_with(['/', '\''])
-        || tex.ends_with(['=', '+', '.'])
-        || (tex.starts_with('|') && !tex.ends_with('|'))
+        || (tex.starts_with('|')
+            && !tex.contains(' ')
+            && next.is_some_and(|b| b == b'\'' || b == b'"'))
+        // Separators after a sigil (RxJS `click$, hover$`, `5$, 10$`).
+        || tex.starts_with([',', ';', ':', ')'])
+        // A dangling operator: `x=$a y=$b`, `$i<$n`, `$obj->$prop` — not a
+        // sign in a script (`\mathbb{Z}^+`, `Na$^+$`).
+        || tex.ends_with(['=', '.'])
+        || (tex.ends_with(['-', '<', '>', '*', '/'])
+            && !script_sign
+            && next.is_some_and(|b| b.is_ascii_alphabetic()))
+        || (tex.ends_with('+') && !script_sign)
 }
 
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
@@ -4146,6 +4188,49 @@ mod math_tests {
                     top.range
                 );
             }
+        }
+    }
+
+    /// TeX's own `*`, `_` and `|` never read as markdown around formulas,
+    /// while code, shell and checkbox spellings stay text.
+    #[test]
+    fn tex_markers_pair_across_what_looks_like_emphasis() {
+        assert_eq!(
+            para("$x^*$ and $y^*$"),
+            [math("x^*"), plain(" and "), math("y^*")]
+        );
+        assert_eq!(
+            para("$\\bar{x}_{n}$ and $\\bar{y}_{n}$"),
+            [math("\\bar{x}_{n}"), plain(" and "), math("\\bar{y}_{n}")]
+        );
+        assert_eq!(
+            para("\\(x^*\\) and \\(y^*\\)"),
+            [math("x^*"), plain(" and "), math("y^*")]
+        );
+        assert_eq!(para("$|x - y| < \\delta$"), [math("|x - y| < \\delta")]);
+        assert_eq!(
+            para("$n \\in \\mathbb{Z}^+$"),
+            [math("n \\in \\mathbb{Z}^+")]
+        );
+        assert_eq!(
+            para("Na$^+$ ions"),
+            [plain("Na"), math("^+"), plain(" ions")]
+        );
+        let runs = para("_$y$_");
+        assert!(
+            runs.iter().any(|run| run.style.math && run.text == "y"),
+            "{runs:?}"
+        );
+        for source in [
+            "Observables like clicks$ and values$ in RxJS",
+            "val s = \"$name and $age\"",
+            "$(CC) -o $@ $^",
+            "for $i<$n; $i++",
+            "$obj->$prop",
+            "${a}${b}",
+            "\\[x\\] Done",
+        ] {
+            assert_no_math(source);
         }
     }
 }
