@@ -10996,11 +10996,11 @@ impl Render for Composer {
                             crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
                         )
                     });
-            degraded.then(|| {
+            // A sleeping Cloud machine isn't a delivery problem — the send
+            // wakes it, and the session card shows it asleep.
+            (degraded && !cloud_asleep).then(|| {
                 let text: SharedString = if offline {
                     "Offline — messages will send when you're back online.".into()
-                } else if cloud_asleep {
-                    "Cloud is asleep — it wakes up when you send.".into()
                 } else {
                     "Messages will send once the connection recovers.".into()
                 };

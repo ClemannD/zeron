@@ -2347,7 +2347,14 @@ impl AppState {
                 .cloud_sessions
                 .as_ref()
                 .and_then(|s| s.sessions.iter().find(|x| x.device_id == device_id));
-            return crate::cloud::session_presence(device.is_some() && online, session);
+            let presence = crate::cloud::session_presence(device.is_some() && online, session);
+            // Machines sleep on their own when idle, and the session list is
+            // only re-read while one settles: a "ready" machine whose
+            // heartbeat stopped has gone to sleep, not lost its connection.
+            if presence == Presence::Online && device.is_some() && !online {
+                return Presence::Asleep;
+            }
+            return presence;
         }
         if online {
             Presence::Online
@@ -4933,6 +4940,29 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_ready_cloud_machine_that_stopped_answering_is_asleep() {
+        use crate::cloud::Presence;
+        let mut state = AppState::new();
+        let now = Utc::now();
+        let mut machine = device("cloud-s", "Cloud");
+        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        machine.last_seen_at = Some(now);
+        state.devices = vec![machine];
+        state.cloud_sessions = Some(
+            serde_json::from_value(serde_json::json!({
+                "available": true,
+                "sessions": [{ "chatId": "chat", "deviceId": "cloud-s", "spaceId": "space", "state": "ready", "createdAt": 0 }]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(state.device_presence("cloud-s", now), Presence::Online);
+        // Idle machines sleep on their own; the cached list still says ready.
+        let later = now + TimeDelta::minutes(10);
+        assert_eq!(state.device_presence("cloud-s", later), Presence::Asleep);
+        assert!(!state.device_presence("cloud-s", later).warns());
     }
 
     #[test]
