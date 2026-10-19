@@ -661,15 +661,6 @@ fn tile(theme: &Theme, icon_path: &'static str, tint: Option<gpui::Hsla>) -> gpu
         )
 }
 
-/// A short line under a section's card.
-fn footnote(theme: &Theme, copy: &'static str) -> gpui::Div {
-    div()
-        .px(px(4.0))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_muted.opacity(0.75))
-        .child(SharedString::from(copy))
-}
-
 fn text(color: gpui::Hsla, copy: impl Into<SharedString>) -> AnyElement {
     div()
         .text_color(color)
@@ -1317,12 +1308,7 @@ impl CloudPage {
                     ),
             );
         Some(
-            widgets::section(theme, "Usage", block)
-                .child(footnote(
-                    theme,
-                    "A credit is a minute of a small machine. Machines only use credits while awake.",
-                ))
-                .into_any_element(),
+            widgets::section(theme, "Usage", block).into_any_element(),
         )
     }
 }
