@@ -3678,12 +3678,10 @@ impl Pickers {
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
             .when(icon_loading, |el| {
-                el.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                el.child(div().flex_none().child(crate::loaders::ring_spinner(
                     "picker-chip-loader",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
+                    14.0,
+                    theme.text_muted,
                 )))
             })
             .when_some(

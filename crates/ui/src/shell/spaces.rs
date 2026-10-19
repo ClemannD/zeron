@@ -2339,6 +2339,8 @@ pub(super) struct AddSpaceFlow {
     /// Keyboard highlight within the current step’s filtered rows.
     active: usize,
     submit_busy: bool,
+    /// A clone into the open folder is running (`owner/name`).
+    cloning: Option<String>,
     error: Option<SharedString>,
     /// Tracked on the card (`track_focus`) — puts the card on the keyboard
     /// dispatch path so ↑↓/⌫/esc reach `add_space_key` while the search input
@@ -2496,6 +2498,64 @@ enum FolderRow {
     Local(zeron_proto::FolderEntry),
     /// A folder anywhere under home.
     Home(HomeFolderMatch),
+    /// Clone a repository into the open folder: a pasted git URL, or one of
+    /// the user's GitHub repositories matching the query.
+    Clone(CloneRow),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CloneRow {
+    url: String,
+    /// `owner/name`.
+    label: String,
+    /// From the user's GitHub repositories (vs a pasted URL).
+    github: bool,
+    private: bool,
+}
+
+/// Most GitHub repositories offered for one query.
+const CLONE_MATCHES: usize = 5;
+
+/// A query that is a git remote: an `https://`/`ssh://`/`git://` URL with an
+/// owner and a name, or scp-style `git@host:owner/name`.
+fn git_url(query: &str) -> Option<String> {
+    let query = query.trim();
+    if query.contains(char::is_whitespace) {
+        return None;
+    }
+    let path = if let Some(rest) = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .find_map(|scheme| query.strip_prefix(scheme))
+    {
+        rest.split_once('/')?.1
+    } else if let Some((user_host, path)) = query.split_once(':')
+        && user_host.contains('@')
+        && !user_host.contains('/')
+    {
+        path
+    } else {
+        return None;
+    };
+    let mut parts = path.trim_matches('/').split('/').filter(|part| !part.is_empty());
+    (parts.next().is_some() && parts.next().is_some()).then(|| query.to_owned())
+}
+
+/// `owner/name` of a git remote, for labels.
+fn git_url_label(url: &str) -> String {
+    let path = url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit_once(['/', ':'])
+        .map(|(rest, name)| {
+            let owner = rest.rsplit(['/', ':']).next().unwrap_or_default();
+            if owner.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{owner}/{name}")
+            }
+        });
+    path.unwrap_or_else(|| url.to_owned())
 }
 
 /// `targetDeviceId` for a remote device; local calls skip the relay.
@@ -2517,6 +2577,13 @@ fn add_space_target(
 /// The title over the picker's matches from under home, with the host's
 /// search status trailing.
 fn home_folders_header(theme: &Theme, status: Option<&'static str>) -> gpui::Div {
+    home_folders_header_titled(theme, "In Home").when_some(status, |header, status| {
+        header.child(div().opacity(0.7).child(status))
+    })
+}
+
+/// A titled section of the Folders step's results ("In Home", "From GitHub").
+fn home_folders_header_titled(theme: &Theme, title: &'static str) -> gpui::Div {
     div()
         .px(px(8.0))
         .pt(px(2.0))
@@ -2526,10 +2593,7 @@ fn home_folders_header(theme: &Theme, status: Option<&'static str>) -> gpui::Div
         .gap(px(8.0))
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
-        .child("In Home")
-        .when_some(status, |header, status| {
-            header.child(div().opacity(0.7).child(status))
-        })
+        .child(title)
 }
 
 /// A folder from under home: its name (query highlighted), then where it
@@ -2585,6 +2649,57 @@ fn home_folder_row(
         .on_click(
             cx.listener(move |this, _, _, cx| this.add_space_descend(path.clone(), is_repo, cx)),
         )
+}
+
+/// A clone-here row: the owner's avatar (a pasted URL gets the git glyph),
+/// `owner/name`, a Private badge, and what Enter does.
+fn clone_row(
+    row: gpui::Stateful<gpui::Div>,
+    clone: &CloneRow,
+    query: &str,
+    theme: &Theme,
+    cx: &Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let owner = clone.label.split('/').next().unwrap_or_default().to_owned();
+    let leading = if clone.github {
+        crate::pull_request_media::avatar(
+            &owner,
+            SharedString::from(format!("clone-avatar-{}", clone.label)),
+            16.0,
+            theme,
+        )
+    } else {
+        icon(icons::GIT_BRANCH)
+            .size(px(16.0))
+            .flex_none()
+            .text_color(theme.text_muted)
+            .into_any_element()
+    };
+    let target = clone.clone();
+    row.aria_label(SharedString::from(format!("Clone {} here", clone.label)))
+        .child(leading)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(popover::search_highlight(
+                    SharedString::from(clone.label.clone()),
+                    Some(query),
+                    theme,
+                )),
+        )
+        .when(clone.private, |el| {
+            el.child(crate::settings::widgets::badge(theme, "Private"))
+        })
+        .child(
+            div()
+                .flex_none()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from("Clone here")),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.add_space_clone(target.clone(), cx)))
 }
 
 /// Folder crumbs shown before the middle folds into `…`, and how many of the
@@ -6085,6 +6200,7 @@ impl Shell {
             browser_repo: false,
             active: 0,
             submit_busy: false,
+            cloning: None,
             error: None,
             focus: cx.focus_handle(),
             list_scroll: gpui::ScrollHandle::new(),
@@ -6407,6 +6523,46 @@ impl Shell {
         } else {
             &[]
         };
+        let query = flow.search.read(cx).text().trim().to_owned();
+        // A pasted remote is the one thing to do: clone it here.
+        if let Some(url) = git_url(&query) {
+            return vec![FolderRow::Clone(CloneRow {
+                label: git_url_label(&url),
+                url,
+                github: false,
+                private: false,
+            })];
+        }
+        // Otherwise the user's GitHub repositories matching a name-like query
+        // follow the folders (what Cloud reaches; GitHub connected).
+        let needle = query.to_lowercase();
+        let github: Vec<FolderRow> = if needle.is_empty()
+            || needle.starts_with(['/', '~', '.'])
+        {
+            Vec::new()
+        } else {
+            let mut repos: Vec<&zeron_proto::GithubRepo> = self
+                .state
+                .read(cx)
+                .cloud_repos
+                .iter()
+                .flatten()
+                .filter(|repo| repo.full_name.to_lowercase().contains(&needle))
+                .collect();
+            repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+            repos
+                .into_iter()
+                .take(CLONE_MATCHES)
+                .map(|repo| {
+                    FolderRow::Clone(CloneRow {
+                        url: repo.clone_url.clone(),
+                        label: repo.full_name.clone(),
+                        github: true,
+                        private: repo.private,
+                    })
+                })
+                .collect()
+        };
         local
             .into_iter()
             .map(FolderRow::Local)
@@ -6416,6 +6572,7 @@ impl Shell {
                     .cloned()
                     .map(FolderRow::Home),
             )
+            .chain(github)
             .collect()
     }
 
@@ -6458,6 +6615,11 @@ impl Shell {
             Some(FolderRow::Home(found)) => {
                 let (path, is_repo) = (found.path.clone(), found.is_repo);
                 self.add_space_descend(path, is_repo, cx);
+                return;
+            }
+            Some(FolderRow::Clone(clone)) => {
+                let clone = clone.clone();
+                self.add_space_clone(clone, cx);
                 return;
             }
             None => return,
@@ -6668,6 +6830,19 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
+        self.add_space_create(engine, device, path, git_detected, cx);
+    }
+
+    /// Make `path` on `device` a project and land in it (an existing one for
+    /// the same folder is reused).
+    fn add_space_create(
+        &mut self,
+        engine: crate::state::EngineHandle,
+        device: Device,
+        path: String,
+        git_detected: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
@@ -6733,7 +6908,59 @@ impl Shell {
                         });
                         if let Some(flow) = shell.add_space.as_mut() {
                             flow.submit_busy = false;
+                            flow.cloning = None;
                             flow.error = Some(format!("{err}").into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        if let Some(flow) = self.add_space.as_mut() {
+            flow.submit_task = Some(task);
+        }
+        cx.notify();
+    }
+
+    /// Clone `clone` into the open folder on the chosen device (relayed to a
+    /// remote one), then make the checkout the project.
+    fn add_space_clone(&mut self, clone: CloneRow, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.submit_busy || flow.step != ProjectStep::Folders {
+            return;
+        }
+        let (Some(device), Some(listing)) = (flow.device.clone(), flow.browser.ready()) else {
+            return;
+        };
+        let parent = listing.path.clone();
+        flow.submit_busy = true;
+        flow.cloning = Some(clone.label.clone());
+        flow.error = None;
+        let mut params = serde_json::Map::new();
+        params.insert("url".into(), clone.url.clone().into());
+        params.insert("parent".into(), parent.into());
+        add_space_target(&mut params, Some(&device.id), local.as_deref());
+        let label = clone.label;
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::Repo>(methods::CLONE_REPO, params.into())
+                .await;
+            this.update(cx, |shell, cx| {
+                match result {
+                    Ok(repo) => shell.add_space_create(engine, device, repo.path, true, cx),
+                    Err(err) => {
+                        if let Some(flow) = shell.add_space.as_mut() {
+                            flow.submit_busy = false;
+                            flow.cloning = None;
+                            flow.error = Some(format!("Couldn't clone {label}: {err}").into());
                         }
                     }
                 }
@@ -6921,6 +7148,7 @@ impl Shell {
         let load_error = flow.browser.error().map(str::to_string);
         let error = flow.error.clone();
         let busy = flow.submit_busy;
+        let cloning = flow.cloning.clone();
         let active = flow.active;
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
         let drives_loading = matches!(flow.drives, Loadable::Loading);
@@ -7022,8 +7250,24 @@ impl Shell {
                 if !loading && load_error.is_none() {
                     let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
                     let mut first_home = true;
+                    let mut first_github = true;
                     for (ix, folder) in self.add_space_folder_rows(cx).into_iter().enumerate() {
                         let entry = match folder {
+                            FolderRow::Clone(clone) => {
+                                let el = clone_row(row(ix), &clone, &query, &theme, cx);
+                                rows.push(if clone.github && std::mem::take(&mut first_github) {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .when(ix > 0, |el| el.pt(px(6.0)))
+                                        .child(home_folders_header_titled(&theme, "From GitHub"))
+                                        .child(el)
+                                        .into_any_element()
+                                } else {
+                                    el.into_any_element()
+                                });
+                                continue;
+                            }
                             FolderRow::Local(entry) => entry,
                             FolderRow::Home(found) => {
                                 let el = home_folder_row(row(ix), &found, &query, &theme, cx);
@@ -7449,7 +7693,11 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(if busy { "Adding…" } else { "Add project" }),
+                                .child(SharedString::from(match (&cloning, busy) {
+                                    (Some(label), _) => format!("Cloning {label}…"),
+                                    (None, true) => "Adding…".to_string(),
+                                    (None, false) => "Add project".to_string(),
+                                })),
                         ),
                 )
             });
@@ -8522,5 +8770,29 @@ mod home_folder_search_tests {
                 .take(methods::RELEASE_HOME_FOLDER_SEARCH, cx)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_pasted_git_remote_offers_a_clone_named_owner_slash_repo() {
+        for (query, label) in [
+            ("https://github.com/acme/app", "acme/app"),
+            ("https://github.com/acme/app.git", "acme/app"),
+            ("https://gitlab.com/acme/app/", "acme/app"),
+            ("git@github.com:acme/app.git", "acme/app"),
+            ("ssh://git@github.com/acme/app", "acme/app"),
+        ] {
+            let url = git_url(query).unwrap_or_else(|| panic!("{query} is a remote"));
+            assert_eq!(git_url_label(&url), label, "{query}");
+        }
+        for query in [
+            "app",
+            "acme/app",
+            "~/code",
+            "/Users/me/code",
+            "https://github.com/acme",
+            "a b",
+        ] {
+            assert_eq!(git_url(query), None, "{query} is not a remote");
+        }
     }
 }

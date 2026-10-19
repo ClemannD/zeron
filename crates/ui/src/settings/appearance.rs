@@ -1682,7 +1682,7 @@ fn compact_action(
     label: &str,
     id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    widgets::text_action(theme, widgets::ActionTone::Outlined, label).id(id.into())
+    widgets::text_action(theme, widgets::ActionTone::Filled, label).id(id.into())
 }
 
 fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {

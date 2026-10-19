@@ -61,7 +61,6 @@ pub struct CloudPage {
     usage_range: cloud::UsageRange,
     range_select: widgets::SelectState,
     busy: Option<CloudAction>,
-    confirm_delete: bool,
     github: GithubFlow,
     /// Vault call in flight per row, so its button reads busy.
     vault_busy: Option<SharedString>,
@@ -74,6 +73,9 @@ pub struct CloudPage {
     vault_action_task: Option<Task<()>>,
     github_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    /// Only the GitHub block, for a host with its own heading: first-run
+    /// setup's GitHub step.
+    github_only: bool,
     _observe: Subscription,
 }
 
@@ -105,7 +107,6 @@ impl CloudPage {
             usage_range,
             range_select: widgets::SelectState::default(),
             busy: None,
-            confirm_delete: false,
             github: GithubFlow::Idle,
             vault_busy: None,
             error: None,
@@ -117,6 +118,7 @@ impl CloudPage {
             vault_action_task: None,
             github_task: None,
             copy_task: None,
+            github_only: false,
             _observe: observe,
         };
         page.load_status(cx);
@@ -127,15 +129,23 @@ impl CloudPage {
         page
     }
 
-    /// Escape that reached Settings unclaimed closes the delete confirmation
-    /// first. Returns whether it did.
-    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.confirm_delete {
+    /// Just the GitHub connection (and whatever stops Cloud working),
+    /// where setup asks for it.
+    pub fn new_github_only(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.github_only = true;
+        page
+    }
+
+    /// GitHub is connected for Cloud: its sessions can clone and push.
+    pub(crate) fn github_connected(&self) -> bool {
+        let (Some(cloud_id), Some(vault)) = (self.cloud_id(), self.vault.ready()) else {
             return false;
-        }
-        self.confirm_delete = false;
-        cx.notify();
-        true
+        };
+        matches!(
+            cloud::provider_link(vault, VaultProvider::Github, &cloud_id),
+            ProviderLink::Connected { .. }
+        )
     }
 
     fn cloud_status(&self) -> Option<&CloudStatus> {
@@ -211,6 +221,14 @@ impl CloudPage {
             self.load_usage(cx);
         }
         self.schedule_recheck(cx);
+        // Cloud is part of every signed-in account; one not set up yet is
+        // set up now (no machine starts until a chat runs on it).
+        if self
+            .cloud_status()
+            .is_some_and(|status| status.available && status.state == CloudState::Off)
+        {
+            self.run(CloudAction::Enable, cx);
+        }
     }
 
     /// Only turning Cloud off settles on its own (every session machine is
@@ -297,17 +315,6 @@ impl CloudPage {
 
     // ---- lifecycle ----
 
-    /// The switch: on turns Cloud on at once; off asks first (it deletes
-    /// every session's machine).
-    fn toggle_cloud(&mut self, on: bool, cx: &mut Context<Self>) {
-        if on {
-            self.confirm_delete = true;
-            cx.notify();
-        } else {
-            self.run(CloudAction::Enable, cx);
-        }
-    }
-
     fn run(&mut self, action: CloudAction, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
@@ -317,9 +324,6 @@ impl CloudPage {
         };
         self.busy = Some(action);
         self.error = None;
-        if action == CloudAction::Delete {
-            self.confirm_delete = false;
-        }
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -651,6 +655,19 @@ fn text(color: gpui::Hsla, copy: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
+/// A filled action that leaves the app: its label, then the way-out glyph.
+fn external_action(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    action(theme, id, widgets::ActionTone::Filled, label, true).child(
+        crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+            .size(px(12.0))
+            .text_color(theme.text_muted),
+    )
+}
+
 /// Row body: tile, title over meta, actions on the trailing edge.
 fn row(
     theme: &Theme,
@@ -688,43 +705,24 @@ fn row(
         )
 }
 
-fn busy_meta(
-    theme: &Theme,
-    key: &'static str,
-    label: impl Into<SharedString>,
-    cx: &mut Context<CloudPage>,
-) -> AnyElement {
+fn busy_meta(theme: &Theme, key: &'static str, label: impl Into<SharedString>) -> AnyElement {
     div()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .child(crate::loaders::mini_mono_spinner(
-            key,
-            1.5,
-            theme.text_muted,
-            cx.entity_id(),
-            cx,
-        ))
+        .child(crate::loaders::ring_spinner(key, 12.0, theme.text_muted))
         .child(label.into())
         .into_any_element()
 }
 
 impl CloudPage {
-    fn render_status(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// Cloud's own row, shown only when there's something to say: it can't
+    /// be reached or used, it's being set up, or it failed. Cloud is simply
+    /// on for every signed-in account, and credits live on the Billing page.
+    fn render_status(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let leading = Some(tile(theme, crate::icons::CLOUD, None));
         let status = match &self.status {
-            Loadable::Idle | Loadable::Loading => {
-                let meta = vec![busy_meta(
-                    theme,
-                    "cloud-status-loading",
-                    "Checking Cloud…",
-                    cx,
-                )];
-                return widgets::section_card(theme)
-                    .mt(px(28.0))
-                    .child(row(theme, true, leading, "Cloud", meta, None, Vec::new()))
-                    .into_any_element();
-            }
+            Loadable::Idle | Loadable::Loading => return None,
             Loadable::Error(error) => {
                 let copy = if error.starts_with("unknown method") {
                     "This version of Zeron can't manage Cloud yet.".to_string()
@@ -743,55 +741,52 @@ impl CloudPage {
                     this.load_status(cx);
                 }))
                 .into_any_element();
-                return widgets::section_card(theme)
+                return Some(
+                    widgets::section_card(theme)
+                        .mt(px(28.0))
+                        .child(row(
+                            theme,
+                            true,
+                            leading,
+                            "Cloud",
+                            vec![text(theme.danger_muted.opacity(0.9), copy)],
+                            None,
+                            vec![retry],
+                        ))
+                        .into_any_element(),
+                );
+            }
+            Loadable::Ready(status) => status.clone(),
+        };
+        let busy = self.busy;
+        if !status.available {
+            return Some(
+                widgets::section_card(theme)
                     .mt(px(28.0))
                     .child(row(
                         theme,
                         true,
                         leading,
                         "Cloud",
-                        vec![text(theme.danger_muted.opacity(0.9), copy)],
+                        vec![text(
+                            theme.text_muted,
+                            "Cloud needs a signed-in account with sync turned on.",
+                        )],
                         None,
-                        vec![retry],
+                        Vec::new(),
                     ))
-                    .into_any_element();
-            }
-            Loadable::Ready(status) => status.clone(),
-        };
-        let busy = self.busy;
-        if !status.available {
-            return widgets::section_card(theme)
-                .mt(px(28.0))
-                .child(row(
-                    theme,
-                    true,
-                    leading,
-                    "Cloud",
-                    vec![text(
-                        theme.text_muted,
-                        "Cloud needs a signed-in account with sync turned on.",
-                    )],
-                    None,
-                    Vec::new(),
-                ))
-                .into_any_element();
+                    .into_any_element(),
+            );
         }
-        let on = cloud::account_enabled(&status);
         let mut actions: Vec<AnyElement> = Vec::new();
         let meta: Vec<AnyElement> = if let Some(action) = busy {
-            vec![busy_meta(
-                theme,
-                "cloud-status-busy",
-                action.busy_label(),
-                cx,
-            )]
+            vec![busy_meta(theme, "cloud-status-busy", action.busy_label())]
         } else {
             match status.state {
                 CloudState::Deleting => vec![busy_meta(
                     theme,
                     "cloud-status-settling",
                     cloud::account_state_label(CloudState::Deleting),
-                    cx,
                 )],
                 CloudState::Error => {
                     let retry_with = cloud::retry_action(&status);
@@ -814,86 +809,16 @@ impl CloudPage {
                             .unwrap_or_else(|| "Something went wrong with Cloud.".into()),
                     )]
                 }
-                // The switch says on or off; the row only adds what it can't.
-                _ if on => {
-                    let mut meta = Vec::new();
-                    match status.credits {
-                        Some(credits) if credits <= 0.0 => {
-                            meta.push(text(theme.warning_muted.opacity(0.9), "Out of credits"))
-                        }
-                        Some(credits) => meta.push(text(
-                            theme.text_muted,
-                            format!("{} left", cloud::format_credits(credits)),
-                        )),
-                        None => {}
-                    }
-                    meta
-                }
-                _ => Vec::new(),
+                // Ready (or about to be set up): nothing to say.
+                _ => return None,
             }
         };
-        // Credits are bought on the Billing page.
-        if on && busy.is_none() {
-            actions.push(
-                action(
-                    theme,
-                    "cloud-get-credits",
-                    widgets::ActionTone::Quiet,
-                    "Get credits",
-                    true,
-                )
-                .on_click(cx.listener(|_, _, _, cx| {
-                    cx.defer(|cx| {
-                        let shell = cx
-                            .windows()
-                            .into_iter()
-                            .find_map(|window| window.downcast::<crate::shell::Shell>());
-                        if let Some(shell) = shell {
-                            let _ = shell.update(cx, |shell, _, cx| {
-                                shell.open_settings(crate::shell::SettingsSection::Billing, cx)
-                            });
-                        }
-                    })
-                }))
+        Some(
+            widgets::section_card(theme)
+                .mt(px(28.0))
+                .child(row(theme, true, leading, "Cloud", meta, None, actions))
                 .into_any_element(),
-            );
-        }
-        // On ⇄ off. Turning it off deletes every machine, so it asks first.
-        let interactive = busy.is_none() && status.state != CloudState::Deleting;
-        let accent = theme.accent;
-        actions.push(
-            widgets::toggle_switch(theme, on, "cloud-enabled")
-                .id("cloud-switch")
-                .when(!interactive, |el| el.opacity(0.55))
-                .when(interactive, |el| {
-                    el.cursor_pointer()
-                        .tab_index(0)
-                        .role(gpui::Role::Switch)
-                        .aria_label("Cloud")
-                        .aria_toggled(if on {
-                            gpui::Toggled::True
-                        } else {
-                            gpui::Toggled::False
-                        })
-                        .focus_visible(move |s| s.border_2().border_color(accent).opacity(1.0))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_cloud(on, cx)))
-                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                            if !event.is_held
-                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                            {
-                                this.toggle_cloud(on, cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                })
-                .into_any_element(),
-        );
-        let note: Option<SharedString> = (status.state == CloudState::Off && busy.is_none())
-            .then(|| "Nothing is created until you turn it on.".into());
-        widgets::section_card(theme)
-            .mt(px(28.0))
-            .child(row(theme, true, leading, "Cloud", meta, note, actions))
-            .into_any_element()
+        )
     }
 
     fn disconnect_action(
@@ -934,6 +859,8 @@ impl CloudPage {
         let busy = self.vault_busy.as_deref() == Some(VaultProvider::Github.as_str());
         let mut meta: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
+        // Connected: which repositories Cloud reaches, chosen on GitHub.
+        let mut repositories: Option<AnyElement> = None;
         let connect = |label: &'static str, enabled: bool, cx: &mut Context<Self>| {
             action(
                 theme,
@@ -959,22 +886,16 @@ impl CloudPage {
                 actions.push(connect("Connect", false, cx));
             }
             (_, None) => {
-                meta.push(busy_meta(theme, "github-loading", "Checking GitHub…", cx));
+                meta.push(busy_meta(theme, "github-loading", "Checking GitHub…"));
             }
             (GithubFlow::Starting, _) => {
-                meta.push(busy_meta(
-                    theme,
-                    "github-starting",
-                    "Contacting GitHub…",
-                    cx,
-                ));
+                meta.push(busy_meta(theme, "github-starting", "Contacting GitHub…"));
             }
             (GithubFlow::Waiting { .. }, _) => {
                 meta.push(busy_meta(
                     theme,
                     "github-waiting",
                     "Waiting for you to approve on GitHub…",
-                    cx,
                 ));
                 actions.push(
                     action(
@@ -998,19 +919,8 @@ impl CloudPage {
                     account.clone().unwrap_or_else(|| "Connected".into()),
                 ));
                 if let Some(url) = vault.as_ref().and_then(|v| v.github_install_url.clone()) {
-                    actions.push(
-                        action(
-                            theme,
-                            "github-install",
-                            widgets::ActionTone::Quiet,
-                            "Repositories",
-                            true,
-                        )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            crate::settings::accounts::open_login_url(&url, cx);
-                        }))
-                        .into_any_element(),
-                    );
+                    let repos = self.state.read(cx).cloud_repos.clone();
+                    repositories = Some(self.render_repositories(repos, url, theme, cx));
                 }
                 actions.push(self.disconnect_action(
                     theme,
@@ -1076,11 +986,131 @@ impl CloudPage {
                 )
                 .when(!enabled, |el| el.opacity(0.6)),
             )
-            .children(code);
+            .children(code)
+            .children(repositories);
+        if self.github_only {
+            return Some(block.into_any_element());
+        }
         Some(widgets::section(theme, "GitHub", block).into_any_element())
     }
 
-    /// The device-flow code, large enough to read across to the browser.
+    /// The repositories Cloud sessions can open — the GitHub App's reach —
+    /// newest push first, each under its owner's avatar; choosing them
+    /// happens on GitHub, and refresh re-reads the list after.
+    fn render_repositories(
+        &self,
+        repos: Option<Vec<zeron_proto::GithubRepo>>,
+        install_url: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const SHOWN: usize = 6;
+        let mut repos = repos;
+        if let Some(repos) = repos.as_mut() {
+            repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+        }
+        let summary = match &repos {
+            None => "Checking which repositories Cloud can open…".to_string(),
+            Some(repos) if repos.is_empty() => {
+                "None yet: choose the repositories Cloud sessions can open.".to_string()
+            }
+            Some(repos) if repos.len() == 1 => "Cloud sessions can open 1 repository.".to_string(),
+            Some(repos) => format!("Cloud sessions can open {} repositories.", repos.len()),
+        };
+        let refreshing = self.state.read(cx).cloud_repos_refreshing();
+        let refresh = div()
+            .id("github-repos-refresh")
+            .flex_none()
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label("Check repositories again")
+            .cursor_pointer()
+            .hover(|style| style.bg(crate::theme::ink(0.05)))
+            .when(!refreshing, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |state, cx| state.refresh_cloud_repos(cx));
+                }))
+            })
+            .child(if refreshing {
+                crate::loaders::ring_spinner("github-repos-refreshing", 14.0, theme.text_muted)
+                    .into_any_element()
+            } else {
+                crate::icons::icon(crate::icons::REFRESH)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted)
+                    .into_any_element()
+            });
+        let header = row(
+            theme,
+            false,
+            Some(tile(theme, crate::icons::GIT_BRANCH, None)),
+            "Repositories",
+            vec![text(theme.text_muted, summary)],
+            None,
+            vec![
+                refresh.into_any_element(),
+                external_action(theme, "github-install", "Choose on GitHub")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::accounts::open_login_url(&install_url, cx);
+                    }))
+                    .into_any_element(),
+            ],
+        );
+        let list = repos.unwrap_or_default();
+        let more = list.len().saturating_sub(SHOWN);
+        let rows = list.iter().take(SHOWN).enumerate().map(|(ix, repo)| {
+            let owner = repo.full_name.split('/').next().unwrap_or_default();
+            widgets::card_row(theme, false)
+                .min_h(px(40.0))
+                .py(px(8.0))
+                .flex_nowrap()
+                .gap(px(12.0))
+                // Under the header's tile, so the list reads as its children.
+                .pl(px(8.0))
+                .child(crate::pull_request_media::avatar(
+                    owner,
+                    SharedString::from(format!("cloud-repo-avatar-{ix}")),
+                    20.0,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
+                        .text_color(theme.text)
+                        .child(SharedString::from(repo.full_name.clone())),
+                )
+                .when(repo.private, |row| {
+                    row.child(widgets::badge(theme, "Private"))
+                })
+                .into_any_element()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .child(header)
+            .children(rows)
+            .when(more > 0, |el| {
+                el.child(
+                    widgets::card_row(theme, false)
+                        .min_h(px(36.0))
+                        .py(px(8.0))
+                        .pl(px(8.0))
+                        .child(text(theme.text_muted, format!("and {more} more"))),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The device-flow step, a row of the GitHub block: what to do, the code
+    /// (a click copies it), and the way to GitHub, which copies it too.
     fn render_github_code(
         &self,
         flow: &GithubDeviceFlow,
@@ -1088,57 +1118,58 @@ impl CloudPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .mx(px(16.0))
-            .pl(px(36.0 + 16.0))
-            .pb(px(16.0))
+        let code = div()
+            .id("github-user-code")
+            .flex_none()
+            .h(px(32.0))
+            .px(px(12.0))
             .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::details_label(theme, "Enter this code on GitHub"))
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .rounded(px(8.0))
+            .bg(widgets::select_fill(theme, false))
+            .cursor_pointer()
+            .hover(|s| s.bg(widgets::select_fill(theme, true)))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(format!("Copy GitHub code {}", flow.user_code))
+            .on_click(cx.listener(|this, _, _, cx| this.copy_github_code(cx)))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .id("github-user-code")
-                            .px(px(14.0))
-                            .py(px(8.0))
-                            .rounded(px(10.0))
-                            .bg(theme.wash(0.06))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(crate::typography::ui_rems(22.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .aria_label(format!("GitHub code {}", flow.user_code))
-                            .child(SharedString::from(flow.user_code.clone())),
-                    )
-                    .child(
-                        action(
-                            theme,
-                            "github-copy-code",
-                            widgets::ActionTone::Quiet,
-                            if copied { "Copied" } else { "Copy code" },
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_github_code(cx))),
-                    )
-                    .child(
-                        action(
-                            theme,
-                            "github-open",
-                            widgets::ActionTone::Solid,
-                            "Open GitHub",
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.open_github(cx))),
-                    ),
+                    .font_family(theme.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from(flow.user_code.clone())),
             )
-            .into_any_element()
+            .child(
+                crate::icons::icon(if copied {
+                    crate::icons::CHECK
+                } else {
+                    crate::icons::COPY
+                })
+                .size(px(14.0))
+                .text_color(if copied { theme.text } else { theme.text_muted }),
+            );
+        row(
+            theme,
+            false,
+            Some(tile(theme, crate::icons::KEY_MINIMALISTIC, None)),
+            "Enter this code on GitHub",
+            vec![text(
+                theme.text_muted,
+                "Approve Zeron there; this page moves on by itself.",
+            )],
+            None,
+            vec![
+                code.into_any_element(),
+                external_action(theme, "github-open", "Open GitHub")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_github(cx)))
+                    .into_any_element(),
+            ],
+        )
+        .into_any_element()
     }
 
     /// Credits: used over the picked range against what's left, and a bar
@@ -1271,72 +1302,11 @@ impl CloudPage {
                 .into_any_element(),
         )
     }
-
-    fn render_delete_dialog(
-        &mut self,
-        viewport: gpui::Size<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.confirm_delete {
-            return None;
-        }
-        let theme = Theme::of(cx).for_popup();
-        let accent = theme.accent;
-        let card = popover::dialog_card(&theme)
-            .id("delete-cloud-card")
-            .role(gpui::Role::AlertDialog)
-            .aria_label("Turn off Cloud")
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.confirm_delete = false;
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-            }))
-            .child(popover::dialog_title(&theme, "Turn off Cloud?"))
-            .child(div().mt(px(8.0)).child(popover::dialog_body(
-                &theme,
-                "This permanently deletes every session's machine and everything on them, \
-                 including work that hasn't been pushed. It can't be undone.",
-            )))
-            .child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        popover::btn_ghost(&theme, "Cancel", "delete-cloud-cancel")
-                            .id("delete-cloud-cancel")
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .focus_visible(move |s| s.border_2().border_color(accent))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_delete = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        popover::btn_danger(&theme, "Turn off Cloud")
-                            .id("delete-cloud-confirm")
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .focus_visible(move |s| s.border_2().border_color(accent))
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.run(CloudAction::Delete, cx)),
-                            ),
-                    ),
-            )
-            .into_any_element();
-        Some(popover::modal("delete-cloud-dialog", viewport, card))
-    }
 }
 
 impl Render for CloudPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let dialog = self.render_delete_dialog(window.viewport_size(), cx);
         let status = self.render_status(&theme, cx);
         let usage = self.render_usage(&theme, cx);
         let cloud_id = self
@@ -1344,6 +1314,17 @@ impl Render for CloudPage {
             .filter(|s| s.available)
             .and_then(|_| self.cloud_id());
         let github = self.render_github(cloud_id.as_deref(), &theme, cx);
+        if self.github_only {
+            return div()
+                .flex()
+                .flex_col()
+                .children(status)
+                .children(github)
+                .when_some(self.error.clone(), |el, message| {
+                    el.child(widgets::error_strip(&theme, message))
+                })
+                .into_any_element();
+        }
         let scrollbar = popover::rail(self, "cloud-page-scrollbar", &theme, cx);
         div()
             .id("cloud-page-host")
@@ -1380,7 +1361,7 @@ impl Render for CloudPage {
                                             })),
                                     )
                                 })
-                                .child(status)
+                                .children(status)
                                 .children(usage)
                                 .children(github),
                         ),
@@ -1388,7 +1369,7 @@ impl Render for CloudPage {
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
-            .when_some(dialog, |el, dialog| el.child(dialog))
+            .into_any_element()
     }
 }
 
@@ -1533,7 +1514,6 @@ mod tests {
                         balance: [500.0, -3.0][ix % 2],
                         available: true,
                     });
-                    page.confirm_delete = ix % 2 == 0;
                     page.github = match ix % 3 {
                         0 => GithubFlow::Waiting {
                             flow: GithubDeviceFlow {

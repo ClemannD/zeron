@@ -2118,9 +2118,11 @@ impl UiSettings {
                     }
                 }
             }
-            // No settings file yet: a fresh install, so first-run setup runs.
+            // No settings file yet: a fresh install, so first-run setup runs,
+            // on frosted glass whatever the theme recommends.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Self {
                 onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
                 ..Self::default()
             },
             Err(_) => Self::default(),
@@ -2909,7 +2911,9 @@ mod tests {
     #[test]
     fn only_a_fresh_install_starts_first_run_setup() {
         let fresh = tempfile::tempdir().unwrap();
-        assert!(!UiSettings::load(fresh.path()).onboarding_completed);
+        let fresh = UiSettings::load(fresh.path());
+        assert!(!fresh.onboarding_completed);
+        assert_eq!(fresh.surface, zeron_theme::SurfacePreference::Frosted);
         // A settings file from before setup existed: that user is past it.
         let existing = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3527,11 +3531,13 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        // Defaults, except that a fresh install still has setup ahead of it.
+        // Defaults, except that a fresh install still has setup ahead of it,
+        // on frosted glass.
         assert_eq!(
             UiSettings::load(dir.path()),
             UiSettings {
                 onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
                 ..UiSettings::default()
             }
         );

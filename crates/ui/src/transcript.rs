@@ -7170,14 +7170,14 @@ impl Transcript {
                     if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                         return None;
                     }
-                    // The Cloud setup chip says what the send waits on; the
-                    // line under it is the turn's working word (untimed: the
-                    // timer starts with the machine's turn).
-                    if state.cloud_setup_echo_pending() {
-                        let turn = state
-                            .pending_send_started(&chat_id, now)
-                            .map_or(0, |t| t.timestamp_millis());
-                        (false, false, 0, turn, None)
+                    // The Cloud setup steps say what the send waits on; the
+                    // line under them is the turn's working word, timed from
+                    // the send — setting the machine up is part of the work —
+                    // and keyed on it, so neither restarts when the machine's
+                    // turn begins.
+                    if let Some(sent) = state.cloud_setup_turn_started() {
+                        let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
+                        (false, false, elapsed, sent, None)
                     } else {
                         // During the send→turn window the session row's `started_at`
                         // still belongs to the PREVIOUS turn — a timer based on the
@@ -7225,8 +7225,6 @@ impl Transcript {
                     booting,
                 )
             };
-        let setup_chip =
-            self.doc_override.is_none() && self.state.read(cx).cloud_setup_echo_pending();
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -7296,7 +7294,7 @@ impl Transcript {
                             cx.reduce_motion(),
                         )),
                 )
-                .when(!sending && !setup_chip, |el| {
+                .when(!sending, |el| {
                     // The timer ticks every second; its digits roll in place
                     // (the unit suffix holds).
                     el.child(

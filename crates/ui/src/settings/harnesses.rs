@@ -190,6 +190,12 @@ pub struct HarnessesPage {
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
+    /// Just the rows, in a scroll of their own: first-run setup's agents
+    /// step shows this device's providers exactly as Settings does.
+    embedded: bool,
+    /// The device switcher moved on and its rows are on the way: the old
+    /// rows stay, dimmed and inert, so the block never blanks out.
+    switching: bool,
 }
 
 impl HarnessesPage {
@@ -214,9 +220,97 @@ impl HarnessesPage {
             update_task: None,
             update_action_task: None,
             checking_updates: false,
+            embedded: false,
+            switching: false,
         };
         page.load(cx);
         page
+    }
+
+    /// This device's rows alone, for a host that brings its own heading.
+    pub fn new_embedded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.embedded = true;
+        page
+    }
+
+    pub(crate) fn harnesses(&self) -> &Loadable<Vec<HarnessDescriptor>> {
+        &self.harnesses
+    }
+
+    /// The device the rows describe; `None` is this one.
+    pub(crate) fn target_device(&self) -> Option<&str> {
+        self.target_device.as_deref()
+    }
+
+    /// Re-probe the CLIs, keeping painted rows until the answer lands.
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        let painted = matches!(self.harnesses, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.harnesses, Loadable::Idle));
+        let painted_updates = matches!(self.updates, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.updates, Loadable::Idle));
+        self.load(cx);
+        if let Some(painted) = painted {
+            self.harnesses = painted;
+        }
+        if let Some(painted) = painted_updates.filter(|_| matches!(self.updates, Loadable::Loading))
+        {
+            self.updates = painted;
+        }
+        cx.notify();
+    }
+
+    /// The refresh button: look for newly installed CLIs and check every
+    /// agent for updates, the rows staying painted meanwhile.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reload(cx);
+        self.check_updates(cx);
+    }
+
+    /// The page header's controls: refresh, then (when `devices`) the device
+    /// switcher — Cloud among the devices manages the accounts every Cloud
+    /// machine uses. First-run setup shows the same controls over its rows.
+    pub(crate) fn render_toolbar(
+        &mut self,
+        theme: &Theme,
+        devices: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let busy =
+            self.checking_updates || self.switching || matches!(self.harnesses, Loadable::Loading);
+        let refresh = div()
+            .id("harnesses-refresh")
+            .flex_none()
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label("Check for agents and updates")
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .cursor_pointer()
+            .hover(|style| style.bg(crate::theme::ink(0.05)))
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+            .child(if busy {
+                crate::loaders::ring_spinner("harnesses-refresh-spinner", 12.0, theme.text_muted)
+                    .into_any_element()
+            } else {
+                crate::icons::icon(crate::icons::REFRESH)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted)
+                    .into_any_element()
+            });
+        let switcher = devices.then(|| self.render_device_switcher(theme, cx));
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.0))
+            .child(refresh)
+            .children(switcher)
+            .into_any_element()
     }
 
     fn toggle_agent_details(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
@@ -405,11 +499,16 @@ impl HarnessesPage {
             });
         }
         self.error = None;
-        self.harnesses = Loadable::Idle;
+        let painted = matches!(self.harnesses, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.harnesses, Loadable::Idle));
         self.updates = Loadable::Idle;
         self.update_task = None;
         self.update_action_task = None;
         self.load(cx);
+        if let Some(painted) = painted.filter(|_| matches!(self.harnesses, Loadable::Loading)) {
+            self.harnesses = painted;
+            self.switching = true;
+        }
         cx.notify();
     }
 
@@ -490,6 +589,7 @@ impl HarnessesPage {
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
+                page.switching = false;
                 page.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
                         Ok(list) => Loadable::Ready(list),
@@ -879,12 +979,10 @@ impl HarnessesPage {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .child(crate::loaders::mini_mono_spinner(
+                            .child(crate::loaders::ring_spinner(
                                 format!("harness-install-spinner-{harness:?}"),
-                                1.5,
+                                12.0,
                                 theme.text_muted,
-                                cx.entity_id(),
-                                cx,
                             ))
                             .child(SharedString::from(install_label(&descriptor.name)))
                             .into_any_element(),
@@ -1200,17 +1298,17 @@ impl popover::ScrollRailHost for HarnessesPage {
 impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let supports_updates = self.supports_updates(cx);
-
+        let embedded = self.embedded;
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
-                .p(px(16.0))
-                .child(popover::skeleton_rows(
-                    "harnesses-skeleton",
-                    &theme,
-                    4,
-                    cx.entity_id(),
-                    cx,
+                .when(embedded, |card| card.mt_0())
+                .h(px(240.0))
+                .items_center()
+                .justify_center()
+                .child(crate::loaders::ring_spinner(
+                    "harnesses-loading",
+                    20.0,
+                    theme.text_muted,
                 ))
                 .into_any_element(),
             Loadable::Error(message) => {
@@ -1235,11 +1333,41 @@ impl Render for HarnessesPage {
             Loadable::Ready(_) => {
                 let rows = self.rows(cx);
                 widgets::section_card(&theme)
+                    .when(embedded, |card| card.mt_0())
                     .children(rows)
+                    .when(self.switching, |card| {
+                        card.relative()
+                            .opacity(0.5)
+                            .child(div().absolute().inset_0().occlude())
+                    })
                     .into_any_element()
             }
         };
         crate::toast::take_error(&mut self.error, cx);
+        if embedded {
+            let scrollbar = popover::rail(self, "harnesses-embedded-scrollbar", &theme, cx);
+            return div()
+                .id("harnesses-embedded-host")
+                .relative()
+                .size_full()
+                .on_hover(cx.listener(Self::on_scroll_hovered))
+                .child(
+                    crate::edge_fade::edge_faded(
+                        16.0,
+                        true,
+                        true,
+                        div()
+                            .id("harnesses-embedded")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll.scroll)
+                            .child(body),
+                    )
+                    .fade_overflow_y(&self.scroll.scroll),
+                )
+                .children(scrollbar)
+                .into_any_element();
+        }
         let update_error = match &self.updates {
             Loadable::Error(message) => Some(
                 div()
@@ -1261,28 +1389,7 @@ impl Render for HarnessesPage {
             ),
             _ => None,
         };
-        let switcher = self.render_device_switcher(&theme, cx);
-
-        let can_control = self.can_control_updates(cx);
-        let check = div()
-            .id("check-harness-updates")
-            .flex_none()
-            .px(px(9.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|style| style.bg(crate::theme::ink(0.05)))
-            .opacity(if can_control { 1.0 } else { 0.4 })
-            .when(can_control, |button| {
-                button.on_click(cx.listener(|this, _, _, cx| this.check_updates(cx)))
-            })
-            .child(if self.checking_updates {
-                "Checking…"
-            } else {
-                "Check now"
-            });
+        let toolbar = self.render_toolbar(&theme, true, cx);
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1310,14 +1417,7 @@ impl Render for HarnessesPage {
                                         .items_center()
                                         .justify_between()
                                         .child(widgets::page_header(&theme, "Providers", None))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .when(supports_updates, |el| el.child(check))
-                                                .child(switcher),
-                                        ),
+                                        .child(toolbar),
                                 )
                                 .children(update_error)
                                 .child(body),
@@ -1326,6 +1426,7 @@ impl Render for HarnessesPage {
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
+            .into_any_element()
     }
 }
 

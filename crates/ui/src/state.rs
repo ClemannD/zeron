@@ -692,6 +692,11 @@ struct PendingSend {
 /// incident fell into.
 pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 
+/// The Cloud setup placeholder's step while the machine comes up; the
+/// machine's own first step ("Started a machine") replaces it in place.
+const CLOUD_STARTING_STEP: &str = "Starting a machine";
+const CLOUD_WAKING_STEP: &str = "Waking the machine";
+
 /// The one-shot timer behind [`AppState::watch_clock_transitions`].
 #[derive(Default)]
 struct ClockTransitions {
@@ -891,6 +896,8 @@ pub struct AppState {
     /// on Cloud. `None` = Cloud off, GitHub not connected, or not read yet.
     pub cloud_repos: Option<Vec<zeron_proto::GithubRepo>>,
     cloud_repos_task: Option<Task<()>>,
+    /// A [`Self::refresh_cloud_repos`] read is in flight (its button spins).
+    cloud_repos_refreshing: bool,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -1004,6 +1011,7 @@ impl AppState {
             cloud_sessions_task: None,
             cloud_repos: None,
             cloud_repos_task: None,
+            cloud_repos_refreshing: false,
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
@@ -1804,10 +1812,13 @@ impl AppState {
         {
             return;
         }
-        let (name, step) = if waking {
-            ("Waking the Cloud machine", "wake")
+        // Worded and shaped like the machine's own first step ("Started a
+        // machine"), which replaces it in place: no Cloud-step input, since
+        // the doc keeps none on the machine's, so both draw alike.
+        let name = if waking {
+            CLOUD_WAKING_STEP
         } else {
-            ("Starting a Cloud machine", "start")
+            CLOUD_STARTING_STEP
         };
         self.push_echo(
             chat_id,
@@ -1818,7 +1829,7 @@ impl AppState {
                     id: zeron_proto::cloud_setup_part_id(message_id, "machine"),
                     call: zeron_proto::ToolCall::Unknown {
                         name: name.into(),
-                        input: Some(serde_json::json!({ zeron_proto::CLOUD_SETUP_KEY: step })),
+                        input: None,
                     },
                     is_error: false,
                     resolved: false,
@@ -1839,6 +1850,49 @@ impl AppState {
                 duration_ms: None,
             },
         );
+        // The machine may have failed before this placeholder arrived.
+        self.settle_failed_cloud_setups();
+    }
+
+    /// The selected chat's latest message — an unconfirmed echo first, since
+    /// it is newer than anything the transcript holds — with the Cloud setup
+    /// entry it brought up, if it had to start or wake a machine. Setup
+    /// entry ids derive from their message's, so finding one is enough.
+    fn latest_cloud_setup(&self) -> Option<(&SessionMessageEntry, Option<&SessionMessageEntry>)> {
+        let user = zeron_doc::MessageRole::User;
+        let message = self
+            .pending_echoes()
+            .iter()
+            .rev()
+            .find(|entry| entry.role == user)
+            .or_else(|| self.transcript.iter().rev().find(|entry| entry.role == user))?;
+        let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
+        let setup = self
+            .pending_echoes()
+            .iter()
+            .chain(&self.transcript)
+            .find(|entry| entry.id == setup_id);
+        Some((message, setup))
+    }
+
+    /// The selected chat's current turn is a Cloud setup still under way:
+    /// the placeholder, or the machine's setup entry (which carries on as
+    /// the turn's answer) still streaming.
+    pub fn cloud_setup_streaming(&self) -> bool {
+        self.latest_cloud_setup().is_some_and(|(_, setup)| {
+            setup.is_some_and(|setup| setup.status == Some(zeron_doc::MessageStatus::Streaming))
+        })
+    }
+
+    /// When the send that brought the selected chat's Cloud machine up was
+    /// made (ms), while that setup belongs to the current turn — the app's
+    /// placeholder or the machine's own steps after the latest message.
+    /// Setting the machine up is part of the work, so the turn's timer counts
+    /// from the send, and keeps that base once the turn itself starts. A
+    /// newer message to a machine already up has none.
+    pub fn cloud_setup_turn_started(&self) -> Option<i64> {
+        let (message, setup) = self.latest_cloud_setup()?;
+        setup.map(|_| message.created_at)
     }
 
     /// The selected chat shows a Cloud setup placeholder (it says what the
@@ -2395,7 +2449,69 @@ impl AppState {
     ) {
         if self.cloud_sessions.as_ref() != Some(&sessions) {
             self.cloud_sessions = Some(sessions);
+            self.settle_failed_cloud_setups();
             cx.notify();
+        }
+    }
+
+    /// A chat whose Cloud machine couldn't be set up or woken: the setup
+    /// step shown under its send turns into that failure, with the reason.
+    /// Otherwise it would spin forever — only the machine itself, once up,
+    /// replaces it. The send keeps its own course: no longer booting, it
+    /// reads as not delivered, with Retry.
+    fn settle_failed_cloud_setups(&mut self) {
+        use zeron_doc::{MessagePart, MessageStatus};
+        let failed: Vec<(String, String)> = self
+            .echoes
+            .keys()
+            .filter_map(|chat_id| {
+                let session = self.chat_cloud_session(chat_id)?;
+                (session.state == zeron_proto::CloudState::Error).then(|| {
+                    (
+                        chat_id.clone(),
+                        session
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Something went wrong with Cloud.".into()),
+                    )
+                })
+            })
+            .collect();
+        for (chat_id, error) in failed {
+            let Some(echoes) = self.echoes.get_mut(&chat_id) else {
+                continue;
+            };
+            let mut settled = false;
+            for echo in echoes.iter_mut().filter(|echo| {
+                zeron_proto::cloud_setup_message_id(&echo.id).is_some()
+                    && echo.status == Some(MessageStatus::Streaming)
+            }) {
+                echo.status = Some(MessageStatus::Complete);
+                for part in &mut echo.parts {
+                    if let MessagePart::Tool {
+                        call: zeron_proto::ToolCall::Unknown { name, .. },
+                        is_error,
+                        resolved,
+                        output,
+                        ..
+                    } = part
+                    {
+                        *name = if name == CLOUD_WAKING_STEP {
+                            "Couldn't wake the machine"
+                        } else {
+                            "Couldn't start a machine"
+                        }
+                        .into();
+                        *is_error = true;
+                        *resolved = true;
+                        *output = Some(error.clone());
+                    }
+                }
+                settled = true;
+            }
+            if settled {
+                self.transcript_revision = self.transcript_revision.wrapping_add(1);
+            }
         }
     }
 
@@ -2420,6 +2536,7 @@ impl AppState {
             Some(existing) => *existing = session,
             None => sessions.sessions.push(session),
         }
+        self.settle_failed_cloud_setups();
         cx.notify();
         self.refresh_cloud_sessions(cx);
     }
@@ -2611,6 +2728,12 @@ impl AppState {
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
         if self.send_pending(chat_id, now) {
+            return Indicator::Working;
+        }
+        // A Cloud turn's setup streams into the entry that becomes its answer:
+        // working throughout, though the send is acked (the machine wrote the
+        // message back) a beat before its session row reads Working.
+        if self.selected_chat.as_deref() == Some(chat_id) && self.cloud_setup_streaming() {
             return Indicator::Working;
         }
         effective_indicator(self.session_for(chat_id), now)
@@ -3041,9 +3164,23 @@ impl AppState {
             return;
         };
         self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(status) = crate::cloud::fetch_status(engine.clone()).await else {
+            let Ok(mut status) = crate::cloud::fetch_status(engine.clone()).await else {
                 return;
             };
+            // Cloud is part of every signed-in account: one not set up yet
+            // is set up now. Nothing runs (or bills) until a chat does.
+            if status.available
+                && status.state == zeron_proto::CloudState::Off
+                && let Ok(on) = engine
+                    .client()
+                    .call_as::<zeron_proto::CloudStatus>(
+                        zeron_rpc::methods::CLOUD_ENABLE,
+                        serde_json::json!({}),
+                    )
+                    .await
+            {
+                status = on;
+            }
             let enabled = crate::cloud::account_enabled(&status);
             this.update(cx, |state, cx| {
                 state.set_cloud_status(status, cx);
@@ -3066,6 +3203,8 @@ impl AppState {
         if !self.cloud_enabled() {
             return;
         }
+        self.cloud_repos_refreshing = true;
+        cx.notify();
         self.cloud_repos_task = Some(cx.spawn(async move |this, cx| {
             #[derive(serde::Deserialize)]
             struct Listing {
@@ -3077,14 +3216,19 @@ impl AppState {
                 .call_as::<Listing>(methods::LIST_GITHUB_REPOS, serde_json::json!({}))
                 .await;
             this.update(cx, |state, cx| {
+                state.cloud_repos_refreshing = false;
                 // A failed read keeps what was known.
                 if let Ok(listing) = repos {
                     state.cloud_repos = Some(listing.repos);
-                    cx.notify();
                 }
+                cx.notify();
             })
             .ok();
         }));
+    }
+
+    pub fn cloud_repos_refreshing(&self) -> bool {
+        self.cloud_repos_refreshing
     }
 
     /// The Cloud repository a project's GitHub origin names, when Cloud
@@ -5039,6 +5183,131 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_turn_stays_working_while_its_setup_streams() {
+        let entry = |id: &str, role, status| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at: 1,
+            device_id: "d".into(),
+            status,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        // The machine wrote the message back and is on its setup; no
+        // session row says Working yet.
+        s.apply_transcript(vec![
+            entry("m1", user, None),
+            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Streaming)),
+        ]);
+        assert_eq!(s.indicator_for("c", now), Indicator::Working);
+        // Finished: the session row speaks for itself again.
+        s.apply_transcript(vec![
+            entry("m1", user, None),
+            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Complete)),
+        ]);
+        assert_ne!(s.indicator_for("c", now), Indicator::Working);
+    }
+
+    #[test]
+    fn a_cloud_turn_is_timed_from_the_send_that_started_its_machine() {
+        let entry = |id: &str, role, created_at| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let user = zeron_doc::MessageRole::User;
+        let assistant = zeron_doc::MessageRole::Assistant;
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        // An ordinary turn: no Cloud setup, no base.
+        s.apply_transcript(vec![entry("m0", user, 10)]);
+        assert_eq!(s.cloud_setup_turn_started(), None);
+        // Sent at 1000 to a machine that has to start: the placeholder.
+        s.push_echo("c", entry("m1", user, 1_000));
+        s.push_cloud_setup_echo("c", "m1", 1_000, false);
+        assert_eq!(s.cloud_setup_turn_started(), Some(1_000));
+        // The machine's own steps, then its turn: still the send.
+        s.apply_transcript(vec![
+            entry("m0", user, 10),
+            entry("m1", user, 1_000),
+            entry("m1.cloud-setup", assistant, 9_000),
+            entry("a1", assistant, 12_000),
+        ]);
+        assert_eq!(s.cloud_setup_turn_started(), Some(1_000));
+        // The next message, still only an echo, goes to the machine already
+        // up: no base, not the earlier turn's send.
+        s.push_echo("c", entry("m2", user, 20_000));
+        assert_eq!(s.cloud_setup_turn_started(), None);
+        // And once the host wrote it back.
+        s.apply_transcript(vec![
+            entry("m1", user, 1_000),
+            entry("m1.cloud-setup", assistant, 9_000),
+            entry("m2", user, 20_000),
+        ]);
+        assert_eq!(s.cloud_setup_turn_started(), None);
+    }
+
+    #[test]
+    fn a_cloud_machine_that_failed_settles_its_setup_step() {
+        use zeron_proto::{CloudSession, CloudSessions, CloudState};
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        s.selected_chat = Some("c".into());
+        let session = |state, error: Option<&str>| CloudSessions {
+            sessions: vec![CloudSession {
+                chat_id: "c".into(),
+                device_id: "cloud-s1".into(),
+                space_id: "sp".into(),
+                repo: Some("acme/app".into()),
+                path: Some("/home/user/app".into()),
+                state,
+                error: error.map(String::from),
+                failed_action: None,
+                last_active_at: None,
+                created_at: 0,
+            }],
+            available: true,
+        };
+        s.cloud_sessions = Some(session(CloudState::Provisioning, None));
+        s.push_cloud_setup_echo("c", "m1", 0, false);
+        let step = |s: &AppState| match &s.pending_echoes()[0].parts[0] {
+            zeron_doc::MessagePart::Tool {
+                call: zeron_proto::ToolCall::Unknown { name, .. },
+                is_error,
+                output,
+                ..
+            } => (name.clone(), *is_error, output.clone()),
+            other => panic!("{other:?}"),
+        };
+        // Still being set up: the step spins.
+        assert_eq!(step(&s), ("Starting a machine".into(), false, None));
+        // Failed: the step says so, with the reason.
+        s.cloud_sessions = Some(session(CloudState::Error, Some("No room")));
+        s.settle_failed_cloud_setups();
+        assert_eq!(
+            step(&s),
+            ("Couldn't start a machine".into(), true, Some("No room".into()))
+        );
+        assert_eq!(
+            s.pending_echoes()[0].status,
+            Some(zeron_doc::MessageStatus::Complete)
+        );
+    }
+
+    #[test]
     fn send_pending_acked_when_the_host_writes_the_message_back() {
         let now = Utc::now();
         let mut s = AppState::new();
@@ -6126,7 +6395,14 @@ mod tests {
             panic!("{:?}", placeholder.parts)
         };
         assert_eq!(id, "m1.cloud-machine");
-        assert_eq!(zeron_proto::cloud_setup_step(call), Some("start"));
+        // Shaped like the machine's own step, which the doc keeps no input on.
+        assert_eq!(
+            call,
+            &zeron_proto::ToolCall::Unknown {
+                name: "Starting a machine".into(),
+                input: None,
+            }
+        );
         assert!(!resolved);
         // The host wrote the message: the machine is still coming up.
         state.apply_transcript(vec![entry("m1", user)]);

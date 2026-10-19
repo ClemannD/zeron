@@ -323,6 +323,44 @@ fn caption(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
         .child(copy.into())
 }
 
+/// Geist's ascent and descent per em. A line box puts its baseline
+/// `(line_height - ascent + descent) / 2` above its bottom edge.
+const FONT_ASCENT: f32 = 1.005;
+const FONT_DESCENT: f32 = 0.295;
+
+/// The line height that puts a `size` caption's baseline as far above its
+/// box's bottom as a `figure`-sized line with a line height of one em.
+fn unit_line_height(figure: f32, size: f32) -> f32 {
+    figure - (FONT_ASCENT - FONT_DESCENT) * (figure - size)
+}
+
+/// A large figure with its small unit after it, on one baseline. Both line
+/// boxes end together and the unit's line height lands its baseline on the
+/// figure's; flex baseline alignment doesn't line up text of different sizes.
+/// More captions on the same baseline can follow via [`figure_caption`].
+fn figure_row(theme: &Theme, size: f32, figure: String, unit: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(size))
+                .line_height(crate::typography::ui_rems(size))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(figure),
+        )
+        .child(figure_caption(theme, size, unit))
+}
+
+/// A caption sitting on a [`figure_row`]'s baseline.
+fn figure_caption(theme: &Theme, figure: f32, copy: impl Into<SharedString>) -> gpui::Div {
+    let size = widgets::ROW_DESCRIPTION_SIZE;
+    caption(theme, copy).line_height(crate::typography::ui_rems(unit_line_height(figure, size)))
+}
+
 fn button(
     theme: &Theme,
     id: impl Into<gpui::ElementId>,
@@ -341,114 +379,113 @@ fn button(
 }
 
 impl BillingPage {
-    /// The balance: one number, a bar split into plan and extra credits,
-    /// and what each part is.
+    /// The balance: one number and the time it buys, a quiet bar split into
+    /// plan and extra credits, then a row for each kind.
     fn render_credits(&self, status: &BillingStatus, theme: &Theme) -> AnyElement {
         let credits = &status.credits;
         let total = credits.total.max(0.0);
         let monthly = credits.monthly.max(0.0);
         let extra = credits.extra.max(0.0);
         let parts = (monthly + extra).max(1.0);
-        let bar = div()
-            .mt(px(14.0))
-            .h(px(6.0))
-            .w_full()
-            .rounded_full()
-            .bg(theme.wash(0.08))
-            .flex()
-            .flex_row()
-            .overflow_hidden()
-            .when(monthly > 0.0, |el| {
-                el.child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative((monthly / parts) as f32))
-                        .bg(theme.accent),
-                )
-            })
-            .when(extra > 0.0, |el| {
-                el.child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative((extra / parts) as f32))
-                        .bg(theme.accent.opacity(0.45)),
-                )
-            });
-        let legend = |color: gpui::Hsla, title: String, detail: String| {
+        let bar = (monthly + extra > 0.0).then(|| {
             div()
+                .mt(px(14.0))
+                .h(px(4.0))
+                .w_full()
+                .rounded_full()
+                .bg(theme.wash(0.08))
                 .flex()
                 .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(color))
+                .overflow_hidden()
+                .when(monthly > 0.0, |el| {
+                    el.child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative((monthly / parts) as f32))
+                            .bg(theme.text.opacity(0.7)),
+                    )
+                })
+                .when(extra > 0.0, |el| {
+                    el.child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative((extra / parts) as f32))
+                            .bg(theme.text.opacity(0.3)),
+                    )
+                })
+        });
+        let summary = div()
+            .px(px(16.0))
+            .py(px(16.0))
+            .flex()
+            .flex_col()
+            .child(
+                figure_row(
+                    theme,
+                    26.0,
+                    crate::cloud::group_number(total.floor()),
+                    if total == 1.0 { "credit" } else { "credits" },
+                )
+                .child(div().flex_1())
+                .child(figure_caption(
+                    theme,
+                    26.0,
+                    if total > 0.0 {
+                        hours(total)
+                    } else {
+                        "Choose a plan or buy credits to run Cloud".to_string()
+                    },
+                )),
+            )
+            .children(bar);
+        let line = |title: &'static str, detail: String, value: String| {
+            widgets::card_row(theme, false)
+                .min_h(px(52.0))
+                .py(px(10.0))
+                .flex_nowrap()
                 .child(
                     div()
-                        .text_size(crate::typography::ui_rems(12.5))
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, title))
+                        .child(caption(theme, detail)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
-                        .child(title),
+                        .child(value),
                 )
-                .child(caption(theme, detail))
         };
-        let monthly_detail = match (credits.monthly_total > 0.0, credits.monthly_ends_at) {
-            (true, Some(ends)) => format!(
-                "of {} · reset {}",
-                crate::cloud::group_number(credits.monthly_total),
-                short_date(ends)
-            ),
-            _ => "choose one below".to_string(),
-        };
-        let block = widgets::section_card(theme).mt(px(0.0)).child(
-            div()
-                .px(px(16.0))
-                .py(px(16.0))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_baseline()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(26.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(if total <= 0.0 {
-                                    theme.warning_muted
-                                } else {
-                                    theme.text
-                                })
-                                .child(crate::cloud::group_number(total.floor())),
-                        )
-                        .child(caption(
-                            theme,
-                            if total == 1.0 { "credit" } else { "credits" },
-                        )),
-                )
-                .child(bar)
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(20.0))
-                        .child(legend(
-                            theme.accent,
-                            if credits.monthly_total > 0.0 {
-                                format!("{} plan", crate::cloud::group_number(monthly.floor()))
-                            } else {
-                                "No plan".to_string()
-                            },
-                            monthly_detail,
-                        ))
-                        .child(legend(
-                            theme.accent.opacity(0.45),
-                            format!("{} extra", crate::cloud::group_number(extra.floor())),
-                            "never expire".to_string(),
-                        )),
+        let (plan_detail, plan_value) = match (credits.monthly_total > 0.0, credits.monthly_ends_at)
+        {
+            (true, Some(ends)) => (
+                format!(
+                    "Of {} · resets {}",
+                    crate::cloud::group_number(credits.monthly_total),
+                    short_date(ends)
                 ),
-        );
+                crate::cloud::group_number(monthly.floor()),
+            ),
+            (true, None) => (
+                format!("Of {}", crate::cloud::group_number(credits.monthly_total)),
+                crate::cloud::group_number(monthly.floor()),
+            ),
+            (false, _) => (
+                "No plan yet — choose one below".to_string(),
+                "—".to_string(),
+            ),
+        };
+        let block = widgets::section_card(theme)
+            .mt(px(0.0))
+            .child(summary)
+            .child(line("Plan credits", plan_detail, plan_value))
+            .child(line(
+                "Extra credits",
+                "Never expire · used once plan credits run out".to_string(),
+                crate::cloud::group_number(extra.floor()),
+            ));
         widgets::section(theme, "Credits", block).into_any_element()
     }
 
@@ -479,7 +516,7 @@ impl BillingPage {
                 button(
                     theme,
                     ("plan-switch", ix),
-                    widgets::ActionTone::Outlined,
+                    widgets::ActionTone::Filled,
                     if busy { "Opening…" } else { "Switch" },
                     idle,
                 )
@@ -496,7 +533,7 @@ impl BillingPage {
                     if ix == 0 {
                         widgets::ActionTone::Solid
                     } else {
-                        widgets::ActionTone::Outlined
+                        widgets::ActionTone::Filled
                     },
                     if busy {
                         "Opening…".to_string()
@@ -586,7 +623,7 @@ impl BillingPage {
         widgets::section(theme, "Plan", block).into_any_element()
     }
 
-    /// One-off packs: a stepper and the total, then Buy.
+    /// One-off packs: how many in one pill (− count +), then Buy.
     fn render_extra(
         &self,
         status: &BillingStatus,
@@ -602,24 +639,64 @@ impl BillingPage {
                     enabled: bool,
                     delta: i32,
                     cx: &mut Context<Self>| {
-            let muted = theme.text_muted;
-            widgets::action_button(theme, widgets::ActionTone::Outlined)
+            let accent = theme.accent;
+            div()
                 .id(id)
-                .w(px(32.0))
-                .px_0()
+                .flex_none()
+                .size(px(32.0))
+                .flex()
+                .items_center()
                 .justify_center()
+                .rounded(px(8.0))
                 .tab_index(0)
                 .role(gpui::Role::Button)
-                .aria_label(if delta < 0 { "Fewer" } else { "More" })
-                .when(!enabled, |el| el.opacity(0.4).cursor_default())
-                .when(enabled, |el| {
-                    el.on_click(cx.listener(move |this, _, _, cx| {
-                        this.packs = (this.packs as i32 + delta).clamp(1, MAX_PACKS as i32) as u32;
-                        cx.notify();
-                    }))
+                .aria_label(if delta < 0 {
+                    "Fewer packs"
+                } else {
+                    "More packs"
                 })
-                .child(crate::icons::icon(glyph).size(px(12.0)).text_color(muted))
+                .focus_visible(move |s| s.border_2().border_color(accent))
+                .when(!enabled, |el| el.opacity(0.35))
+                .when(enabled, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(theme.wash(0.06)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.packs =
+                                (this.packs as i32 + delta).clamp(1, MAX_PACKS as i32) as u32;
+                            cx.notify();
+                        }))
+                })
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
         };
+        let stepper = div()
+            .flex()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .h(px(32.0))
+            .rounded(px(8.0))
+            .bg(widgets::select_fill(theme, false))
+            .child(step("pack-fewer", crate::icons::MINUS, packs > 1, -1, cx))
+            .child(
+                div()
+                    .min_w(px(24.0))
+                    .text_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(packs.to_string()),
+            )
+            .child(step(
+                "pack-more",
+                crate::icons::PLUS,
+                packs < MAX_PACKS,
+                1,
+                cx,
+            ));
         let credits = pack.credits * packs as f64;
         let block = widgets::section_card(theme).mt(px(0.0)).child(
             widgets::card_row(theme, true)
@@ -632,43 +709,20 @@ impl BillingPage {
                             theme,
                             crate::cloud::format_credits(credits),
                         ))
-                        .child(caption(
-                            theme,
-                            format!(
-                                "{} · never expire · {}",
-                                format_price(pack.price_cents * packs),
-                                hours(credits)
-                            ),
-                        )),
+                        .child(caption(theme, format!("Never expire · {}", hours(credits)))),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
-                        .child(step("pack-fewer", crate::icons::MINUS, packs > 1, -1, cx))
-                        .child(
-                            div()
-                                .w(px(28.0))
-                                .text_center()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text)
-                                .child(format!("{packs}×")),
-                        )
-                        .child(step(
-                            "pack-more",
-                            crate::icons::PLUS,
-                            packs < MAX_PACKS,
-                            1,
-                            cx,
-                        ))
-                        .child(div().w(px(6.0)))
+                        .gap(px(8.0))
+                        .child(stepper)
                         .child(
                             button(
                                 theme,
                                 "billing-buy",
-                                widgets::ActionTone::Solid,
+                                widgets::ActionTone::Filled,
                                 if busy {
                                     "Opening…".to_string()
                                 } else {
@@ -676,6 +730,7 @@ impl BillingPage {
                                 },
                                 idle,
                             )
+                            .min_w(px(96.0))
                             .when(idle, |el| {
                                 el.on_click(cx.listener(|this, _, _, cx| this.buy_credits(cx)))
                             }),
@@ -695,19 +750,15 @@ impl BillingPage {
                 .px(px(14.0))
                 .py(px(10.0))
                 .rounded(px(12.0))
-                .bg(theme.accent.opacity(0.08))
-                .border_1()
-                .border_color(theme.accent.opacity(0.2))
+                .bg(widgets::block_fill(theme))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
-                .child(crate::loaders::mini_mono_spinner(
+                .child(crate::loaders::ring_spinner(
                     "billing-pending",
-                    1.5,
-                    theme.accent,
-                    cx.entity_id(),
-                    cx,
+                    12.0,
+                    theme.text_muted,
                 ))
                 .child(
                     div()
@@ -740,7 +791,7 @@ fn plan_card(theme: &Theme, plan: &BillingPlan, current: bool, action: AnyElemen
         .bg(widgets::block_fill(theme))
         .border_1()
         .border_color(if current {
-            theme.accent.opacity(0.7)
+            theme.text.opacity(0.25)
         } else {
             gpui::transparent_black()
         })
@@ -760,35 +811,9 @@ fn plan_card(theme: &Theme, plan: &BillingPlan, current: bool, action: AnyElemen
                         .text_color(theme.text_muted)
                         .child(plan.name.clone()),
                 )
-                .when(current, |el| {
-                    el.child(
-                        div()
-                            .px(px(6.0))
-                            .py(px(1.0))
-                            .rounded(px(5.0))
-                            .bg(theme.accent.opacity(0.14))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.accent)
-                            .child("Current"),
-                    )
-                }),
+                .when(current, |el| el.child(widgets::badge(theme, "Current"))),
         )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .gap(px(3.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(24.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(format_price(plan.price_cents)),
-                )
-                .child(caption(theme, "/ month")),
-        )
+        .child(figure_row(theme, 24.0, format_price(plan.price_cents), "/ month").mt(px(4.0)))
         .child(
             div()
                 .mt(px(4.0))
@@ -846,20 +871,6 @@ impl Render for BillingPage {
                 sections.push(self.render_credits(&status, &theme));
                 sections.push(self.render_plans(&status, &theme, cx));
                 sections.push(self.render_extra(&status, &theme, cx));
-                sections.push(
-                    div()
-                        .mt(px(16.0))
-                        .px(px(4.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(18.0))
-                        .text_color(theme.text_muted.opacity(0.75))
-                        .child(
-                            "A credit is a minute of the default machine; larger machines use more a minute. \
-                             Plan credits renew every month and expire at its end. Extra credits never expire \
-                             and are used once plan credits run out.",
-                        )
-                        .into_any_element(),
-                );
                 sections
             }
         };
