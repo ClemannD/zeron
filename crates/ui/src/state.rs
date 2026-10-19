@@ -779,6 +779,10 @@ pub(crate) struct CanvasTarget {
 /// answer for itself: a cold start is well under this.
 const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// The least time between session-list re-reads prompted by a surface that
+/// couldn't reach its Cloud machine (it retries every couple of seconds).
+const CLOUD_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
+
 pub struct AppState {
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
@@ -899,6 +903,9 @@ pub struct AppState {
     /// machine reads as waking until its own heartbeat arrives, rather than
     /// asleep again while the session list catches up.
     cloud_wakes: HashMap<String, std::time::Instant>,
+    /// When a surface that couldn't reach a Cloud machine last had the
+    /// session list re-read ([`Self::recheck_cloud_machine`]).
+    cloud_recheck_at: Option<std::time::Instant>,
     /// The GitHub repositories Cloud reaches (the Zeron GitHub App's
     /// installations): a project whose repository is here can run a session
     /// on Cloud. `None` = Cloud off, GitHub not connected, or not read yet.
@@ -1018,6 +1025,7 @@ impl AppState {
             cloud_sessions: None,
             cloud_sessions_task: None,
             cloud_wakes: HashMap::new(),
+            cloud_recheck_at: None,
             cloud_repos: None,
             cloud_repos_task: None,
             cloud_repos_refreshing: false,
@@ -2482,6 +2490,27 @@ impl AppState {
             state => state,
         };
         Some((session, state))
+    }
+
+    /// A surface (files, git status) couldn't reach `chat_id`'s host. When
+    /// that host is a Cloud machine, re-read the session list: it says at
+    /// once that the machine is stopping or asleep, where its heartbeat
+    /// takes over a minute to go stale. At most every few seconds.
+    pub fn recheck_cloud_machine(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let on_cloud = self
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .is_some_and(|chat| self.is_cloud_session_device(&chat.device_id));
+        if !on_cloud
+            || self
+                .cloud_recheck_at
+                .is_some_and(|at| at.elapsed() < CLOUD_RECHECK_INTERVAL)
+        {
+            return;
+        }
+        self.cloud_recheck_at = Some(std::time::Instant::now());
+        self.refresh_cloud_sessions(cx);
     }
 
     /// Wake a sleeping Cloud session (by its chat id). It reads as waking at
@@ -5249,6 +5278,32 @@ mod tests {
         );
         assert_eq!(s.indicator_for("c", later), Indicator::None);
         assert!(s.send_undelivered("c", later));
+    }
+
+    #[gpui::test]
+    fn an_unreachable_cloud_host_rereads_sessions_at_most_every_few_seconds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| {
+            let mut s = AppState::new();
+            let mut cloud = chat("c", 0, Some(10));
+            cloud.device_id = "cloud-s1".into();
+            let mut local = chat("l", 0, Some(10));
+            local.device_id = "mac".into();
+            s.chats = vec![cloud, local];
+            let mut machine = device("cloud-s1", "Cloud");
+            machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+            s.devices = vec![machine];
+            s
+        });
+        state.update(cx, |s, cx| {
+            s.recheck_cloud_machine("l", cx);
+            assert!(s.cloud_recheck_at.is_none(), "not a Cloud machine");
+            s.recheck_cloud_machine("c", cx);
+            let first = s.cloud_recheck_at.expect("re-read");
+            s.recheck_cloud_machine("c", cx);
+            assert_eq!(s.cloud_recheck_at, Some(first), "throttled");
+        });
     }
 
     #[test]

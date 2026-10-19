@@ -524,7 +524,10 @@ impl Shell {
         if let Some(files) = &content {
             if machine_down.is_some() {
                 self.files_machine_down.insert(self.active_chat.clone());
-                files.update(cx, |files, _| files.release_git_status());
+                files.update(cx, |files, _| {
+                    files.release_git_status();
+                    files.release_watch();
+                });
             } else {
                 let woke = self.files_machine_down.remove(&self.active_chat);
                 files.update(cx, |files, cx| {
