@@ -76,6 +76,9 @@ pub struct CloudPage {
     /// Only the GitHub block, for a host with its own heading: first-run
     /// setup's GitHub step.
     github_only: bool,
+    /// The engine the reads came from. Sign-in's switch replaces it with
+    /// the synced runtime, whose answers belong to a different account.
+    engine: Option<crate::state::EngineHandle>,
     _observe: Subscription,
 }
 
@@ -119,6 +122,7 @@ impl CloudPage {
             github_task: None,
             copy_task: None,
             github_only: false,
+            engine: None,
             _observe: observe,
         };
         page.load_status(cx);
@@ -161,7 +165,24 @@ impl CloudPage {
     }
 
     /// Sessions and chat titles live in `AppState`; repaint when they move.
+    /// A replaced engine (signing in swaps the local runtime for the synced
+    /// one) is asked everything afresh: what the old one said, like "Cloud
+    /// needs a signed-in account", no longer holds.
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        let engine_changed = match (self.state.read(cx).engine(), &self.engine) {
+            (Some(engine), Some(seen)) => !engine.same_connection(seen),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if engine_changed {
+            self.status = Loadable::Idle;
+            self.vault = Loadable::Idle;
+            self.usage = None;
+            self.github = GithubFlow::Idle;
+            self.error = None;
+            self.load_status(cx);
+            self.load_usage(cx);
+        }
         cx.notify();
     }
 
@@ -172,6 +193,7 @@ impl CloudPage {
             self.status = Loadable::Error("Engine not connected".into());
             return;
         };
+        self.engine = Some(engine.clone());
         if !matches!(self.status, Loadable::Ready(_)) {
             self.status = Loadable::Loading;
         }
@@ -1033,7 +1055,8 @@ impl CloudPage {
             .hover(|style| style.bg(crate::theme::ink(0.05)))
             .when(!refreshing, |el| {
                 el.on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |state, cx| state.refresh_cloud_repos(cx));
+                    this.state
+                        .update(cx, |state, cx| state.refresh_cloud_repos(cx));
                 }))
             })
             .child(if refreshing {

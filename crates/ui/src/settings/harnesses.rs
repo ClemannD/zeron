@@ -92,6 +92,15 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     }
 }
 
+/// "1 account", "3 accounts".
+fn account_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 account".into()
+    } else {
+        format!("{count} accounts")
+    }
+}
+
 fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
@@ -185,6 +194,9 @@ pub struct HarnessesPage {
     /// The expanded provider's Accounts section — one page, retargeted as
     /// providers expand, so every provider shares the same sign-in flow.
     accounts_page: Option<Entity<AccountsPage>>,
+    /// Repaints the rows' account counts as the open Accounts section adds
+    /// or forgets one.
+    _observe_accounts: Option<gpui::Subscription>,
     update_task: Option<Task<()>>,
     update_action_task: Option<Task<()>>,
     /// "Check now" is running: the button says so, since rows no longer
@@ -217,6 +229,7 @@ impl HarnessesPage {
 
             expanded_harness: None,
             accounts_page: None,
+            _observe_accounts: None,
             update_task: None,
             update_action_task: None,
             checking_updates: false,
@@ -333,8 +346,9 @@ impl HarnessesPage {
                 } else {
                     let state = self.state.clone();
                     let target = self.target_device.clone();
-                    self.accounts_page =
-                        Some(cx.new(|cx| AccountsPage::new_embedded(state, target, harness, cx)));
+                    let page = cx.new(|cx| AccountsPage::new_embedded(state, target, harness, cx));
+                    self._observe_accounts = Some(cx.observe(&page, |_, _, cx| cx.notify()));
+                    self.accounts_page = Some(page);
                 }
             }
         }
@@ -586,7 +600,31 @@ impl HarnessesPage {
                 }
             })
         });
+        // Cloud's rows say how many accounts each provider has: the same
+        // list the Accounts section shows, shared through its cache.
+        let accounts_params = self
+            .targets_cloud()
+            .then(|| self.with_target(serde_json::json!({ "forceUsage": false })));
+        let accounts_key = self.target_device.clone();
         self.load_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(params) = accounts_params
+                && let Ok(snapshot) = engine
+                    .client()
+                    .call(methods::LIST_AGENT_ACCOUNTS, params)
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|value| {
+                        serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(value)
+                            .map_err(|error| error.to_string())
+                    })
+            {
+                this.update(cx, |_, cx| {
+                    cx.default_global::<accounts::AccountsSnapshotCache>()
+                        .0
+                        .insert(accounts_key, snapshot);
+                })
+                .ok();
+            }
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
                 page.switching = false;
@@ -1036,13 +1074,22 @@ impl HarnessesPage {
                         meta.push(div().text_color(color).child(text).into_any_element());
                     }
                 }
-                if cloud && !has_account {
-                    meta.push(
-                        div()
-                            .text_color(theme.text_muted.opacity(0.65))
-                            .child("No account")
-                            .into_any_element(),
-                    );
+                if cloud {
+                    let count = cx
+                        .try_global::<accounts::AccountsSnapshotCache>()
+                        .and_then(|cache| cache.0.get(&self.target_device))
+                        .map(|snapshot| accounts::provider_accounts(snapshot, harness).len());
+                    let label = match count {
+                        Some(0) => Some((theme.text_muted.opacity(0.65), "No account".to_string())),
+                        Some(count) => Some((theme.text_muted, account_count_label(count))),
+                        None if !has_account => {
+                            Some((theme.text_muted.opacity(0.65), "No account".to_string()))
+                        }
+                        None => None,
+                    };
+                    if let Some((color, label)) = label {
+                        meta.push(div().text_color(color).child(label).into_any_element());
+                    }
                 }
                 // widgets::row_tile with the brand tint honored (the Claude
                 // mark keeps its orange, like the picker rail).
@@ -1562,6 +1609,23 @@ mod tests {
                 ]);
                 page.toggle_agent_details(zeron_proto::HarnessId::Codex, cx);
                 assert!(page.accounts_page.is_some());
+                // Rows count each provider's accounts from the shared list
+                // (drawn below: "1 account" for Claude, "No account" for Codex).
+                let account: zeron_proto::AgentAccount =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "a", "harness": "claude-code", "email": "a@example.com",
+                        "planLabel": null, "active": true
+                    }))
+                    .unwrap();
+                cx.default_global::<crate::settings::accounts::AccountsSnapshotCache>()
+                    .0
+                    .insert(
+                        Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into()),
+                        zeron_proto::AgentAccountsSnapshot {
+                            accounts: vec![account],
+                            warnings: Vec::new(),
+                        },
+                    );
             })
             .unwrap();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
@@ -1573,6 +1637,13 @@ mod tests {
             })
             .unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn account_counts_read_naturally() {
+    assert_eq!(account_count_label(1), "1 account");
+    assert_eq!(account_count_label(3), "3 accounts");
 }
 
 #[cfg(test)]
