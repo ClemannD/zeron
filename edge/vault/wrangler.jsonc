@@ -32,6 +32,21 @@
   //   GITHUB_APP_CLIENT_SECRET
   //   VAULT_DISABLED            optional; "1" = global kill switch (every call 503)
   //   CANARY_USER_ID            optional; user whose credentials the cron refreshes
+  // Staging (beside production; see edge/wrangler.jsonc `env.staging`).
+  "env": {
+    "staging": {
+      "name": "zeron-vault-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      "durable_objects": {
+        "bindings": [
+          { "name": "VAULT_DEVICES", "class_name": "VaultDevices" },
+          { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" }
+        ]
+      },
+      "triggers": { "crons": ["0 6 * * *"] }
+    }
+  },
   "observability": {
     "enabled": true
   }

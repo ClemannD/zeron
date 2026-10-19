@@ -159,6 +159,57 @@
     "CLOUD_MACHINE": "default",
     "BOAT_API_BASE": "https://boat.dev/api/v1"
   },
+  // Staging: the whole stack beside production on this account — its own
+  // Workers, Durable Objects, R2 buckets and Workflows (Workflow names are
+  // account-wide, hence the prefix), WorkOS's test environment (its own
+  // users and orgs), Stripe in test mode and Boat. Deploy: `npx wrangler deploy --env staging` (vault first).
+  // Secrets: as production's Cloud list above, set with `--env staging`.
+  "env": {
+    "staging": {
+      "name": "zeron-edge-staging",
+      "workers_dev": true,
+      "routes": [],
+      "durable_objects": {
+        "bindings": [
+          { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+          { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+          { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+          { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+          { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+          { "name": "CLOUD_ACCOUNTS", "class_name": "CloudAccount" },
+          { "name": "CLOUD_INDEX", "class_name": "CloudIndex" }
+        ]
+      },
+      "workflows": [
+        { "name": "zeron-staging-cloud-provision", "binding": "CLOUD_PROVISION", "class_name": "ProvisionWorkflow" },
+        { "name": "zeron-staging-cloud-wake", "binding": "CLOUD_WAKE", "class_name": "WakeWorkflow" },
+        { "name": "zeron-staging-cloud-sleep", "binding": "CLOUD_SLEEP", "class_name": "SleepWorkflow" },
+        { "name": "zeron-staging-cloud-delete", "binding": "CLOUD_DELETE", "class_name": "DeleteWorkflow" }
+      ],
+      "services": [{ "binding": "VAULT", "service": "zeron-vault-staging", "entrypoint": "VaultApi" }],
+      "triggers": { "crons": ["17 * * * *"] },
+      "r2_buckets": [
+        { "binding": "BLOBS", "bucket_name": "zeron-staging-blobs" },
+        { "binding": "RELEASES", "bucket_name": "zeron-staging-releases" }
+      ],
+      "vars": {
+        "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
+        "AUTH_MODE": "workos",
+        "SANDBOX_PROVIDER": "boat",
+        "CLOUD_TTL_SECONDS": "7200",
+        "CLOUD_IDLE_MINUTES": "20",
+        "CLOUD_MAX_AWAKE": "5",
+        "CLOUD_MACHINE": "default",
+        "CLOUD_TEMPLATE": "zeron-cloud-dev",
+        "CLOUD_STARTING_CREDITS": "600",
+        "BOAT_API_BASE": "https://boat.dev/api/v1",
+        "STRIPE_PRICE_BASE": "price_1URyT5Ld6XnizwPIilL1dIYa",
+        "STRIPE_PRICE_PRO": "price_1URyT5Ld6XnizwPIBzZSBN6b",
+        "STRIPE_PRICE_MAX": "price_1URyT5Ld6XnizwPILYWMVbKZ",
+        "STRIPE_PRICE_CREDITS": "price_1URyT5Ld6XnizwPI2nNPHhkH"
+      }
+    }
+  },
   "observability": {
     "enabled": true
   }

@@ -154,8 +154,11 @@ local_vars=()
 (umask 077 && openssl rand -hex 24 > "$STATE/admin-token")
 local_vars+=(--var "ADMIN_TOKEN:$(cat "$STATE/admin-token")" --var "CLOUD_STARTING_CREDITS:600")
 log "edge + vault on :$EDGE_PORT ($PROVIDER sandboxes)"
+# --local-upstream: requests reach the Worker as this address, not the first
+# custom-domain route (edge.zeron.sh), so links the edge builds from its own
+# origin — Checkout and the billing portal's way back — come back here.
 (cd "$ROOT/edge" && npx wrangler dev -c wrangler.jsonc -c vault/wrangler.jsonc --port "$EDGE_PORT" \
-  --ip 127.0.0.1 --var AUTH_MODE:dev --var "SANDBOX_PROVIDER:$PROVIDER" --var "CLOUD_EDGE_URL:$SANDBOX_EDGE" \
+  --ip 127.0.0.1 --local-upstream "127.0.0.1:$EDGE_PORT" --var AUTH_MODE:dev --var "SANDBOX_PROVIDER:$PROVIDER" --var "CLOUD_EDGE_URL:$SANDBOX_EDGE" \
   ${local_vars[@]+"${local_vars[@]}"} > "$STATE/wrangler.log" 2>&1 &)
 for _ in $(seq 1 90); do curl -sf "$EDGE/health" >/dev/null && break; sleep 2; done
 curl -sf "$EDGE/health" >/dev/null || { tail -30 "$STATE/wrangler.log"; exit 1; }

@@ -34,6 +34,13 @@ plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info
 if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
   plutil -insert LSEnvironment.CODEX_EXECUTABLE -string "$CODEX_EXECUTABLE" "$CONTENTS/Info.plist"
 fi
+# Another edge (staging, self-hosting) with its own sign-in client and
+# loopback callback: scripts/staging-app.sh.
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    plutil -insert "LSEnvironment.$var" -string "${!var}" "$CONTENTS/Info.plist"
+  fi
+done
 
 mkdir -p "$CONTENTS/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
@@ -81,6 +88,11 @@ OPEN_ENV=(
 if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
   OPEN_ENV+=(--env "CODEX_EXECUTABLE=$CODEX_EXECUTABLE")
 fi
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    OPEN_ENV+=(--env "$var=${!var}")
+  fi
+done
 if [[ -n "${ZERON_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_OPEN_ROUTE=$ZERON_OPEN_ROUTE")
 fi
