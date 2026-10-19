@@ -985,7 +985,16 @@ impl Pickers {
                 this.held_ref = this.selected_ref().cloned().or(this.held_ref.take());
                 this.refs_task = None;
                 this.config.branch = None;
-                this.config.checkout = CheckoutKind::default();
+                // A Cloud project runs nowhere else.
+                this.config.checkout = if state
+                    .read(cx)
+                    .selected_space_row()
+                    .is_some_and(|space| zeron_proto::is_cloud_device(&space.device_id, ""))
+                {
+                    CheckoutKind::Cloud
+                } else {
+                    CheckoutKind::default()
+                };
                 this.refs = Loadable::Idle;
                 this.refs_space = None;
             }
@@ -2887,7 +2896,12 @@ impl Pickers {
                 .to_string()
         };
         if let Some(space) = state.selected_space_row() {
-            let members = state.project_members(space);
+            // A Cloud project's own row is the Cloud row below.
+            let members: Vec<_> = state
+                .project_members(space)
+                .into_iter()
+                .filter(|member| !zeron_proto::is_cloud_device(&member.device_id, ""))
+                .collect();
             return members
                 .iter()
                 .map(|member| {

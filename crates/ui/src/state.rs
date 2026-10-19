@@ -2278,6 +2278,17 @@ impl AppState {
                     .map_or(crate::cloud::CLOUD_LABEL, |d| d.name.as_str()),
             );
         }
+        // The logical Cloud device (Cloud projects live there) has no
+        // registry row of its own.
+        if device.is_none()
+            && self
+                .cloud_status
+                .as_ref()
+                .and_then(|status| status.device_id.as_deref())
+                == Some(device_id)
+        {
+            return Some(crate::cloud::CLOUD_LABEL);
+        }
         device.map(|d| d.name.as_str())
     }
 

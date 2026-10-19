@@ -2312,6 +2312,9 @@ enum ProjectStep {
     Devices,
     Locations,
     Folders,
+    /// Cloud picked: the GitHub repositories Cloud reaches. A Cloud project
+    /// is a repository, not a folder on a device.
+    Repositories,
 }
 
 pub(super) struct AddSpaceFlow {
@@ -2734,8 +2737,34 @@ enum CrumbTarget {
     More,
 }
 
+/// Cloud as a place to keep a project: while it's on and reaches at least
+/// one GitHub repository. It has no registry row of its own (session
+/// machines do), so the row stands in for the logical Cloud device.
+fn add_space_cloud_device(state: &crate::state::AppState) -> Option<Device> {
+    if !state.cloud_enabled()
+        || state
+            .cloud_repos
+            .as_ref()
+            .is_none_or(|repos| repos.is_empty())
+    {
+        return None;
+    }
+    let id = state.cloud_status.as_ref()?.device_id.clone()?;
+    Some(Device {
+        id,
+        name: "Cloud".into(),
+        platform: zeron_proto::CLOUD_PLATFORM.into(),
+        last_seen_at: None,
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    })
+}
+
 fn device_glyph(platform: &str) -> &'static str {
     match platform {
+        zeron_proto::CLOUD_PLATFORM => icons::CLOUD,
         "macos" | "darwin" => icons::LAPTOP,
         "web" => icons::GLOBAL,
         "ios" | "android" => icons::SMARTPHONE,
@@ -6315,11 +6344,20 @@ impl Shell {
 
     /// Selecting a device advances to its locations.
     fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
+        let cloud = zeron_proto::is_cloud_device(&device.id, &device.platform);
+        if cloud {
+            self.state
+                .update(cx, |state, cx| state.refresh_cloud_repos(cx));
+        }
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
         flow.focus_pending = true;
-        flow.step = ProjectStep::Locations;
+        flow.step = if cloud {
+            ProjectStep::Repositories
+        } else {
+            ProjectStep::Locations
+        };
         flow.location = None;
         flow.load_task = None;
         flow.drives_task = None;
@@ -6334,10 +6372,19 @@ impl Shell {
         flow.error = None;
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
-            input.set_placeholder("Search locations…", cx);
+            input.set_placeholder(
+                if cloud {
+                    "Search repositories…"
+                } else {
+                    "Search locations…"
+                },
+                cx,
+            );
             input.set_text("", cx);
         });
-        self.load_space_drives(cx);
+        if !cloud {
+            self.load_space_drives(cx);
+        }
         cx.notify();
     }
 
@@ -6372,6 +6419,15 @@ impl Shell {
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
+        // Cloud has no locations: its crumb goes back to its repositories.
+        let step = match (&flow.device, step) {
+            (Some(device), ProjectStep::Locations)
+                if zeron_proto::is_cloud_device(&device.id, &device.platform) =>
+            {
+                ProjectStep::Repositories
+            }
+            (_, step) => step,
+        };
         flow.focus_pending = true;
         flow.step = step;
         flow.load_task = None;
@@ -6391,10 +6447,10 @@ impl Shell {
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
             input.set_placeholder(
-                if step == ProjectStep::Devices {
-                    "Search devices…"
-                } else {
-                    "Search locations…"
+                match step {
+                    ProjectStep::Devices => "Search devices…",
+                    ProjectStep::Repositories => "Search repositories…",
+                    _ => "Search locations…",
                 },
                 cx,
             );
@@ -6407,12 +6463,65 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let devices = &self.state.read(cx).devices;
+        let state = self.state.read(cx);
+        // Session machines are Cloud's, not devices to keep a project on.
+        let mut devices: Vec<Device> = state
+            .devices
+            .iter()
+            .filter(|device| crate::cloud::is_listed(device))
+            .cloned()
+            .collect();
+        // With GitHub connected, a project can live on Cloud alone: one of
+        // the repositories Cloud reaches, not a folder on any device.
+        if let Some(cloud) = add_space_cloud_device(state) {
+            devices.push(cloud);
+        }
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
             .map(|ix| devices[ix].clone())
             .collect()
+    }
+
+    /// The Repositories step's rows: Cloud's repositories matching the
+    /// query, most recently pushed first.
+    fn add_space_repos(&self, cx: &App) -> Vec<zeron_proto::GithubRepo> {
+        let Some(flow) = &self.add_space else {
+            return Vec::new();
+        };
+        let mut repos: Vec<zeron_proto::GithubRepo> = self
+            .state
+            .read(cx)
+            .cloud_repos
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        repos.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+        let names: Vec<_> = repos.iter().map(|r| r.full_name.as_str()).collect();
+        popover::filter_indices(flow.search.read(cx).text(), &names)
+            .into_iter()
+            .map(|ix| repos[ix].clone())
+            .collect()
+    }
+
+    /// Make `repo` a Cloud project (or open the one Cloud already has).
+    fn add_space_create_cloud(&mut self, repo: zeron_proto::GithubRepo, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(cloud) = add_space_cloud_device(self.state.read(cx)) else {
+            return;
+        };
+        let name = repo
+            .full_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&repo.full_name)
+            .to_string();
+        // Where a session machine checks the repository out.
+        let path = format!("/home/user/{name}");
+        self.add_space_create_on(engine, cloud, path, true, Some(repo.full_name), cx);
     }
 
     fn add_space_locations(&self, cx: &App) -> Vec<(String, Option<String>)> {
@@ -6594,6 +6703,12 @@ impl Shell {
             ProjectStep::Locations => {
                 if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
                     self.add_space_goto_location(name, path, cx);
+                }
+                return;
+            }
+            ProjectStep::Repositories => {
+                if let Some(repo) = self.add_space_repos(cx).get(flow.active).cloned() {
+                    self.add_space_create_cloud(repo, cx);
                 }
                 return;
             }
@@ -6843,15 +6958,38 @@ impl Shell {
         git_detected: bool,
         cx: &mut Context<Self>,
     ) {
+        self.add_space_create_on(engine, device, path, git_detected, None, cx);
+    }
+
+    /// `github_repo` only for a Cloud project, which has no device to read
+    /// its repository from.
+    fn add_space_create_on(
+        &mut self,
+        engine: crate::state::EngineHandle,
+        device: Device,
+        path: String,
+        git_detected: bool,
+        github_repo: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
-        // no-ops), so creating would leave the minted id dangling.
+        // no-ops), so creating would leave the minted id dangling. On Cloud,
+        // the same repository is the same project.
         if let Some(existing) = self
             .state
             .read(cx)
             .spaces
             .iter()
-            .find(|s| s.device_id == device.id && same_folder_path(&s.path, &path))
+            .find(|s| {
+                s.device_id == device.id
+                    && (same_folder_path(&s.path, &path)
+                        || github_repo.as_deref().is_some_and(|repo| {
+                            s.github_repo
+                                .as_deref()
+                                .is_some_and(|own| own.eq_ignore_ascii_case(repo))
+                        }))
+            })
             .map(|s| s.id.clone())
         {
             self.close_add_space(cx);
@@ -6874,8 +7012,10 @@ impl Shell {
             git_detected,
             git_checked_at: None,
             checkout_id: None,
-            repository_id: None,
-            github_repo: None,
+            repository_id: github_repo
+                .as_deref()
+                .map(|repo| format!("github.com/{}", repo.to_lowercase())),
+            github_repo: github_repo.clone(),
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {
@@ -6884,13 +7024,16 @@ impl Shell {
             }
             cx.notify();
         });
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "op": "createSpace",
             "spaceId": space_id,
             "deviceId": device.id,
             "path": path,
             "gitDetected": git_detected,
         });
+        if let Some(repo) = github_repo {
+            params["githubRepo"] = serde_json::Value::String(repo);
+        }
         let submit_id = space_id.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
@@ -6981,7 +7124,9 @@ impl Shell {
         };
         match flow.step {
             ProjectStep::Devices => return,
-            ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
+            ProjectStep::Locations | ProjectStep::Repositories => {
+                self.add_space_back_to(ProjectStep::Devices, cx)
+            }
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();
                 let root = flow
@@ -7041,6 +7186,7 @@ impl Shell {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
+                    Some(ProjectStep::Repositories) => self.add_space_repos(cx).len(),
                     _ => self.add_space_folder_rows(cx).len(),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
@@ -7246,6 +7392,58 @@ impl Shell {
                     );
                 }
             }
+            ProjectStep::Repositories => {
+                let spaces = self.state.read(cx).spaces.clone();
+                let device_names: std::collections::HashMap<String, String> = self
+                    .state
+                    .read(cx)
+                    .devices
+                    .iter()
+                    .map(|d| (d.id.clone(), d.name.clone()))
+                    .collect();
+                for (ix, repo) in self.add_space_repos(cx).into_iter().enumerate() {
+                    // Already a project somewhere: say where, so a Cloud-only
+                    // one is a deliberate pick.
+                    let elsewhere = spaces
+                        .iter()
+                        .find(|space| {
+                            space
+                                .github_repo
+                                .as_deref()
+                                .is_some_and(|own| own.eq_ignore_ascii_case(&repo.full_name))
+                                && !zeron_proto::is_cloud_device(&space.device_id, "")
+                        })
+                        .and_then(|space| device_names.get(&space.device_id).cloned());
+                    let private = repo.private;
+                    rows.push(
+                        row(ix)
+                            .child(glyph_el(icons::GITHUB_MARK))
+                            .child(label_el(repo.full_name.clone()))
+                            .when_some(elsewhere, |el, device| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted.opacity(0.75))
+                                        .child(format!("On {device}")),
+                                )
+                            })
+                            .when(private, |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted.opacity(0.75))
+                                        .child("Private"),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_space_create_cloud(repo.clone(), cx)
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
             ProjectStep::Folders => {
                 if !loading && load_error.is_none() {
                     let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
@@ -7354,6 +7552,11 @@ impl Shell {
         } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
             let (title, hint) = match step {
                 ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
+                ProjectStep::Repositories => (
+                    "No repositories found",
+                    "Cloud lists the repositories the Zeron GitHub App can reach — add more in Settings → Cloud."
+                        .into(),
+                ),
                 ProjectStep::Locations => {
                     ("No locations found", "Try Home or a drive name.".into())
                 }
@@ -7406,7 +7609,7 @@ impl Shell {
             specs.push(Crumb {
                 name: device.name.into(),
                 glyph: Some(device_glyph(&device.platform)),
-                current: step == ProjectStep::Locations,
+                current: matches!(step, ProjectStep::Locations | ProjectStep::Repositories),
                 target: CrumbTarget::Locations,
             });
         }
@@ -7649,10 +7852,10 @@ impl Shell {
             .child(command_palette::command_key_hint(
                 &theme,
                 "↵",
-                if step == ProjectStep::Folders {
-                    "Open"
-                } else {
-                    "Select"
+                match step {
+                    ProjectStep::Folders => "Open",
+                    ProjectStep::Repositories => "Add",
+                    _ => "Select",
                 },
             ))
             .when(step != ProjectStep::Devices, |el| {
@@ -8192,6 +8395,103 @@ mod project_flow_tests {
             // Slash navigation only applies to folders, never device search.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn with_github_connected_a_project_can_live_on_cloud(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let shell = cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.auth = Some(zeron_proto::AuthState::SignedIn {
+                    user: zeron_proto::UserProfile {
+                        id: "user-a".into(),
+                        email: "user@example.com".into(),
+                        name: None,
+                    },
+                    org_id: Some("org-a".into()),
+                });
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
+                    {"id":"cloud-s1","name":"Cloud session","platform":"linux",
+                     "lastSeenAt":null,"capabilities":["cloud-session"]}
+                ]))
+                .unwrap();
+                state.cloud_status = Some(zeron_proto::CloudStatus {
+                    state: zeron_proto::CloudState::Ready,
+                    device_id: Some("cloud-acct".into()),
+                    available: true,
+                    ..Default::default()
+                });
+                state.cloud_repos = Some(
+                    serde_json::from_value(serde_json::json!([
+                        {"fullName":"acme/old","cloneUrl":"","defaultBranch":"main",
+                         "private":false,"pushedAt":1},
+                        {"fullName":"acme/app","cloneUrl":"","defaultBranch":"main",
+                         "private":true,"pushedAt":2}
+                    ]))
+                    .unwrap(),
+                );
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.open_add_space(cx);
+            // Session machines aren't places for a project; Cloud is.
+            let devices: Vec<String> = shell
+                .add_space_devices(cx)
+                .into_iter()
+                .map(|device| device.name)
+                .collect();
+            assert_eq!(devices, ["Studio", "Cloud"]);
+            let search = shell.add_space.as_ref().unwrap().search.clone();
+            search.update(cx, |input, cx| input.set_text("cloud", cx));
+            shell.add_space_open_active(cx);
+            let flow = shell.add_space.as_ref().unwrap();
+            assert_eq!(flow.step, ProjectStep::Repositories);
+            assert!(flow.search.read(cx).is_empty());
+            // Most recently pushed first, then filtered by the query.
+            let repos: Vec<String> = shell
+                .add_space_repos(cx)
+                .into_iter()
+                .map(|repo| repo.full_name)
+                .collect();
+            assert_eq!(repos, ["acme/app", "acme/old"]);
+            search.update(cx, |input, cx| input.set_text("old", cx));
+            assert_eq!(shell.add_space_repos(cx).len(), 1);
+            // Its crumb and Back return to the repositories, then devices.
+            shell.add_space_back_to(ProjectStep::Locations, cx);
+            assert_eq!(
+                shell.add_space.as_ref().unwrap().step,
+                ProjectStep::Repositories
+            );
+            shell.add_space_go_up(cx);
+            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
+            // Without GitHub there is no Cloud row.
+            shell
+                .state
+                .update(cx, |state, _| state.cloud_repos = Some(Vec::new()));
+            search.update(cx, |input, cx| input.set_text("", cx));
+            assert_eq!(shell.add_space_devices(cx).len(), 1);
         });
     }
 }

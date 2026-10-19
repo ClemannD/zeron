@@ -624,6 +624,11 @@ enum MutateParams {
         name: Option<String>,
         #[serde(default)]
         git_detected: bool,
+        /// A Cloud project (`deviceId` the logical Cloud device): the GitHub
+        /// repository (`owner/name`) its sessions clone. Ignored elsewhere —
+        /// a device stamps its own folders.
+        #[serde(default)]
+        github_repo: Option<String>,
     },
     /// LWW display-name set; `name: None` clears back to basename(path).
     #[serde(rename_all = "camelCase")]
@@ -1473,10 +1478,17 @@ impl EngineRpc {
                 path,
                 name,
                 git_detected,
-            } => self
-                .workspace
-                .create_space(&space_id, &device_id, &path, name, git_detected)
-                .map_err(failed),
+                github_repo,
+            } => match github_repo {
+                Some(repo) if device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX) => self
+                    .workspace
+                    .create_cloud_space(&space_id, &device_id, &path, name, &repo)
+                    .map_err(failed),
+                _ => self
+                    .workspace
+                    .create_space(&space_id, &device_id, &path, name, git_detected)
+                    .map_err(failed),
+            },
             MutateParams::RenameSpace { space_id, name } => self
                 .workspace
                 .rename_space(&space_id, name.as_deref())

@@ -810,3 +810,44 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
         "legacy snapshot retained for rollback"
     );
 }
+
+#[tokio::test]
+async fn a_cloud_project_names_its_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = assemble(dir.path(), "dev-a");
+
+    // Only the logical Cloud device takes a repository at create.
+    assert!(
+        a.workspace
+            .create_cloud_space("space-x", "dev-a", "/home/user/app", None, "acme/app")
+            .is_err()
+    );
+    a.workspace
+        .create_cloud_space("space-c", "cloud-acct", "/home/user/app", None, "acme/app")
+        .expect("create Cloud project");
+    // The same repository on Cloud again is the same project.
+    a.workspace
+        .create_cloud_space(
+            "space-d",
+            "cloud-acct",
+            "/home/user/app-2",
+            None,
+            "Acme/App",
+        )
+        .expect("idempotent");
+    let spaces = a.workspace.read_spaces().expect("spaces");
+    let cloud: Vec<_> = spaces
+        .iter()
+        .filter(|s| s.device_id == "cloud-acct")
+        .collect();
+    assert_eq!(cloud.len(), 1);
+    assert_eq!(cloud[0].id, "space-c");
+    assert_eq!(cloud[0].github_repo.as_deref(), Some("acme/app"));
+    assert!(cloud[0].git_detected);
+    assert_eq!(
+        cloud[0].repository_id.as_deref(),
+        Some("github.com/acme/app")
+    );
+
+    a.shutdown().await;
+}

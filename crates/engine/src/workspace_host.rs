@@ -1120,6 +1120,54 @@ impl WorkspaceHost {
         Ok(())
     }
 
+    /// A project that lives only on Cloud: owned by the logical Cloud device
+    /// (which has no engine to stamp it), so its GitHub repository is set
+    /// here. Every session in it runs on a Cloud machine cloning that
+    /// repository. Idempotent like [`Self::create_space`]; also a no-op when
+    /// Cloud already has a project for the repository.
+    pub fn create_cloud_space(
+        &self,
+        space_id: &str,
+        device_id: &str,
+        path: &str,
+        name: Option<String>,
+        github_repo: &str,
+    ) -> Result<(), EngineError> {
+        if !device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX) {
+            return Err(EngineError::Other(
+                "Only Cloud projects name their repository.".into(),
+            ));
+        }
+        let spaces = self.read(|doc| doc.read_spaces())?;
+        if spaces.iter().any(|s| {
+            s.id == space_id
+                || (s.device_id == device_id
+                    && (s.path == path
+                        || s.github_repo
+                            .as_deref()
+                            .is_some_and(|repo| repo.eq_ignore_ascii_case(github_repo))))
+        }) {
+            return Ok(());
+        }
+        self.mutate(|doc| {
+            doc.upsert_space(&Space {
+                id: space_id.to_string(),
+                device_id: device_id.to_string(),
+                path: path.to_string(),
+                name,
+                git_detected: true,
+                git_checked_at: Some(Utc::now()),
+                checkout_id: None,
+                // Groups with every clone of the repository (the normalized
+                // remote form a device stamps for a shallow history).
+                repository_id: Some(format!("github.com/{}", github_repo.to_lowercase())),
+                github_repo: Some(github_repo.to_string()),
+                created_at: Utc::now(),
+            })
+        })?;
+        Ok(())
+    }
+
     pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_space(space_id, name))?)
     }
