@@ -775,6 +775,10 @@ pub(crate) struct CanvasTarget {
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
+/// How long a requested wake reads as waking before the machine has to
+/// answer for itself: a cold start is well under this.
+const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
+
 pub struct AppState {
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
@@ -891,6 +895,10 @@ pub struct AppState {
     /// being set up, woken or deleted ([`Self::refresh_cloud_sessions`]).
     pub cloud_sessions: Option<zeron_proto::CloudSessions>,
     cloud_sessions_task: Option<Task<()>>,
+    /// Sessions (by their chat id) someone asked to wake, and when: the
+    /// machine reads as waking until its own heartbeat arrives, rather than
+    /// asleep again while the session list catches up.
+    cloud_wakes: HashMap<String, std::time::Instant>,
     /// The GitHub repositories Cloud reaches (the Zeron GitHub App's
     /// installations): a project whose repository is here can run a session
     /// on Cloud. `None` = Cloud off, GitHub not connected, or not read yet.
@@ -1009,6 +1017,7 @@ impl AppState {
             cloud_status: None,
             cloud_sessions: None,
             cloud_sessions_task: None,
+            cloud_wakes: HashMap::new(),
             cloud_repos: None,
             cloud_repos_task: None,
             cloud_repos_refreshing: false,
@@ -2347,12 +2356,22 @@ impl AppState {
                 .cloud_sessions
                 .as_ref()
                 .and_then(|s| s.sessions.iter().find(|x| x.device_id == device_id));
-            let presence = crate::cloud::session_presence(device.is_some() && online, session);
+            let mut presence = crate::cloud::session_presence(device.is_some() && online, session);
             // Machines sleep on their own when idle, and the session list is
             // only re-read while one settles: a "ready" machine whose
             // heartbeat stopped has gone to sleep, not lost its connection.
             if presence == Presence::Online && device.is_some() && !online {
-                return Presence::Asleep;
+                presence = Presence::Asleep;
+            }
+            // A wake was asked for and the list hasn't caught up yet.
+            if presence == Presence::Asleep
+                && session.is_some_and(|session| {
+                    self.cloud_wakes
+                        .get(&session.chat_id)
+                        .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+                })
+            {
+                presence = Presence::Waking;
             }
             return presence;
         }
@@ -2430,22 +2449,86 @@ impl AppState {
         if !self.is_cloud_session_device(&chat.device_id) {
             return None;
         }
-        match self.chat_cloud_session(chat_id) {
-            Some(session) if session.state == CloudState::Ready => None,
-            Some(session) => Some((session.chat_id.clone(), session.state)),
-            // No session read yet: trust a fresh heartbeat, else asleep.
-            None if self.devices.iter().any(|d| d.id == chat.device_id)
-                && self.device_online(&chat.device_id, Utc::now()) =>
-            {
-                None
+        let known = self.devices.iter().any(|d| d.id == chat.device_id);
+        let heartbeat = known && self.device_online(&chat.device_id, Utc::now());
+        let waking = |session: &str| {
+            self.cloud_wakes
+                .get(session)
+                .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+        };
+        let (session, state) = match self.chat_cloud_session(chat_id) {
+            // The session list is only re-read while a machine settles, so
+            // one that went to sleep on its own still reads "ready": its
+            // stopped heartbeat says otherwise.
+            Some(session) if session.state == CloudState::Ready => {
+                if heartbeat || !known {
+                    return None;
+                }
+                (session.chat_id.clone(), CloudState::Sleeping)
             }
-            None => Some((
+            Some(session) => (session.chat_id.clone(), session.state),
+            // No session read yet: trust a fresh heartbeat, else asleep.
+            None if heartbeat => return None,
+            None => (
                 chat.parent_chat_id
                     .clone()
                     .unwrap_or_else(|| chat.id.clone()),
                 CloudState::Sleeping,
-            )),
+            ),
+        };
+        // A wake was asked for and the list hasn't caught up yet.
+        let state = match state {
+            CloudState::Sleeping | CloudState::Stopping if waking(&session) => CloudState::Starting,
+            state => state,
+        };
+        Some((session, state))
+    }
+
+    /// Wake a sleeping Cloud session (by its chat id). It reads as waking at
+    /// once; the session list is followed until the machine is up.
+    pub fn wake_cloud_session(&mut self, session_chat_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if self
+            .cloud_wakes
+            .get(&session_chat_id)
+            .is_some_and(|at| at.elapsed() < CLOUD_WAKE_GRACE)
+        {
+            return;
         }
+        self.cloud_wakes
+            .insert(session_chat_id.clone(), std::time::Instant::now());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<zeron_proto::CloudSession>(
+                    zeron_rpc::methods::CLOUD_SESSION_WAKE,
+                    serde_json::json!({ "chatId": session_chat_id }),
+                )
+                .await;
+            this.update(cx, |state, cx| match result {
+                Ok(session) => {
+                    let mut sessions = state.cloud_sessions.clone().unwrap_or_default();
+                    sessions.sessions.retain(|s| s.chat_id != session.chat_id);
+                    sessions.sessions.push(session);
+                    state.set_cloud_sessions(sessions, cx);
+                    state.refresh_cloud_sessions(cx);
+                }
+                Err(error) => {
+                    state.cloud_wakes.remove(&session_chat_id);
+                    crate::toast::show(
+                        cx,
+                        crate::toast::ToastKind::Error,
+                        format!("Couldn't wake the Cloud agent: {error}"),
+                    );
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Publish fresh sessions; observers repaint only on change.
@@ -5166,6 +5249,49 @@ mod tests {
         );
         assert_eq!(s.indicator_for("c", later), Indicator::None);
         assert!(s.send_undelivered("c", later));
+    }
+
+    #[test]
+    fn a_cloud_machine_that_went_quiet_is_down_and_a_wake_reads_as_waking() {
+        use zeron_proto::{CloudSessions, CloudState};
+        let now = Utc::now();
+        let mut s = AppState::new();
+        let mut c = chat("c", 0, Some(10));
+        c.device_id = "cloud-s1".into();
+        s.chats = vec![c];
+        let mut machine = device("cloud-s1", "Cloud");
+        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
+        machine.last_seen_at = Some(now);
+        s.devices = vec![machine];
+        s.cloud_sessions = Some(CloudSessions {
+            sessions: vec![
+                serde_json::from_value(serde_json::json!({
+                    "chatId": "c", "deviceId": "cloud-s1", "spaceId": "sp",
+                    "state": "ready", "createdAt": 0
+                }))
+                .unwrap(),
+            ],
+            available: true,
+        });
+        assert_eq!(s.chat_machine_down("c"), None, "ready and answering");
+        // It slept on its own: the list still says ready, the heartbeat stopped.
+        s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
+        assert_eq!(
+            s.chat_machine_down("c"),
+            Some(("c".into(), CloudState::Sleeping))
+        );
+        // Wake asked for: waking until the machine answers.
+        s.cloud_wakes.insert("c".into(), std::time::Instant::now());
+        assert_eq!(
+            s.chat_machine_down("c"),
+            Some(("c".into(), CloudState::Starting))
+        );
+        assert_eq!(
+            s.device_presence("cloud-s1", Utc::now()),
+            crate::cloud::Presence::Waking
+        );
+        s.devices[0].last_seen_at = Some(Utc::now());
+        assert_eq!(s.chat_machine_down("c"), None, "up again");
     }
 
     #[test]

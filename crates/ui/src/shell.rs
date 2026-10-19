@@ -2243,6 +2243,9 @@ pub struct Shell {
     /// render from `onboarding_pending` (a fresh install, or
     /// `ZERON_ONBOARDING=<step>`).
     onboarding: Option<Entity<crate::onboarding::Onboarding>>,
+    /// Chats whose explorer showed their Cloud machine asleep: once it is
+    /// up, what failed while it slept is listed again.
+    files_machine_down: std::collections::HashSet<String>,
     onboarding_pending: Option<crate::onboarding::Step>,
     _onboarding_subscriptions: Vec<Subscription>,
     /// The sign-in gate's Log in opened the browser: the gate waits for it
@@ -2740,6 +2743,7 @@ impl Shell {
             org: None,
             sync_flow: SyncFlow::Idle,
             onboarding: None,
+            files_machine_down: Default::default(),
             onboarding_pending,
             _onboarding_subscriptions: Vec::new(),
             gate_sign_in_waiting: false,
