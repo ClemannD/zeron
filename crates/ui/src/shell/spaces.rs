@@ -2983,8 +2983,10 @@ impl Shell {
         self.nav.push(NavEntry::Chat(String::new()));
         self.settings.last_space_id = Some(space_id.clone());
         self.state.update(cx, |s, cx| {
-            s.select_space(Some(space_id), cx);
+            // Leave the chat first: that restores the canvas pick set aside
+            // when it opened, which must not win over the project just added.
             s.select_chat(None, cx);
+            s.select_space(Some(space_id), cx);
         });
         self.schedule_save(cx);
         cx.notify();
@@ -8395,6 +8397,65 @@ mod project_flow_tests {
             // Slash navigation only applies to folders, never device search.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn a_project_added_from_an_open_chat_is_the_one_selected(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(crate::settings::UiSettings::default(), data.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.spaces = serde_json::from_value(serde_json::json!([
+                {"id":"old","deviceId":"dev","path":"/old","createdAt":"2026-07-19T12:00:00Z"},
+                {"id":"new","deviceId":"cloud-acct","path":"/home/user/new",
+                 "createdAt":"2026-07-19T12:01:00Z"}
+            ]))
+            .unwrap();
+            state.chats = serde_json::from_value(serde_json::json!([
+                {"id":"chat","deviceId":"dev","spaceId":"old","archived":false,
+                 "createdAt":"2026-07-19T12:00:00Z"}
+            ]))
+            .unwrap();
+            state
+        });
+        let shell = cx.new(|cx| {
+            Shell::new(
+                state.clone(),
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        state.update(cx, |s, cx| {
+            s.select_space(Some("old".into()), cx);
+            s.select_chat(Some("chat".into()), cx);
+        });
+        // Leaving the chat restores the canvas's earlier pick ("old"); the
+        // project just added must win over it.
+        shell.update(cx, |shell, cx| shell.land_in_space("new".into(), cx));
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.selected_chat, None);
+            assert_eq!(s.selected_space.as_deref(), Some("new"));
         });
     }
 
