@@ -2373,15 +2373,14 @@ async fn drive_run(
     if crate::runner::setup_pending() {
         let user_id = resume_state.user_message_id.clone();
         entry_id = zeron_proto::cloud_setup_entry_id(&user_id);
-        let waited = doc_ref.read_entries().ok().and_then(|entries| {
+        let sent_at = doc_ref.read_entries().ok().and_then(|entries| {
             entries
                 .iter()
                 .find(|entry| entry.id == user_id)
-                .map(|entry| {
-                    std::time::Duration::from_millis(
-                        now_ms().saturating_sub(entry.created_at).max(0) as u64,
-                    )
-                })
+                .map(|entry| entry.created_at)
+        });
+        let waited = sent_at.map(|sent| {
+            std::time::Duration::from_millis(now_ms().saturating_sub(sent).max(0) as u64)
         });
         let mut changes = crate::runner::watch_setup();
         loop {
@@ -2404,6 +2403,11 @@ async fn drive_run(
                 changed = changes.changed() => if changed.is_err() { break },
                 _ = controls.interrupt.cancelled() => break,
             }
+        }
+        // The turn began at the send, not when this machine got to it:
+        // "Worked for" counts the machine's setup too.
+        if let (Some(writer), Some(sent)) = (writer.as_mut(), sent_at) {
+            writer.count_duration_from(sent);
         }
         crate::runner::mark_setup_shown();
     }

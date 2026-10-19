@@ -3419,6 +3419,9 @@ impl RpcService for EngineRpc {
                 #[derive(Deserialize)]
                 struct P {
                     url: String,
+                    /// Clone into `<parent>/<name>`; default `{data_dir}/repos`.
+                    #[serde(default)]
+                    parent: Option<String>,
                 }
                 let p: P = parse_params(params)?;
                 // Cloud: wire the GitHub grant into git's credential helper
@@ -3427,7 +3430,15 @@ impl RpcService for EngineRpc {
                     Some(broker) => broker.ensure_git_credentials().await.err(),
                     None => None,
                 };
-                let repo = self.repos.clone_repo(&p.url).await.map_err(|e| {
+                let cloned = match p
+                    .parent
+                    .as_deref()
+                    .filter(|parent| !parent.trim().is_empty())
+                {
+                    Some(parent) => self.repos.clone_repo_in(&p.url, parent).await,
+                    None => self.repos.clone_repo(&p.url).await,
+                };
+                let repo = cloned.map_err(|e| {
                     let github = no_credentials
                         .map(|reason| format!(" (no GitHub access: {reason})"))
                         .unwrap_or_default();

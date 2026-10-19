@@ -271,8 +271,14 @@ impl EngineCore {
         sessions.set_scratch_root(repos.scratch_root());
         doc_host.set_repos(repos.clone());
         let change_requests = CheckoutChangeRequests::start(repos.clone(), &device_id);
-        let workspace_files =
-            WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
+        let workspace_files = WorkspaceFiles::with_cloud_checkout(
+            repos.clone(),
+            workspace.clone(),
+            device_id.clone(),
+            runner::session()
+                .and_then(|session| session.path.clone())
+                .map(std::path::PathBuf::from),
+        );
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());

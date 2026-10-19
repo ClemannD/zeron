@@ -646,6 +646,25 @@ impl Repos {
     /// same reply as a fresh clone. A destination holding anything else stays
     /// an "Already exists" error.
     pub async fn clone_repo(&self, url: &str) -> Result<Repo, EngineError> {
+        let repos_dir = self.inner.data_dir.join("repos");
+        self.clone_repo_into(url, &repos_dir).await
+    }
+
+    /// [`Self::clone_repo`] into `<parent>/<name>` instead: where the user
+    /// chose to keep it (New project → a folder → clone here). `parent`
+    /// must be an existing folder; the same idempotence holds.
+    pub async fn clone_repo_in(&self, url: &str, parent: &str) -> Result<Repo, EngineError> {
+        let parent = absolutize(Path::new(parent));
+        if !parent.is_dir() {
+            return Err(EngineError::Other(format!(
+                "No such folder: {}",
+                parent.display()
+            )));
+        }
+        self.clone_repo_into(url, &parent).await
+    }
+
+    async fn clone_repo_into(&self, url: &str, repos_dir: &Path) -> Result<Repo, EngineError> {
         let trimmed = url.trim().trim_end_matches('/');
         let name = trimmed
             .trim_end_matches(".git")
@@ -654,7 +673,6 @@ impl Repos {
             .filter(|s| !s.is_empty())
             .unwrap_or("repo")
             .to_string();
-        let repos_dir = self.inner.data_dir.join("repos");
         let target = repos_dir.join(&name);
         if target.exists() {
             // `.git` must be the destination's own: `git remote` inside a
@@ -675,7 +693,7 @@ impl Repos {
                 target.display()
             )));
         }
-        std::fs::create_dir_all(&repos_dir)?;
+        std::fs::create_dir_all(repos_dir)?;
         self.git(&["clone", trimmed, &target.to_string_lossy()], None)
             .await?;
         self.register(&target.to_string_lossy())?;
@@ -2885,6 +2903,65 @@ mod tests {
             "https://gitlab.com/acme/app.git",
         ]);
         assert_eq!(repos.github_repo(root.path()).await, None, "not GitHub");
+    }
+
+    #[tokio::test]
+    async fn clone_repo_in_puts_the_checkout_where_the_user_chose() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "main"], &work);
+        std::fs::write(work.join("README.md"), "hi").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-q", "-m", "init"], &work);
+        let bare = root.path().join("app.git");
+        git(
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            root.path(),
+        );
+        let code = root.path().join("code");
+        std::fs::create_dir_all(&code).unwrap();
+        let repos = Repos::new(&root.path().join("data"), "device-1");
+        let repo = repos
+            .clone_repo_in(bare.to_str().unwrap(), code.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(repo.path, code.join("app").to_string_lossy());
+        assert!(code.join("app/README.md").exists());
+        // Again: the same checkout, not an error.
+        let again = repos
+            .clone_repo_in(bare.to_str().unwrap(), code.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(again, repo);
+        // A folder that isn't there is refused, not created.
+        let err = repos
+            .clone_repo_in(
+                bare.to_str().unwrap(),
+                root.path().join("nope").to_str().unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No such folder"), "{err}");
     }
 
     #[tokio::test]
