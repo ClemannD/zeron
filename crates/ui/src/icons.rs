@@ -107,7 +107,6 @@ icon_assets![
     (PULL_REQUEST_DRAFT, "pull-request-draft"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
-    (SLEEP, "sleep"),
     (TAG, "tag"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
     (KEYBOARD, "keyboard"),

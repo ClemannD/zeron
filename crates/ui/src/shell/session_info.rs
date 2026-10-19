@@ -314,15 +314,10 @@ impl Shell {
             })
             // A sleeping Cloud machine: it wakes on the next send.
             .when(presence == crate::cloud::Presence::Asleep, |row| {
-                row.child(
-                    icon(icons::SLEEP)
-                        .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(0.8)),
-                )
-                .tooltip(crate::settings::widgets::text_tooltip(
-                    "Asleep — wakes when you send",
-                ))
+                row.child(asleep_badge(&theme))
+                    .tooltip(crate::settings::widgets::text_tooltip(
+                        "Asleep — wakes when you send",
+                    ))
             });
         let project_row = match project {
             Some((name, path)) => info_row(
@@ -602,6 +597,26 @@ impl Shell {
         );
         rows
     }
+}
+
+/// The pull-request badge's pill, in frosted grey: a sleeping Cloud machine.
+fn asleep_badge(theme: &Theme) -> impl IntoElement {
+    crate::frost::frosted(
+        6.0,
+        crate::frost::MENU_BLUR,
+        div()
+            .h(px(20.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(7.0))
+            .rounded(px(6.0))
+            .bg(theme.text_muted.opacity(0.14))
+            .text_size(px(11.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text_muted)
+            .child("Asleep"),
+    )
 }
 
 #[cfg(test)]
