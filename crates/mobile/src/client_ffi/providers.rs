@@ -88,6 +88,9 @@ pub struct DeviceLoginPollInfo {
 /// How an agent signs in, from the rules every platform's Providers follows.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct AgentLoginRules {
+    /// The agent's display name ("Claude Code"); empty for one Zeron doesn't
+    /// sign in to.
+    pub name: String,
     /// The agent has accounts Zeron can sign in to at all.
     pub signs_in: bool,
     /// Zeron switches between its accounts (not Hermes, not Antigravity).
@@ -117,6 +120,7 @@ pub fn agent_login_rules(harness: String) -> AgentLoginRules {
     let Ok(id) = serde_json::from_value::<zeron_proto::HarnessId>(serde_json::json!(harness))
     else {
         return AgentLoginRules {
+            name: String::new(),
             signs_in: false,
             switches: false,
             keeps_one_login: false,
@@ -127,6 +131,11 @@ pub fn agent_login_rules(harness: String) -> AgentLoginRules {
     };
     let signs_in = rules::signs_in(id);
     AgentLoginRules {
+        name: if signs_in {
+            rules::provider_name(id).to_owned()
+        } else {
+            String::new()
+        },
         signs_in,
         switches: rules::switches_accounts(id),
         keeps_one_login: rules::keeps_one_login(id),

@@ -110,9 +110,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return root.present(UINavigationController(rootViewController: ProvidersViewController(app: app, target: parts.dropFirst().first)), animated: false)
         }
         if parts.first == "accounts", let harness = parts.dropFirst().first, let host = app.hostOptions.first {
-            // A computer's accounts for one agent (the first computer).
-            let vc = AgentAccountsViewController(app: app, target: .device(id: host.id, name: host.name, harness: harness, label: harness))
-            return root.present(UINavigationController(rootViewController: vc), animated: false)
+            // A computer's accounts for one agent (the first computer),
+            // reached the way the app does: pushed from Providers.
+            let nav = UINavigationController(rootViewController: ProvidersViewController(app: app, target: host.id))
+            nav.pushViewController(
+                AgentAccountsViewController(app: app, target: .device(id: host.id, name: host.name, harness: harness, label: harness)),
+                animated: false
+            )
+            return root.present(nav, animated: false)
         }
         if parts.first == "welcome" {
             // The signed-out welcome page, without signing out.

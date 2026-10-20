@@ -28,7 +28,14 @@ final class AgentAccountsViewController: UITableViewController {
         let cloudProvider: String?
     }
 
-    private enum Section: Int, CaseIterable { case accounts, add }
+    /// The card's rows, in order: the accounts (or why there are none),
+    /// the add rows, and the sign-in under way.
+    private enum Item {
+        case account(Account)
+        case placeholder(String, String?)
+        case add(AddRow)
+        case waiting
+    }
 
     private let app: AppModel
     private let target: Target
@@ -61,7 +68,7 @@ final class AgentAccountsViewController: UITableViewController {
         super.init(style: .insetGrouped)
         switch target {
         case let .cloud(agent): title = agent.name
-        case let .device(_, _, _, label): title = label
+        case let .device(_, _, _, label): title = rules.name.isEmpty ? label : rules.name
         }
     }
 
@@ -85,9 +92,16 @@ final class AgentAccountsViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = Palette.background
-        tableView.backgroundColor = .clear
+        // The grouped page's grey, so the card reads as one.
+        tableView.backgroundColor = Palette.background
         navigationItem.largeTitleDisplayMode = .never
+        // Shown on its own (a sheet): a way out.
+        if navigationController?.viewControllers.first === self, presentingViewController != nil {
+            navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
+                self?.dismiss(animated: true)
+            })
+        }
+        tableView.sectionHeaderTopPadding = 8
         tableView.register(AccountCell.self, forCellReuseIdentifier: "account")
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "row")
         refreshControl = UIRefreshControl(frame: .zero, primaryAction: UIAction { [weak self] _ in
@@ -178,46 +192,53 @@ final class AgentAccountsViewController: UITableViewController {
 
     // MARK: Table
 
-    override func numberOfSections(in tableView: UITableView) -> Int { Section.allCases.count }
+    private var items: [Item] {
+        var items: [Item] = []
+        if case .device = target, deviceAccounts == nil {
+            items.append(.placeholder(loadError == nil ? "Loading accounts…" : "Couldn't load accounts", loadError))
+        } else if let loadError, accounts.isEmpty {
+            items.append(.placeholder("Couldn't load accounts", loadError))
+        } else {
+            items += accounts.map(Item.account)
+        }
+        items += addRows.map(Item.add)
+        if signIn != nil { items.append(.waiting) }
+        return items
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        switch Section(rawValue: section)! {
-        case .accounts:
-            if case .device = target, deviceAccounts == nil { return 1 }
-            return max(accounts.count, loadError == nil ? 0 : 1)
-        case .add:
-            return addRows.count + (signIn == nil ? 0 : 1)
-        }
+        items.count
     }
 
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        Section(rawValue: section) == .accounts ? "Accounts on \(deviceName)" : nil
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let header = UITableViewHeaderFooterView()
+        var c = UIListContentConfiguration.groupedHeader()
+        c.text = "Accounts on \(deviceName)"
+        header.contentConfiguration = c
+        return header
     }
 
-    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        switch Section(rawValue: section)! {
-        case .accounts:
-            return rules.note
-        case .add:
-            switch target {
-            case .cloud:
-                return "Cloud sessions use the account in use. Sign-ins and keys are kept in Cloud, never on this phone."
-            case let .device(_, name, _, _):
-                return "Account changes affect new sessions on \(name). Signing in runs on \(name); you finish in the browser here."
-            }
+    override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
+        let footer = UITableViewHeaderFooterView()
+        var c = UIListContentConfiguration.groupedFooter()
+        let where_: String = switch target {
+        case .cloud:
+            "Cloud sessions use the account in use. Sign-ins and keys are kept in Cloud, never on this phone."
+        case let .device(_, name, _, _):
+            "Account changes affect new sessions on \(name). Signing in runs on \(name); you finish in the browser here."
         }
+        c.text = [rules.note, where_].compactMap { $0 }.joined(separator: "\n\n")
+        footer.contentConfiguration = c
+        return footer
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        switch Section(rawValue: indexPath.section)! {
-        case .accounts:
-            if case .device = target, deviceAccounts == nil {
-                return plainCell(text: loadError ?? "Loading…", detail: nil, symbol: loadError == nil ? "ellipsis" : "exclamationmark.triangle", tint: Palette.secondary)
-            }
-            if accounts.isEmpty, let loadError {
-                return plainCell(text: "Couldn't load accounts", detail: loadError, symbol: "exclamationmark.triangle", tint: Palette.secondary)
-            }
-            let account = accounts[indexPath.row]
+        switch items[indexPath.row] {
+        case let .placeholder(text, detail):
+            return plainCell(text: text, detail: detail, symbol: detail == nil ? nil : "exclamationmark.triangle", tint: Palette.secondary)
+        case let .account(account):
             let cell = tableView.dequeueReusableCell(withIdentifier: "account", for: indexPath) as! AccountCell
             cell.configure(
                 icon: account.isKey ? CloudUI.symbol("key.fill", 15) : BrandMarks.image(for: harness, side: 20),
@@ -229,24 +250,19 @@ final class AgentAccountsViewController: UITableViewController {
             ) { [weak self] in self?.activate(account) }
             cell.accessibilityIdentifier = "account-\(account.id)"
             return cell
-        case .add:
-            let rows = addRows
-            if indexPath.row < rows.count {
-                let row = rows[indexPath.row]
-                let disabled = signIn != nil || busy != nil
-                let cell = plainCell(text: row.title, detail: nil, symbol: "plus.circle", tint: disabled ? Palette.tertiary : Palette.accent)
-                var c = cell.contentConfiguration as! UIListContentConfiguration
-                c.textProperties.color = disabled ? Palette.tertiary : Palette.accent
-                cell.contentConfiguration = c
-                cell.accessibilityIdentifier = row.id
-                return cell
-            }
-            let cell = plainCell(text: "Waiting for you to finish in the browser…", detail: signIn?.message, symbol: nil, tint: Palette.secondary)
+        case let .add(row):
+            let disabled = signIn != nil || busy != nil
+            let cell = plainCell(text: row.title, detail: nil, symbol: "plus", tint: disabled ? Palette.tertiary : Palette.accent)
+            var c = cell.contentConfiguration as! UIListContentConfiguration
+            c.textProperties.color = disabled ? Palette.tertiary : Palette.accent
+            c.textProperties.font = Fonts.ui(.sansMedium, 16)
+            cell.contentConfiguration = c
+            cell.accessibilityIdentifier = row.id
+            return cell
+        case .waiting:
+            let cell = plainCell(text: "Finish signing in in the browser…", detail: signIn?.message, symbol: nil, tint: Palette.secondary)
             let spinner = UIActivityIndicatorView(style: .medium)
             spinner.startAnimating()
-            var c = cell.contentConfiguration as! UIListContentConfiguration
-            c.image = nil
-            cell.contentConfiguration = c
             cell.accessoryView = spinner
             cell.accessibilityIdentifier = "sign-in-waiting"
             return cell
@@ -275,10 +291,7 @@ final class AgentAccountsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard Section(rawValue: indexPath.section) == .add, signIn == nil, busy == nil else { return }
-        let rows = addRows
-        guard indexPath.row < rows.count else { return }
-        let row = rows[indexPath.row]
+        guard case let .add(row) = items[indexPath.row], signIn == nil, busy == nil else { return }
         if row.id == "add-key" {
             askForKey()
         } else if let option = row.option {
@@ -286,10 +299,13 @@ final class AgentAccountsViewController: UITableViewController {
         }
     }
 
+    override func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
+        if case .add = items[indexPath.row] { return signIn == nil && busy == nil }
+        return false
+    }
+
     override func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard Section(rawValue: indexPath.section) == .accounts, busy == nil, indexPath.row < accounts.count else { return nil }
-        let account = accounts[indexPath.row]
-        guard account.switchable else { return nil }
+        guard case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
         let remove = UIContextualAction(style: .destructive, title: "Remove") { [weak self] _, _, done in
             self?.remove(account)
             done(true)
@@ -298,16 +314,14 @@ final class AgentAccountsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        guard Section(rawValue: indexPath.section) == .accounts, busy == nil, indexPath.row < accounts.count else { return nil }
-        let account = accounts[indexPath.row]
-        guard account.switchable else { return nil }
+        guard case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
         return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
-            var items: [UIMenuElement] = []
+            var actions: [UIMenuElement] = []
             if !account.active {
-                items.append(UIAction(title: "Switch to This Account", image: UIImage(systemName: "arrow.left.arrow.right")) { _ in self?.activate(account) })
+                actions.append(UIAction(title: "Switch to This Account", image: UIImage(systemName: "arrow.left.arrow.right")) { _ in self?.activate(account) })
             }
-            items.append(UIAction(title: "Remove Account", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in self?.remove(account) })
-            return UIMenu(children: items)
+            actions.append(UIAction(title: "Remove Account", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in self?.remove(account) })
+            return UIMenu(children: actions)
         })
     }
 
@@ -527,7 +541,8 @@ final class DeviceSignIn: NSObject, ASWebAuthenticationPresentationContextProvid
     }
 }
 
-/// One account row: mark, name, plan, usage meters, and "In use" or Switch.
+/// One account row: mark, name and plan with "In use" or Switch beside
+/// them, and the plan's usage meters across the row underneath.
 final class AccountCell: UITableViewCell {
     enum State { case inUse, switchable, fixed, busy }
 
@@ -546,32 +561,39 @@ final class AccountCell: UITableViewCell {
         icon.tintColor = Palette.text
         titleLabel.font = Fonts.ui(.sansMedium, 16)
         titleLabel.textColor = Palette.text
+        titleLabel.lineBreakMode = .byTruncatingMiddle
         detailLabel.font = Fonts.ui(.sans, 13)
         detailLabel.textColor = Palette.secondary
         detailLabel.numberOfLines = 2
         meters.axis = .vertical
-        meters.spacing = 4
-        let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel, meters])
-        text.axis = .vertical
-        text.spacing = 2
-        text.setCustomSpacing(8, after: detailLabel)
-        // The text takes the row's spare width; the badge or button keeps its own.
-        text.setContentHuggingPriority(UILayoutPriority(1), for: .horizontal)
-        let row = UIStackView(arrangedSubviews: [icon, text, trailing])
-        row.alignment = .center
-        row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
+        meters.spacing = 6
+        let names = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+        names.axis = .vertical
+        names.spacing = 1
+        names.setContentHuggingPriority(UILayoutPriority(1), for: .horizontal)
         trailing.setContentHuggingPriority(.required, for: .horizontal)
         trailing.setContentCompressionResistancePriority(.required, for: .horizontal)
-        contentView.addSubview(row)
+        let top = UIStackView(arrangedSubviews: [names, trailing])
+        top.alignment = .center
+        top.spacing = 10
+        let column = UIStackView(arrangedSubviews: [top, meters])
+        column.axis = .vertical
+        column.spacing = 10
+        for v in [icon, column] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(v)
+        }
         NSLayoutConstraint.activate([
-            icon.widthAnchor.constraint(equalToConstant: 24),
-            icon.heightAnchor.constraint(equalToConstant: 24),
-            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
-            row.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 22),
+            icon.heightAnchor.constraint(equalToConstant: 22),
+            icon.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            column.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 14),
+            column.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+            column.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 13),
+            column.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -13),
         ])
+        separatorInset = UIEdgeInsets(top: 0, left: 56, bottom: 0, right: 0)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -606,11 +628,23 @@ final class AccountCell: UITableViewCell {
             badge.textColor = Palette.success
             badge.backgroundColor = Palette.success.withAlphaComponent(0.12)
             badge.layer.cornerRadius = 8
+            badge.layer.cornerCurve = .continuous
             badge.clipsToBounds = true
             badge.accessibilityIdentifier = "account-in-use"
             accessory = badge
         case .switchable:
-            let button = CloudRow.rowButton("Switch", prominent: false) { [weak self] in self?.onSwitch?() }
+            var c = UIButton.Configuration.filled()
+            c.title = "Switch"
+            c.baseBackgroundColor = Palette.controlFill
+            c.baseForegroundColor = Palette.text
+            c.cornerStyle = .capsule
+            c.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12)
+            c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+                var a = a
+                a.font = Fonts.ui(.sansMedium, 13)
+                return a
+            }
+            let button = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in self?.onSwitch?() })
             button.accessibilityIdentifier = "account-switch"
             accessory = button
         case .busy:
@@ -620,6 +654,7 @@ final class AccountCell: UITableViewCell {
         case .fixed:
             accessory = nil
         }
+        trailing.isHidden = accessory == nil
         if let accessory {
             accessory.setContentHuggingPriority(.required, for: .horizontal)
             accessory.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -643,12 +678,13 @@ final class UsageMeter: UIView {
         label.text = window.label
         label.font = Fonts.ui(.sans, 12)
         label.textColor = Palette.secondary
-        label.widthAnchor.constraint(equalToConstant: 58).isActive = true
         let fraction = max(0, min(1, CGFloat(window.usedFraction)))
-        let bar = SplitBar(parts: [(Double(fraction), 0.6)])
-        bar.widthAnchor.constraint(equalToConstant: 64).isActive = true
-        // The bar draws shares of its whole: the unused remainder stays track.
-        bar.subviews.first?.backgroundColor = fraction > 0.9 ? Palette.danger : Palette.text.withAlphaComponent(0.6)
+        let track = UIView()
+        track.backgroundColor = Palette.controlFill
+        track.layer.cornerRadius = 2
+        track.clipsToBounds = true
+        let fill = UIView()
+        fill.backgroundColor = fraction > 0.9 ? Palette.danger : Palette.text.withAlphaComponent(0.55)
         let value = UILabel()
         var text = "\(Int((fraction * 100).rounded()))%"
         if let resets = window.resetsAtMs {
@@ -660,16 +696,29 @@ final class UsageMeter: UIView {
         value.text = text
         value.font = Fonts.ui(.sans, 12).withMonospacedDigits()
         value.textColor = Palette.secondary
-        let row = UIStackView(arrangedSubviews: [label, bar, value])
-        row.alignment = .center
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        value.textAlignment = .right
+        for v in [label, track, value] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        fill.translatesAutoresizingMaskIntoConstraints = false
+        track.addSubview(fill)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor),
+            label.widthAnchor.constraint(equalToConstant: 56),
+            label.topAnchor.constraint(equalTo: topAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor),
+            track.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            track.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            track.heightAnchor.constraint(equalToConstant: 4),
+            value.leadingAnchor.constraint(equalTo: track.trailingAnchor, constant: 10),
+            value.trailingAnchor.constraint(equalTo: trailingAnchor),
+            value.widthAnchor.constraint(equalToConstant: 76),
+            value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            fill.leadingAnchor.constraint(equalTo: track.leadingAnchor),
+            fill.topAnchor.constraint(equalTo: track.topAnchor),
+            fill.bottomAnchor.constraint(equalTo: track.bottomAnchor),
+            fill.widthAnchor.constraint(equalTo: track.widthAnchor, multiplier: max(fraction, 0.001)),
         ])
     }
 

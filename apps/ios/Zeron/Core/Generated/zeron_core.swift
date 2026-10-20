@@ -5899,6 +5899,11 @@ public func FfiConverterTypeVoiceSessionListener_lower(_ value: VoiceSessionList
  */
 public struct AgentLoginRules: Equatable, Hashable {
     /**
+     * The agent's display name ("Claude Code"); empty for one Zeron doesn't
+     * sign in to.
+     */
+    public var name: String
+    /**
      * The agent has accounts Zeron can sign in to at all.
      */
     public var signsIn: Bool
@@ -5921,6 +5926,10 @@ public struct AgentLoginRules: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
+         * The agent's display name ("Claude Code"); empty for one Zeron doesn't
+         * sign in to.
+         */name: String, 
+        /**
          * The agent has accounts Zeron can sign in to at all.
          */signsIn: Bool, 
         /**
@@ -5932,6 +5941,7 @@ public struct AgentLoginRules: Equatable, Hashable {
         /**
          * A standing note for an agent whose accounts work differently.
          */note: String?, options: [LoginOptionInfo]) {
+        self.name = name
         self.signsIn = signsIn
         self.switches = switches
         self.keepsOneLogin = keepsOneLogin
@@ -5956,6 +5966,7 @@ public struct FfiConverterTypeAgentLoginRules: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentLoginRules {
         return
             try AgentLoginRules(
+                name: FfiConverterString.read(from: &buf), 
                 signsIn: FfiConverterBool.read(from: &buf), 
                 switches: FfiConverterBool.read(from: &buf), 
                 keepsOneLogin: FfiConverterBool.read(from: &buf), 
@@ -5966,6 +5977,7 @@ public struct FfiConverterTypeAgentLoginRules: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: AgentLoginRules, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
         FfiConverterBool.write(value.signsIn, into: &buf)
         FfiConverterBool.write(value.switches, into: &buf)
         FfiConverterBool.write(value.keepsOneLogin, into: &buf)
