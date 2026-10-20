@@ -374,17 +374,27 @@ final class OnboardingViewController: UIViewController {
         let holder = UIView()
         header.translatesAutoresizingMaskIntoConstraints = false
         providers.view.translatesAutoresizingMaskIntoConstraints = false
+        // The page's own backdrop (the wallpaper) shows through, and the list
+        // fades out above the footer rather than stopping at a hard edge.
+        providers.view.backgroundColor = .clear
+        let list = FadingBottomView()
+        list.translatesAutoresizingMaskIntoConstraints = false
+        list.addSubview(providers.view)
         holder.addSubview(header)
-        holder.addSubview(providers.view)
+        holder.addSubview(list)
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: holder.topAnchor),
             header.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: holder.trailingAnchor),
-            providers.view.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
+            list.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
             // The list's inset-grouped margins line up with the page's.
-            providers.view.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: -20),
-            providers.view.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: 20),
-            providers.view.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+            list.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: -20),
+            list.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: 20),
+            list.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+            providers.view.topAnchor.constraint(equalTo: list.topAnchor),
+            providers.view.leadingAnchor.constraint(equalTo: list.leadingAnchor),
+            providers.view.trailingAnchor.constraint(equalTo: list.trailingAnchor),
+            providers.view.bottomAnchor.constraint(equalTo: list.bottomAnchor),
         ])
         providers.didMove(toParent: self)
         return holder
@@ -642,5 +652,28 @@ private final class WallpaperPreview: UIView {
         WallpaperStore.render(dark: traitCollection.userInterfaceStyle == .dark) { [weak self] render in
             self?.imageView.image = render?.image
         }
+    }
+}
+
+/// Fades its content out over the bottom edge.
+private final class FadingBottomView: UIView {
+    private let fade = CAGradientLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        fade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        layer.mask = fade
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = bounds
+        let edge = bounds.height > 0 ? min(0.5, 28 / bounds.height) : 0
+        fade.locations = [0, NSNumber(value: Double(1 - edge)), 1]
+        CATransaction.commit()
     }
 }
