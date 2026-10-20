@@ -36,19 +36,60 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
-        let mark = UIImageView(image: UIImage(systemName: "sparkle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .light)))
+        let mark = UIImageView(image: CloudUI.zeronMark)
         mark.tintColor = Palette.text
+        mark.contentMode = .scaleAspectFit
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            mark.widthAnchor.constraint(equalToConstant: 46),
+            mark.heightAnchor.constraint(equalToConstant: 53),
+        ])
         let title = UILabel()
-        title.text = "Zeron"
-        title.font = Fonts.ui(.sansSemibold, 34)
+        title.text = "Welcome to Zeron"
+        title.font = Fonts.ui(.sansSemibold, 32)
         title.textColor = Palette.text
+        title.textAlignment = .center
+        title.numberOfLines = 0
         let tagline = UILabel()
         tagline.text = "Your coding agents, from anywhere."
         tagline.font = Fonts.ui(.sans, 17)
         tagline.textColor = Palette.secondary
+        tagline.textAlignment = .center
+        tagline.numberOfLines = 0
+
+        let features = [
+            ("cloud", "Agents in the cloud", "Every session gets a machine of its own — it keeps going while you're away."),
+            ("laptopcomputer", "And on your computers", "Start and follow sessions on any computer running Zeron."),
+            ("bell.badge", "Know when it's done", "A notification when an agent finishes or needs you."),
+        ].map { symbol, heading, body -> UIView in
+            let icon = UIImageView(image: CloudUI.symbol(symbol, 18))
+            icon.tintColor = Palette.accent
+            icon.contentMode = .center
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28)])
+            let h = UILabel()
+            h.text = heading
+            h.font = Fonts.ui(.sansSemibold, 16)
+            h.textColor = Palette.text
+            let b = UILabel()
+            b.text = body
+            b.font = Fonts.ui(.sans, 14)
+            b.textColor = Palette.secondary
+            b.numberOfLines = 0
+            let text = UIStackView(arrangedSubviews: [h, b])
+            text.axis = .vertical
+            text.spacing = 2
+            let row = UIStackView(arrangedSubviews: [icon, text])
+            row.spacing = 14
+            row.alignment = .top
+            return row
+        }
+        let list = UIStackView(arrangedSubviews: features)
+        list.axis = .vertical
+        list.spacing = 20
 
         var primary = UIButton.Configuration.filled()
-        primary.title = "Sign In"
+        primary.title = "Get Started"
         primary.baseBackgroundColor = Palette.text
         primary.baseForegroundColor = Palette.background
         primary.cornerStyle = .capsule
@@ -68,23 +109,39 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         status.numberOfLines = 0
         status.textAlignment = .center
 
+        let fine = UILabel()
+        fine.text = "Sign in or create an account to continue."
+        fine.font = Fonts.ui(.sans, 13)
+        fine.textColor = Palette.tertiary
+        fine.textAlignment = .center
+
         let top = UIStackView(arrangedSubviews: [mark, title, tagline])
         top.axis = .vertical
         top.alignment = .center
         top.spacing = 12
-        let buttons = UIStackView(arrangedSubviews: [status, signIn])
+        top.setCustomSpacing(22, after: mark)
+        let buttons = UIStackView(arrangedSubviews: [status, signIn, fine])
         buttons.axis = .vertical
         buttons.spacing = 12
-        for v in [top, buttons] {
+        for v in [top, list, buttons] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
+        let readable = view.readableContentGuide
+        let width = list.widthAnchor.constraint(equalToConstant: 440)
+        width.priority = .defaultHigh
         NSLayoutConstraint.activate([
             top.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
-            top.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -80),
+            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 64),
+            top.leadingAnchor.constraint(greaterThanOrEqualTo: readable.leadingAnchor),
+            list.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 44),
+            list.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            list.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 32),
+            width,
+            list.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -24),
             buttons.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
             buttons.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
-            buttons.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            buttons.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
         ])
     }
 

@@ -96,6 +96,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.reload() }
         // Devices go on/offline and the org name backfills after opening.
         appToken = app.observe { [weak self] in self?.reload() }
+        cloudToken = app.cloud.observe { [weak self] in self?.reload() }
+        app.cloud.refresh()
         // Back from iOS Settings (notifications may have been allowed there).
         foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshNotificationStatus()
@@ -183,6 +185,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
 
     private var wallpaperObserver: NSObjectProtocol?
     private var appToken: AnyObject?
+    private var cloudToken: AnyObject?
 
     private func reload() {
         var s = NSDiffableDataSourceSnapshot<String, Row>()
@@ -190,6 +193,17 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([
             Row(id: "account", title: app.accountName, subtitle: app.accountDetail, symbol: "person.crop.circle", accessory: .none),
         ])
+        if !app.isDemo || ProcessInfo.processInfo.arguments.contains("-cloud") {
+            s.appendSections(["Cloud"])
+            let cloud = app.cloud
+            let credits = cloud.credits.map { "\(CloudUI.credits($0)) credits" }
+            let plan = cloud.billing?.plan.map { "\($0.name) plan" }
+            s.appendItems([
+                Row(id: "cloud", title: "Cloud", subtitle: [credits, plan].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Agents on machines of their own", symbol: "cloud", tint: Palette.accent),
+                Row(id: "cloud:github", title: "GitHub", subtitle: cloud.githubAccount.map { "@\($0)" } ?? "Not connected", symbol: "chevron.left.forwardslash.chevron.right"),
+                Row(id: "cloud:agents", title: "Agent Accounts", subtitle: CloudStore.agents.compactMap { cloud.activeAccount($0) != nil ? $0.name : nil }.joined(separator: ", ").nonEmpty ?? "Sign in to Claude or ChatGPT", symbol: "person.2"),
+            ])
+        }
         s.appendSections(["Devices"])
         s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
         if app.voice.available {
@@ -236,6 +250,14 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case "cloud", "cloud:agents":
+            navigationController?.pushViewController(CloudSettingsViewController(app: app), animated: true)
+        case "cloud:github":
+            if app.cloud.githubConnected {
+                navigationController?.pushViewController(CloudSettingsViewController(app: app), animated: true)
+            } else {
+                present(GitHubConnectViewController.sheet(app: app), animated: true)
+            }
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")

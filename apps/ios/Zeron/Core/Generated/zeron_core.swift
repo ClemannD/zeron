@@ -1263,6 +1263,94 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func workspaceRevision()  -> UInt64
     
     /**
+     * A Stripe Checkout url: a plan (`kind = "subscription"`, `plan`) or
+     * extra credits (`kind = "credits"`, `packs`).
+     */
+    func billingCheckout(kind: String, plan: String?, packs: UInt32?) async throws  -> String
+    
+    /**
+     * The Stripe customer portal url.
+     */
+    func billingPortal() async throws  -> String
+    
+    func billingStatus() async throws  -> BillingInfo
+    
+    /**
+     * Set Cloud up for this account (it's part of every signed-in one).
+     */
+    func cloudEnable() async throws  -> CloudInfo
+    
+    /**
+     * Wake (or put to sleep) a session's machine; `chat_id` is the
+     * session's own chat.
+     */
+    func cloudSessionAction(chatId: String, wake: Bool) async throws  -> CloudSessionInfo
+    
+    func cloudSessions() async throws  -> [CloudSessionInfo]
+    
+    /**
+     * Cloud's status (an edge without Cloud reads as unavailable).
+     */
+    func cloudStatus() async throws  -> CloudInfo
+    
+    /**
+     * Make `repo` (`owner/name`) a project on Cloud alone; returns its id.
+     */
+    func createCloudProject(repo: String) async throws  -> String
+    
+    /**
+     * Start a session on its own Cloud machine in `space_id`; returns the
+     * chat id (send its first message as usual).
+     */
+    func createCloudSession(spaceId: String, config: ChatConfig?, branch: String?, title: String?) async throws  -> String
+    
+    func githubBranches(repo: String) async throws  -> [String]
+    
+    func githubConnectPoll(flowId: String) async throws  -> GithubConnectInfo
+    
+    func githubConnectStart() async throws  -> GithubDeviceFlowInfo
+    
+    /**
+     * The repositories Cloud reaches (empty when GitHub isn't connected).
+     */
+    func githubRepos(query: String?) async throws  -> [GithubRepoInfo]
+    
+    /**
+     * The auth sheet was dismissed.
+     */
+    func providerLoginCancel(loginId: String) 
+    
+    /**
+     * Wait for a started sign-in to land in Cloud's vault.
+     */
+    func providerLoginFinish(loginId: String) async throws 
+    
+    /**
+     * Sign in to `provider` (`claude` · `codex`) for Cloud. The browser is
+     * sent to `done_url` once the provider answers.
+     */
+    func providerLoginStart(provider: String, doneUrl: String) async throws  -> ProviderLoginInfo
+    
+    /**
+     * Every login Cloud keeps for `provider` (`claude` · `codex`).
+     */
+    func vaultAccounts(provider: String) async throws  -> [CloudAccountInfo]
+    
+    /**
+     * Make `slot` the login Cloud uses for `provider`.
+     */
+    func vaultActivate(provider: String, slot: String) async throws  -> [CloudAccountInfo]
+    
+    func vaultForget(provider: String, slot: String) async throws  -> [CloudAccountInfo]
+    
+    /**
+     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses.
+     */
+    func vaultPutApiKey(provider: String, key: String) async throws 
+    
+    func vaultStatus() async throws  -> VaultInfo
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2097,6 +2185,381 @@ open func workspaceRevision() -> UInt64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * A Stripe Checkout url: a plan (`kind = "subscription"`, `plan`) or
+     * extra credits (`kind = "credits"`, `packs`).
+     */
+open func billingCheckout(kind: String, plan: String?, packs: UInt32?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_billing_checkout(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(kind),FfiConverterOptionString.lower(plan),FfiConverterOptionUInt32.lower(packs)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The Stripe customer portal url.
+     */
+open func billingPortal()async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_billing_portal(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func billingStatus()async throws  -> BillingInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_billing_status(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBillingInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Set Cloud up for this account (it's part of every signed-in one).
+     */
+open func cloudEnable()async throws  -> CloudInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_cloud_enable(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCloudInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Wake (or put to sleep) a session's machine; `chat_id` is the
+     * session's own chat.
+     */
+open func cloudSessionAction(chatId: String, wake: Bool)async throws  -> CloudSessionInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_cloud_session_action(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterBool.lower(wake)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCloudSessionInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func cloudSessions()async throws  -> [CloudSessionInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_cloud_sessions(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCloudSessionInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Cloud's status (an edge without Cloud reads as unavailable).
+     */
+open func cloudStatus()async throws  -> CloudInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_cloud_status(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCloudInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Make `repo` (`owner/name`) a project on Cloud alone; returns its id.
+     */
+open func createCloudProject(repo: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_cloud_project(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(repo)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Start a session on its own Cloud machine in `space_id`; returns the
+     * chat id (send its first message as usual).
+     */
+open func createCloudSession(spaceId: String, config: ChatConfig?, branch: String?, title: String?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_cloud_session(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(spaceId),FfiConverterOptionTypeChatConfig.lower(config),FfiConverterOptionString.lower(branch),FfiConverterOptionString.lower(title)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func githubBranches(repo: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_github_branches(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(repo)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func githubConnectPoll(flowId: String)async throws  -> GithubConnectInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_github_connect_poll(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(flowId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGithubConnectInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func githubConnectStart()async throws  -> GithubDeviceFlowInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_github_connect_start(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGithubDeviceFlowInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The repositories Cloud reaches (empty when GitHub isn't connected).
+     */
+open func githubRepos(query: String?)async throws  -> [GithubRepoInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_github_repos(
+                        self.uniffiCloneHandle(),FfiConverterOptionString.lower(query)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeGithubRepoInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The auth sheet was dismissed.
+     */
+open func providerLoginCancel(loginId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_provider_login_cancel(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(loginId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Wait for a started sign-in to land in Cloud's vault.
+     */
+open func providerLoginFinish(loginId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_provider_login_finish(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(loginId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Sign in to `provider` (`claude` · `codex`) for Cloud. The browser is
+     * sent to `done_url` once the provider answers.
+     */
+open func providerLoginStart(provider: String, doneUrl: String)async throws  -> ProviderLoginInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_provider_login_start(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(doneUrl)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeProviderLoginInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Every login Cloud keeps for `provider` (`claude` · `codex`).
+     */
+open func vaultAccounts(provider: String)async throws  -> [CloudAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_accounts(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCloudAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Make `slot` the login Cloud uses for `provider`.
+     */
+open func vaultActivate(provider: String, slot: String)async throws  -> [CloudAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_activate(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(slot)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCloudAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func vaultForget(provider: String, slot: String)async throws  -> [CloudAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_forget(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(slot)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeCloudAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses.
+     */
+open func vaultPutApiKey(provider: String, key: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_put_api_key(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(key)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func vaultStatus()async throws  -> VaultInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_status(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeVaultInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -5543,6 +6006,178 @@ public func FfiConverterTypeAuthUser_lower(_ value: AuthUser) -> RustBuffer {
 }
 
 
+public struct BillingInfo: Equatable, Hashable {
+    /**
+     * Stripe is set up on this server.
+     */
+    public var available: Bool
+    public var plan: BillingPlanInfo?
+    /**
+     * `active` · `trialing` · `past_due` · …
+     */
+    public var planStatus: String?
+    public var periodEndMs: Int64?
+    public var cancelAtPeriodEnd: Bool
+    public var creditsTotal: Double
+    public var creditsMonthly: Double
+    public var creditsMonthlyTotal: Double
+    public var creditsExtra: Double
+    public var plans: [BillingPlanInfo]
+    public var packPriceCents: UInt32
+    public var packCredits: Double
+    public var hasCustomer: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stripe is set up on this server.
+         */available: Bool, plan: BillingPlanInfo?, 
+        /**
+         * `active` · `trialing` · `past_due` · …
+         */planStatus: String?, periodEndMs: Int64?, cancelAtPeriodEnd: Bool, creditsTotal: Double, creditsMonthly: Double, creditsMonthlyTotal: Double, creditsExtra: Double, plans: [BillingPlanInfo], packPriceCents: UInt32, packCredits: Double, hasCustomer: Bool) {
+        self.available = available
+        self.plan = plan
+        self.planStatus = planStatus
+        self.periodEndMs = periodEndMs
+        self.cancelAtPeriodEnd = cancelAtPeriodEnd
+        self.creditsTotal = creditsTotal
+        self.creditsMonthly = creditsMonthly
+        self.creditsMonthlyTotal = creditsMonthlyTotal
+        self.creditsExtra = creditsExtra
+        self.plans = plans
+        self.packPriceCents = packPriceCents
+        self.packCredits = packCredits
+        self.hasCustomer = hasCustomer
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BillingInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBillingInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BillingInfo {
+        return
+            try BillingInfo(
+                available: FfiConverterBool.read(from: &buf), 
+                plan: FfiConverterOptionTypeBillingPlanInfo.read(from: &buf), 
+                planStatus: FfiConverterOptionString.read(from: &buf), 
+                periodEndMs: FfiConverterOptionInt64.read(from: &buf), 
+                cancelAtPeriodEnd: FfiConverterBool.read(from: &buf), 
+                creditsTotal: FfiConverterDouble.read(from: &buf), 
+                creditsMonthly: FfiConverterDouble.read(from: &buf), 
+                creditsMonthlyTotal: FfiConverterDouble.read(from: &buf), 
+                creditsExtra: FfiConverterDouble.read(from: &buf), 
+                plans: FfiConverterSequenceTypeBillingPlanInfo.read(from: &buf), 
+                packPriceCents: FfiConverterUInt32.read(from: &buf), 
+                packCredits: FfiConverterDouble.read(from: &buf), 
+                hasCustomer: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BillingInfo, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterOptionTypeBillingPlanInfo.write(value.plan, into: &buf)
+        FfiConverterOptionString.write(value.planStatus, into: &buf)
+        FfiConverterOptionInt64.write(value.periodEndMs, into: &buf)
+        FfiConverterBool.write(value.cancelAtPeriodEnd, into: &buf)
+        FfiConverterDouble.write(value.creditsTotal, into: &buf)
+        FfiConverterDouble.write(value.creditsMonthly, into: &buf)
+        FfiConverterDouble.write(value.creditsMonthlyTotal, into: &buf)
+        FfiConverterDouble.write(value.creditsExtra, into: &buf)
+        FfiConverterSequenceTypeBillingPlanInfo.write(value.plans, into: &buf)
+        FfiConverterUInt32.write(value.packPriceCents, into: &buf)
+        FfiConverterDouble.write(value.packCredits, into: &buf)
+        FfiConverterBool.write(value.hasCustomer, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBillingInfo_lift(_ buf: RustBuffer) throws -> BillingInfo {
+    return try FfiConverterTypeBillingInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBillingInfo_lower(_ value: BillingInfo) -> RustBuffer {
+    return FfiConverterTypeBillingInfo.lower(value)
+}
+
+
+public struct BillingPlanInfo: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var priceCents: UInt32
+    public var monthlyCredits: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, priceCents: UInt32, monthlyCredits: Double) {
+        self.id = id
+        self.name = name
+        self.priceCents = priceCents
+        self.monthlyCredits = monthlyCredits
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BillingPlanInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBillingPlanInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BillingPlanInfo {
+        return
+            try BillingPlanInfo(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                priceCents: FfiConverterUInt32.read(from: &buf), 
+                monthlyCredits: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BillingPlanInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt32.write(value.priceCents, into: &buf)
+        FfiConverterDouble.write(value.monthlyCredits, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBillingPlanInfo_lift(_ buf: RustBuffer) throws -> BillingPlanInfo {
+    return try FfiConverterTypeBillingPlanInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBillingPlanInfo_lower(_ value: BillingPlanInfo) -> RustBuffer {
+    return FfiConverterTypeBillingPlanInfo.lower(value)
+}
+
+
 public struct BoxPrim: Equatable, Hashable {
     public var x: Float
     public var y: Float
@@ -5864,6 +6499,251 @@ public func FfiConverterTypeChatConfig_lift(_ buf: RustBuffer) throws -> ChatCon
 #endif
 public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer {
     return FfiConverterTypeChatConfig.lower(value)
+}
+
+
+/**
+ * One login Cloud keeps for a provider.
+ */
+public struct CloudAccountInfo: Equatable, Hashable {
+    public var slot: String
+    public var active: Bool
+    /**
+     * `oauth` (a subscription sign-in) or `key`.
+     */
+    public var kind: String
+    public var email: String?
+    public var displayName: String?
+    public var organization: String?
+    public var plan: String?
+    public var needsReconnect: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(slot: String, active: Bool, 
+        /**
+         * `oauth` (a subscription sign-in) or `key`.
+         */kind: String, email: String?, displayName: String?, organization: String?, plan: String?, needsReconnect: Bool) {
+        self.slot = slot
+        self.active = active
+        self.kind = kind
+        self.email = email
+        self.displayName = displayName
+        self.organization = organization
+        self.plan = plan
+        self.needsReconnect = needsReconnect
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CloudAccountInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCloudAccountInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CloudAccountInfo {
+        return
+            try CloudAccountInfo(
+                slot: FfiConverterString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                email: FfiConverterOptionString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf), 
+                organization: FfiConverterOptionString.read(from: &buf), 
+                plan: FfiConverterOptionString.read(from: &buf), 
+                needsReconnect: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CloudAccountInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.slot, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.email, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterOptionString.write(value.organization, into: &buf)
+        FfiConverterOptionString.write(value.plan, into: &buf)
+        FfiConverterBool.write(value.needsReconnect, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudAccountInfo_lift(_ buf: RustBuffer) throws -> CloudAccountInfo {
+    return try FfiConverterTypeCloudAccountInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudAccountInfo_lower(_ value: CloudAccountInfo) -> RustBuffer {
+    return FfiConverterTypeCloudAccountInfo.lower(value)
+}
+
+
+public struct CloudInfo: Equatable, Hashable {
+    /**
+     * This account can use Cloud (signed in, an edge with Cloud).
+     */
+    public var available: Bool
+    /**
+     * `off` · `ready` · `deleting` · `error` …
+     */
+    public var state: String
+    public var deviceId: String?
+    /**
+     * Credits left (plan + extra − unmetered use).
+     */
+    public var credits: Double?
+    public var awakeSessions: UInt32
+    public var maxAwakeSessions: UInt32
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * This account can use Cloud (signed in, an edge with Cloud).
+         */available: Bool, 
+        /**
+         * `off` · `ready` · `deleting` · `error` …
+         */state: String, deviceId: String?, 
+        /**
+         * Credits left (plan + extra − unmetered use).
+         */credits: Double?, awakeSessions: UInt32, maxAwakeSessions: UInt32, error: String?) {
+        self.available = available
+        self.state = state
+        self.deviceId = deviceId
+        self.credits = credits
+        self.awakeSessions = awakeSessions
+        self.maxAwakeSessions = maxAwakeSessions
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CloudInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCloudInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CloudInfo {
+        return
+            try CloudInfo(
+                available: FfiConverterBool.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterOptionString.read(from: &buf), 
+                credits: FfiConverterOptionDouble.read(from: &buf), 
+                awakeSessions: FfiConverterUInt32.read(from: &buf), 
+                maxAwakeSessions: FfiConverterUInt32.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CloudInfo, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.deviceId, into: &buf)
+        FfiConverterOptionDouble.write(value.credits, into: &buf)
+        FfiConverterUInt32.write(value.awakeSessions, into: &buf)
+        FfiConverterUInt32.write(value.maxAwakeSessions, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudInfo_lift(_ buf: RustBuffer) throws -> CloudInfo {
+    return try FfiConverterTypeCloudInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudInfo_lower(_ value: CloudInfo) -> RustBuffer {
+    return FfiConverterTypeCloudInfo.lower(value)
+}
+
+
+public struct CloudSessionInfo: Equatable, Hashable {
+    public var chatId: String
+    public var deviceId: String
+    public var state: String
+    public var repo: String?
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(chatId: String, deviceId: String, state: String, repo: String?, error: String?) {
+        self.chatId = chatId
+        self.deviceId = deviceId
+        self.state = state
+        self.repo = repo
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CloudSessionInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCloudSessionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CloudSessionInfo {
+        return
+            try CloudSessionInfo(
+                chatId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                repo: FfiConverterOptionString.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CloudSessionInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.chatId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.repo, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudSessionInfo_lift(_ buf: RustBuffer) throws -> CloudSessionInfo {
+    return try FfiConverterTypeCloudSessionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudSessionInfo_lower(_ value: CloudSessionInfo) -> RustBuffer {
+    return FfiConverterTypeCloudSessionInfo.lower(value)
 }
 
 
@@ -6934,6 +7814,211 @@ public func FfiConverterTypeFrontPage_lift(_ buf: RustBuffer) throws -> FrontPag
 #endif
 public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
     return FfiConverterTypeFrontPage.lower(value)
+}
+
+
+public struct GithubConnectInfo: Equatable, Hashable {
+    /**
+     * `pending` · `connected` · `failed`.
+     */
+    public var state: String
+    public var account: String?
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `pending` · `connected` · `failed`.
+         */state: String, account: String?, error: String?) {
+        self.state = state
+        self.account = account
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GithubConnectInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGithubConnectInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GithubConnectInfo {
+        return
+            try GithubConnectInfo(
+                state: FfiConverterString.read(from: &buf), 
+                account: FfiConverterOptionString.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GithubConnectInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.account, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubConnectInfo_lift(_ buf: RustBuffer) throws -> GithubConnectInfo {
+    return try FfiConverterTypeGithubConnectInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubConnectInfo_lower(_ value: GithubConnectInfo) -> RustBuffer {
+    return FfiConverterTypeGithubConnectInfo.lower(value)
+}
+
+
+/**
+ * GitHub's device flow: show `user_code`, open `verification_uri`, poll.
+ */
+public struct GithubDeviceFlowInfo: Equatable, Hashable {
+    public var flowId: String
+    public var userCode: String
+    public var verificationUri: String
+    public var intervalSecs: UInt64
+    public var expiresAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(flowId: String, userCode: String, verificationUri: String, intervalSecs: UInt64, expiresAtMs: Int64) {
+        self.flowId = flowId
+        self.userCode = userCode
+        self.verificationUri = verificationUri
+        self.intervalSecs = intervalSecs
+        self.expiresAtMs = expiresAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GithubDeviceFlowInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGithubDeviceFlowInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GithubDeviceFlowInfo {
+        return
+            try GithubDeviceFlowInfo(
+                flowId: FfiConverterString.read(from: &buf), 
+                userCode: FfiConverterString.read(from: &buf), 
+                verificationUri: FfiConverterString.read(from: &buf), 
+                intervalSecs: FfiConverterUInt64.read(from: &buf), 
+                expiresAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GithubDeviceFlowInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.flowId, into: &buf)
+        FfiConverterString.write(value.userCode, into: &buf)
+        FfiConverterString.write(value.verificationUri, into: &buf)
+        FfiConverterUInt64.write(value.intervalSecs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubDeviceFlowInfo_lift(_ buf: RustBuffer) throws -> GithubDeviceFlowInfo {
+    return try FfiConverterTypeGithubDeviceFlowInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubDeviceFlowInfo_lower(_ value: GithubDeviceFlowInfo) -> RustBuffer {
+    return FfiConverterTypeGithubDeviceFlowInfo.lower(value)
+}
+
+
+public struct GithubRepoInfo: Equatable, Hashable {
+    /**
+     * `owner/name`.
+     */
+    public var fullName: String
+    public var defaultBranch: String
+    public var `private`: Bool
+    public var description: String?
+    public var pushedAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `owner/name`.
+         */fullName: String, defaultBranch: String, `private`: Bool, description: String?, pushedAtMs: Int64) {
+        self.fullName = fullName
+        self.defaultBranch = defaultBranch
+        self.`private` = `private`
+        self.description = description
+        self.pushedAtMs = pushedAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GithubRepoInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGithubRepoInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GithubRepoInfo {
+        return
+            try GithubRepoInfo(
+                fullName: FfiConverterString.read(from: &buf), 
+                defaultBranch: FfiConverterString.read(from: &buf), 
+                private: FfiConverterBool.read(from: &buf), 
+                description: FfiConverterOptionString.read(from: &buf), 
+                pushedAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GithubRepoInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.fullName, into: &buf)
+        FfiConverterString.write(value.defaultBranch, into: &buf)
+        FfiConverterBool.write(value.`private`, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterInt64.write(value.pushedAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubRepoInfo_lift(_ buf: RustBuffer) throws -> GithubRepoInfo {
+    return try FfiConverterTypeGithubRepoInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGithubRepoInfo_lower(_ value: GithubRepoInfo) -> RustBuffer {
+    return FfiConverterTypeGithubRepoInfo.lower(value)
 }
 
 
@@ -8119,6 +9204,14 @@ public struct ProjectView: Equatable, Hashable {
     public var deviceId: String
     public var deviceName: String?
     public var deviceOnline: Bool
+    /**
+     * Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+     */
+    public var isCloud: Bool
+    /**
+     * `owner/name`, when the project has a GitHub repository.
+     */
+    public var githubRepo: String?
     public var gitDetected: Bool
     public var createdAtMs: Int64
     /**
@@ -8141,7 +9234,13 @@ public struct ProjectView: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, name: String, path: String, colorIndex: UInt32, deviceId: String, deviceName: String?, deviceOnline: Bool, gitDetected: Bool, createdAtMs: Int64, 
+    public init(id: String, name: String, path: String, colorIndex: UInt32, deviceId: String, deviceName: String?, deviceOnline: Bool, 
+        /**
+         * Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+         */isCloud: Bool, 
+        /**
+         * `owner/name`, when the project has a GitHub repository.
+         */githubRepo: String?, gitDetected: Bool, createdAtMs: Int64, 
         /**
          * Shared by every checkout of one repository, on any device.
          */groupKey: String, 
@@ -8161,6 +9260,8 @@ public struct ProjectView: Equatable, Hashable {
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.deviceOnline = deviceOnline
+        self.isCloud = isCloud
+        self.githubRepo = githubRepo
         self.gitDetected = gitDetected
         self.createdAtMs = createdAtMs
         self.groupKey = groupKey
@@ -8193,6 +9294,8 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
                 deviceId: FfiConverterString.read(from: &buf), 
                 deviceName: FfiConverterOptionString.read(from: &buf), 
                 deviceOnline: FfiConverterBool.read(from: &buf), 
+                isCloud: FfiConverterBool.read(from: &buf), 
+                githubRepo: FfiConverterOptionString.read(from: &buf), 
                 gitDetected: FfiConverterBool.read(from: &buf), 
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
                 groupKey: FfiConverterString.read(from: &buf), 
@@ -8211,6 +9314,8 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
         FfiConverterString.write(value.deviceId, into: &buf)
         FfiConverterOptionString.write(value.deviceName, into: &buf)
         FfiConverterBool.write(value.deviceOnline, into: &buf)
+        FfiConverterBool.write(value.isCloud, into: &buf)
+        FfiConverterOptionString.write(value.githubRepo, into: &buf)
         FfiConverterBool.write(value.gitDetected, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
         FfiConverterString.write(value.groupKey, into: &buf)
@@ -8234,6 +9339,65 @@ public func FfiConverterTypeProjectView_lift(_ buf: RustBuffer) throws -> Projec
 #endif
 public func FfiConverterTypeProjectView_lower(_ value: ProjectView) -> RustBuffer {
     return FfiConverterTypeProjectView.lower(value)
+}
+
+
+/**
+ * A provider sign-in under way: open `url` in an auth sheet that waits for
+ * the `done_url` scheme it was started with, then await
+ * `provider_login_finish(login_id)`.
+ */
+public struct ProviderLoginInfo: Equatable, Hashable {
+    public var loginId: String
+    public var url: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(loginId: String, url: String) {
+        self.loginId = loginId
+        self.url = url
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProviderLoginInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProviderLoginInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProviderLoginInfo {
+        return
+            try ProviderLoginInfo(
+                loginId: FfiConverterString.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProviderLoginInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.loginId, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProviderLoginInfo_lift(_ buf: RustBuffer) throws -> ProviderLoginInfo {
+    return try FfiConverterTypeProviderLoginInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProviderLoginInfo_lower(_ value: ProviderLoginInfo) -> RustBuffer {
+    return FfiConverterTypeProviderLoginInfo.lower(value)
 }
 
 
@@ -9289,6 +10453,10 @@ public struct SessionRow: Equatable, Hashable {
     public var deviceName: String?
     public var deviceOnline: Bool
     /**
+     * Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+     */
+    public var isCloud: Bool
+    /**
      * Wire harness id (`claude-code`).
      */
     public var harness: String?
@@ -9347,6 +10515,9 @@ public struct SessionRow: Equatable, Hashable {
          * `None` = projectless (host's home folder).
          */project: ProjectRef?, deviceId: String, deviceName: String?, deviceOnline: Bool, 
         /**
+         * Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+         */isCloud: Bool, 
+        /**
          * Wire harness id (`claude-code`).
          */harness: String?, harnessLabel: String?, model: String?, modelLabel: String?, 
         /**
@@ -9379,6 +10550,7 @@ public struct SessionRow: Equatable, Hashable {
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.deviceOnline = deviceOnline
+        self.isCloud = isCloud
         self.harness = harness
         self.harnessLabel = harnessLabel
         self.model = model
@@ -9427,6 +10599,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 deviceId: FfiConverterString.read(from: &buf), 
                 deviceName: FfiConverterOptionString.read(from: &buf), 
                 deviceOnline: FfiConverterBool.read(from: &buf), 
+                isCloud: FfiConverterBool.read(from: &buf), 
                 harness: FfiConverterOptionString.read(from: &buf), 
                 harnessLabel: FfiConverterOptionString.read(from: &buf), 
                 model: FfiConverterOptionString.read(from: &buf), 
@@ -9461,6 +10634,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterString.write(value.deviceId, into: &buf)
         FfiConverterOptionString.write(value.deviceName, into: &buf)
         FfiConverterBool.write(value.deviceOnline, into: &buf)
+        FfiConverterBool.write(value.isCloud, into: &buf)
         FfiConverterOptionString.write(value.harness, into: &buf)
         FfiConverterOptionString.write(value.harnessLabel, into: &buf)
         FfiConverterOptionString.write(value.model, into: &buf)
@@ -10037,6 +11211,145 @@ public func FfiConverterTypeUserInputQuestion_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeUserInputQuestion_lower(_ value: UserInputQuestion) -> RustBuffer {
     return FfiConverterTypeUserInputQuestion.lower(value)
+}
+
+
+/**
+ * One provider the vault holds logins for.
+ */
+public struct VaultConnectionInfo: Equatable, Hashable {
+    /**
+     * `claude` · `codex` · `github` · `anthropic-key` · `openai-key`.
+     */
+    public var provider: String
+    public var account: String?
+    public var needsReconnect: Bool
+    public var accounts: UInt32
+    public var hasActive: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `claude` · `codex` · `github` · `anthropic-key` · `openai-key`.
+         */provider: String, account: String?, needsReconnect: Bool, accounts: UInt32, hasActive: Bool) {
+        self.provider = provider
+        self.account = account
+        self.needsReconnect = needsReconnect
+        self.accounts = accounts
+        self.hasActive = hasActive
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension VaultConnectionInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultConnectionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultConnectionInfo {
+        return
+            try VaultConnectionInfo(
+                provider: FfiConverterString.read(from: &buf), 
+                account: FfiConverterOptionString.read(from: &buf), 
+                needsReconnect: FfiConverterBool.read(from: &buf), 
+                accounts: FfiConverterUInt32.read(from: &buf), 
+                hasActive: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VaultConnectionInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.account, into: &buf)
+        FfiConverterBool.write(value.needsReconnect, into: &buf)
+        FfiConverterUInt32.write(value.accounts, into: &buf)
+        FfiConverterBool.write(value.hasActive, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultConnectionInfo_lift(_ buf: RustBuffer) throws -> VaultConnectionInfo {
+    return try FfiConverterTypeVaultConnectionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultConnectionInfo_lower(_ value: VaultConnectionInfo) -> RustBuffer {
+    return FfiConverterTypeVaultConnectionInfo.lower(value)
+}
+
+
+public struct VaultInfo: Equatable, Hashable {
+    public var available: Bool
+    public var connections: [VaultConnectionInfo]
+    /**
+     * Where to install the Zeron GitHub App on more repositories.
+     */
+    public var githubInstallUrl: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(available: Bool, connections: [VaultConnectionInfo], 
+        /**
+         * Where to install the Zeron GitHub App on more repositories.
+         */githubInstallUrl: String?) {
+        self.available = available
+        self.connections = connections
+        self.githubInstallUrl = githubInstallUrl
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension VaultInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultInfo {
+        return
+            try VaultInfo(
+                available: FfiConverterBool.read(from: &buf), 
+                connections: FfiConverterSequenceTypeVaultConnectionInfo.read(from: &buf), 
+                githubInstallUrl: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VaultInfo, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterSequenceTypeVaultConnectionInfo.write(value.connections, into: &buf)
+        FfiConverterOptionString.write(value.githubInstallUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultInfo_lift(_ buf: RustBuffer) throws -> VaultInfo {
+    return try FfiConverterTypeVaultInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultInfo_lower(_ value: VaultInfo) -> RustBuffer {
+    return FfiConverterTypeVaultInfo.lower(value)
 }
 
 
@@ -15439,6 +16752,30 @@ fileprivate struct FfiConverterOptionTypeAppshotLabel: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeBillingPlanInfo: FfiConverterRustBuffer {
+    typealias SwiftType = BillingPlanInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeBillingPlanInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeBillingPlanInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeChatConfig: FfiConverterRustBuffer {
     typealias SwiftType = ChatConfig?
 
@@ -15971,6 +17308,31 @@ fileprivate struct FfiConverterSequenceTypeAuthOrg: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeBillingPlanInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [BillingPlanInfo]
+
+    public static func write(_ value: [BillingPlanInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeBillingPlanInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BillingPlanInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [BillingPlanInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeBillingPlanInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeBoxPrim: FfiConverterRustBuffer {
     typealias SwiftType = [BoxPrim]
 
@@ -16013,6 +17375,56 @@ fileprivate struct FfiConverterSequenceTypeCaptionSpan: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeCaptionSpan.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCloudAccountInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [CloudAccountInfo]
+
+    public static func write(_ value: [CloudAccountInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCloudAccountInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CloudAccountInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CloudAccountInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCloudAccountInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCloudSessionInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [CloudSessionInfo]
+
+    public static func write(_ value: [CloudSessionInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCloudSessionInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CloudSessionInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CloudSessionInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCloudSessionInfo.read(from: &buf))
         }
         return seq
     }
@@ -16163,6 +17575,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFolderEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGithubRepoInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [GithubRepoInfo]
+
+    public static func write(_ value: [GithubRepoInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGithubRepoInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GithubRepoInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GithubRepoInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGithubRepoInfo.read(from: &buf))
         }
         return seq
     }
@@ -16688,6 +18125,31 @@ fileprivate struct FfiConverterSequenceTypeUserInputQuestion: FfiConverterRustBu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeUserInputQuestion.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeVaultConnectionInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [VaultConnectionInfo]
+
+    public static func write(_ value: [VaultConnectionInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeVaultConnectionInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [VaultConnectionInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [VaultConnectionInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeVaultConnectionInfo.read(from: &buf))
         }
         return seq
     }
@@ -17497,6 +18959,69 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_billing_checkout() != 44997) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_billing_portal() != 46565) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_billing_status() != 46884) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_cloud_enable() != 14325) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_cloud_session_action() != 15998) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_cloud_sessions() != 26705) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_cloud_status() != 39260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_cloud_project() != 24057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_cloud_session() != 22992) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_github_branches() != 21291) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_github_connect_poll() != 35425) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_github_connect_start() != 57895) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_github_repos() != 61075) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_provider_login_cancel() != 34870) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_provider_login_finish() != 22587) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_provider_login_start() != 44873) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_accounts() != 18199) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_activate() != 50516) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_forget() != 1028) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_put_api_key() != 28404) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_status() != 51383) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {

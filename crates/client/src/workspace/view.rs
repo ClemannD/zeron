@@ -132,6 +132,9 @@ pub struct ProjectView {
     pub device_online: bool,
     /// Lives on Cloud alone: a GitHub repository each session clones.
     pub is_cloud: bool,
+    /// The GitHub repository (`owner/name`) behind it, when known: Cloud
+    /// can run its sessions when it reaches it.
+    pub github_repo: Option<String>,
     pub git_detected: bool,
     pub created_at_ms: i64,
     /// The repository project this checkout belongs to
@@ -657,6 +660,7 @@ pub(crate) fn derive(
                 device_online: is_cloud_device(&space.device_id)
                     || device_online(&space.device_id, cx.presence, cx.self_device_id, now_ms),
                 is_cloud: is_cloud_device(&space.device_id),
+                github_repo: space.github_repo.clone(),
                 git_detected: space.git_detected,
                 created_at_ms: space.created_at.timestamp_millis(),
                 group_key: project_key(space),
@@ -791,6 +795,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
         project.device_name.hash(&mut h);
         project.device_online.hash(&mut h);
         project.is_cloud.hash(&mut h);
+        project.github_repo.hash(&mut h);
         project.git_detected.hash(&mut h);
         ids(&mut h, &project.sessions);
     }

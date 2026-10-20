@@ -38,6 +38,8 @@ final class AppModel {
     }
 
     @MainActor lazy var voice = RemoteVoiceController(app: self)
+    /// Cloud for this account (status, GitHub, agent logins, billing).
+    @MainActor lazy var cloud = CloudStore(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -238,6 +240,7 @@ final class AppModel {
         AccountProfile.clear()
         clock?.invalidate()
         if forgetOnSignOut { try? FileManager.default.removeItem(at: Self.coreDir) }
+        cloud.reset()
         forgetOnSignOut = false
         // Nothing of the account stays in memory.
         frontPage = FrontPage()
@@ -363,6 +366,10 @@ final class AppModel {
             self?.refreshWorkspace()
         }
     }
+
+    /// Something outside the registry stream changed the workspace (a Cloud
+    /// project written here): rebuild now rather than on the next frame.
+    func workspaceDidChange() { refreshWorkspace() }
 
     private func refreshWorkspace() {
         guard let client else { return }
@@ -572,7 +579,7 @@ final class AppModel {
     }
 
     var projectOptions: [ProjectOption] {
-        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex)) }
+        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex), isCloud: $0.isCloud, githubRepo: $0.githubRepo) }
     }
 
     var hostOptions: [HostOption] {
@@ -621,6 +628,27 @@ final class AppModel {
         guard let client, let p = rawProjects.first(where: { $0.id == projectId }) else { return [] }
         let refs = (try? await client.listRefs(deviceId: p.deviceId, repoPath: p.path)) ?? []
         return refs.sorted { $0.current && !$1.current }.map(\.name)
+    }
+
+    /// A session on its own Cloud machine in `draft.projectId` (a Cloud
+    /// project, or any project whose repository Cloud reaches): the edge
+    /// mints the machine, then the first message is sent as usual — it
+    /// waits in the chat until the machine is up.
+    @MainActor
+    func createCloudSession(draft: NewSessionDraft, text: String, images: [StagedImage]) async throws -> String {
+        guard let client, let spaceId = draft.projectId else { throw CoreError.Closed }
+        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        let chatId = try await client.createCloudSession(spaceId: spaceId, config: config, branch: draft.branch, title: nil)
+        let handle = try client.openSession(chatId: chatId)
+        _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: .queue))
+        noteDeliveryActivity()
+        refreshWorkspace()
+        return chatId
+    }
+
+    /// Branches of a Cloud project's repository (GitHub's, through Cloud).
+    func cloudBranches(repo: String) async -> [String] {
+        (try? await client?.githubBranches(repo: repo)) ?? []
     }
 
     /// Create the chat, open it, and send the first message.

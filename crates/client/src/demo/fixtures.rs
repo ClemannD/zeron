@@ -262,6 +262,8 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
         };
     let zeron = |mut space: Space| {
         space.repository_id = Some("github.com/zeronsh/zeron".into());
+        // Cloud reaches it in the demo (its fixture repositories).
+        space.github_repo = Some("acme/web".into());
         space
     };
     vec![

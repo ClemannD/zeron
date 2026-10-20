@@ -24,6 +24,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         app.onSignedIn = { [weak self] in
             self?.showRoot(animated: true)
             self?.shellShown()
+            self?.showOnboardingIfNeeded()
         }
         app.onSignOut = { [weak self] in
             guard let self else { return }
@@ -61,6 +62,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         #endif
+        showOnboardingIfNeeded()
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
             DispatchQueue.main.async {
@@ -68,9 +70,58 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "new" { router.presentNewSession(prompt: nil) }
                 if route == "more" { router.showSettings() }
                 if route == "search" { router.showSearch() }
+                #if DEBUG
+                // Cloud screens straight away (screenshots, tests).
+                if route.hasPrefix("cloud") { self.openCloudRoute(route) }
+                #endif
             }
         }
     }
+
+    /// First run after signing in (or `-onboarding [github|agents|notifications|done]`):
+    /// GitHub, the agents' sign-ins and notifications, over the shell.
+    @MainActor private func showOnboardingIfNeeded() {
+        let args = ProcessInfo.processInfo.arguments
+        let forced = args.firstIndex(of: "-onboarding")
+        guard app.isSignedIn, forced != nil || OnboardingViewController.shouldShow(for: app) else { return }
+        var step = OnboardingViewController.Step.github
+        if let i = forced, i + 1 < args.count {
+            step = ["github": .github, "agents": .agents, "notifications": .notifications, "done": .done][args[i + 1]] ?? .github
+        }
+        let onboarding = OnboardingViewController(app: app, step: step)
+        onboarding.onFinish = { [weak self] startSession in
+            guard startSession, let router = self?.window?.rootViewController as? AppRouter else { return }
+            router.presentNewSession(prompt: nil)
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.window?.rootViewController?.present(onboarding, animated: !args.contains("-onboarding"))
+        }
+    }
+
+    #if DEBUG
+    /// `-route cloud` · `cloud:billing` · `cloud:agent:<harness>` · `cloud:repos` · `cloud:github`.
+    @MainActor private func openCloudRoute(_ route: String) {
+        guard let root = window?.rootViewController else { return }
+        let parts = route.split(separator: ":").map(String.init)
+        let settings = CloudSettingsViewController(app: app)
+        let nav = UINavigationController(rootViewController: settings)
+        switch parts.dropFirst().first {
+        case "billing": nav.pushViewController(BillingViewController(app: app), animated: false)
+        case "agent":
+            if let h = parts.dropFirst(2).first, let agent = CloudStore.agents.first(where: { $0.harness == h }) {
+                nav.pushViewController(AgentAccountsViewController(app: app, agent: agent), animated: false)
+            }
+        case "repos":
+            root.present(UINavigationController(rootViewController: CloudRepoPickerViewController(app: app)), animated: false)
+            return
+        case "github":
+            root.present(GitHubConnectViewController.sheet(app: app), animated: false)
+            return
+        default: break
+        }
+        root.present(nav, animated: false)
+    }
+    #endif
 
     /// The signed-in shell is up: refresh this phone's notification
     /// registration and open a session a notification was tapped for.

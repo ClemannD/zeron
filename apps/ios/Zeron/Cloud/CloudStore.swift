@@ -1,0 +1,257 @@
+import AuthenticationServices
+import UIKit
+
+/// Cloud for this account: status and credits, GitHub, the agents' logins,
+/// billing. Every screen reads it and observes it; reads are cached so a
+/// screen paints at once and revalidates. Main-thread only.
+@MainActor
+final class CloudStore {
+    /// The agents Cloud runs, with the vault providers behind them.
+    struct Agent: Equatable {
+        let harness: String
+        let name: String
+        /// Subscription sign-in provider (`claude` · `codex`).
+        let login: String
+        /// API key provider (`anthropic-key` · `openai-key`).
+        let key: String
+        /// What signing in is called ("Sign in with Claude").
+        let signInTitle: String
+        let keyName: String
+    }
+
+    static let agents: [Agent] = [
+        Agent(harness: "claude-code", name: "Claude Code", login: "claude", key: "anthropic-key", signInTitle: "Sign in with Claude", keyName: "Anthropic API key"),
+        Agent(harness: "codex", name: "Codex", login: "codex", key: "openai-key", signInTitle: "Sign in with ChatGPT", keyName: "OpenAI API key"),
+    ]
+
+    private(set) var info: CloudInfo?
+    private(set) var vault: VaultInfo?
+    private(set) var repos: [GithubRepoInfo]?
+    private(set) var accounts: [String: [CloudAccountInfo]] = [:]
+    private(set) var billing: BillingInfo?
+    private(set) var loading = false
+    private(set) var error: String?
+
+    private weak var app: AppModel?
+    private var observers: [UUID: () -> Void] = [:]
+    private var refreshTask: Task<Void, Never>?
+
+    init(app: AppModel) {
+        self.app = app
+    }
+
+    private var client: CoreClient? { app?.client }
+
+    // MARK: Reading
+
+    var available: Bool { info?.available ?? false }
+    var credits: Double? { billing.map(\.creditsTotal) ?? info?.credits }
+
+    var githubAccount: String? {
+        vault?.connections.first { $0.provider == "github" && !$0.needsReconnect }?.account
+    }
+
+    var githubConnected: Bool {
+        vault?.connections.contains { $0.provider == "github" && !$0.needsReconnect } ?? false
+    }
+
+    /// The active login (or key) Cloud uses for `agent`, by its friendliest name.
+    func activeAccount(_ agent: Agent) -> CloudAccountInfo? {
+        accounts[agent.login]?.first(where: \.active) ?? accounts[agent.key]?.first(where: \.active)
+    }
+
+    func hasAccount(_ agent: Agent) -> Bool {
+        !(accounts[agent.login] ?? []).isEmpty || !(accounts[agent.key] ?? []).isEmpty
+            || vault?.connections.contains { ($0.provider == agent.login || $0.provider == agent.key) && $0.accounts > 0 } == true
+    }
+
+    /// Cloud reaches `repo` (`owner/name`): its sessions can run there.
+    func reaches(_ repo: String?) -> Bool {
+        guard available, let repo, let repos else { return false }
+        return repos.contains { $0.fullName.caseInsensitiveCompare(repo) == .orderedSame }
+    }
+
+    // MARK: Observation
+
+    @discardableResult
+    func observe(_ handler: @escaping () -> Void) -> AnyObject {
+        let id = UUID()
+        observers[id] = handler
+        return Token { [weak self] in self?.observers[id] = nil }
+    }
+
+    private final class Token {
+        let cancel: () -> Void
+        init(cancel: @escaping () -> Void) { self.cancel = cancel }
+        deinit { cancel() }
+    }
+
+    private func changed() {
+        observers.values.forEach { $0() }
+    }
+
+    // MARK: Loading
+
+    /// Re-read everything (status first: the rest needs Cloud set up).
+    func refresh() {
+        guard let client, refreshTask == nil else { return }
+        loading = true
+        changed()
+        refreshTask = Task { [weak self] in
+            defer {
+                self?.refreshTask = nil
+                self?.loading = false
+                self?.changed()
+            }
+            do {
+                var info = try await client.cloudStatus()
+                // Cloud is part of every signed-in account: set it up.
+                if info.available, info.state == "off" {
+                    info = (try? await client.cloudEnable()) ?? info
+                }
+                self?.info = info
+                self?.error = nil
+                self?.changed()
+                guard info.available else { return }
+                async let vault = try? client.vaultStatus()
+                async let repos = try? client.githubRepos(query: nil)
+                async let billing = try? client.billingStatus()
+                var lists: [String: [CloudAccountInfo]] = [:]
+                for agent in Self.agents {
+                    for provider in [agent.login, agent.key] {
+                        lists[provider] = (try? await client.vaultAccounts(provider: provider)) ?? []
+                    }
+                }
+                self?.vault = await vault
+                self?.repos = await repos ?? []
+                self?.billing = await billing
+                self?.accounts = lists
+            } catch {
+                self?.error = Self.message(error)
+            }
+        }
+    }
+
+    func refreshAccounts() {
+        guard let client else { return }
+        Task { [weak self] in
+            var lists: [String: [CloudAccountInfo]] = [:]
+            for agent in Self.agents {
+                for provider in [agent.login, agent.key] {
+                    lists[provider] = (try? await client.vaultAccounts(provider: provider)) ?? []
+                }
+            }
+            self?.accounts = lists
+            self?.vault = (try? await client.vaultStatus()) ?? self?.vault
+            self?.changed()
+        }
+    }
+
+    func refreshGitHub() async {
+        guard let client else { return }
+        vault = (try? await client.vaultStatus()) ?? vault
+        repos = (try? await client.githubRepos(query: nil)) ?? repos
+        changed()
+    }
+
+    func refreshBilling() async {
+        guard let client else { return }
+        billing = (try? await client.billingStatus()) ?? billing
+        info = (try? await client.cloudStatus()) ?? info
+        changed()
+    }
+
+    /// Forget everything (sign-out).
+    func reset() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        info = nil
+        vault = nil
+        repos = nil
+        accounts = [:]
+        billing = nil
+        error = nil
+        changed()
+    }
+
+    // MARK: Accounts
+
+    func activate(_ account: CloudAccountInfo, provider: String) async throws {
+        guard let client else { return }
+        accounts[provider] = try await client.vaultActivate(provider: provider, slot: account.slot)
+        changed()
+    }
+
+    func remove(_ account: CloudAccountInfo, provider: String) async throws {
+        guard let client else { return }
+        accounts[provider] = try await client.vaultForget(provider: provider, slot: account.slot)
+        changed()
+        refreshAccounts()
+    }
+
+    func saveKey(_ key: String, for agent: Agent) async throws {
+        guard let client else { return }
+        try await client.vaultPutApiKey(provider: agent.key, key: key)
+        refreshAccounts()
+    }
+
+    // MARK: Projects and sessions
+
+    @discardableResult
+    func createProject(repo: String) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        let id = try await client.createCloudProject(repo: repo)
+        app?.workspaceDidChange()
+        return id
+    }
+
+    static func message(_ error: Error) -> String {
+        guard let core = error as? CoreError else { return error.localizedDescription }
+        switch core {
+        case let .NotFound(m), let .InvalidArgument(m), let .HostUnavailable(m), let .Unsupported(m),
+             let .HostError(m), let .Network(m), let .Auth(m), let .Storage(m), let .NotImplemented(m), let .Internal(m):
+            return m
+        case .Closed:
+            return "You're signed out."
+        }
+    }
+}
+
+/// Signs in to Claude or ChatGPT for Cloud: the provider's own page in the
+/// system auth sheet, which closes by itself once the provider answers; the
+/// login then lands in Cloud's vault (no token stays on the phone).
+@MainActor
+final class ProviderSignIn: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var session: ASWebAuthenticationSession?
+    private weak var anchor: UIView?
+
+    static let doneURL = "zeron://signed-in"
+
+    func run(_ agent: CloudStore.Agent, client: CoreClient, from view: UIView) async throws {
+        anchor = view
+        let start = try await client.providerLoginStart(provider: agent.login, doneUrl: Self.doneURL)
+        guard let url = URL(string: start.url) else { throw CoreError.Internal(message: "Bad sign-in link") }
+        let cancelled: Bool = await withCheckedContinuation { cont in
+            let s = ASWebAuthenticationSession(url: url, callback: .customScheme("zeron")) { _, error in
+                let wasCancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                cont.resume(returning: wasCancelled)
+            }
+            s.presentationContextProvider = self
+            // The browser's own cookies: already signed in to claude.ai or
+            // chatgpt.com there means one tap.
+            s.prefersEphemeralWebBrowserSession = false
+            session = s
+            if !s.start() { cont.resume(returning: true) }
+        }
+        session = nil
+        if cancelled {
+            client.providerLoginCancel(loginId: start.loginId)
+            throw CancellationError()
+        }
+        try await client.providerLoginFinish(loginId: start.loginId)
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        anchor?.window ?? ASPresentationAnchor()
+    }
+}
