@@ -265,11 +265,17 @@ pub fn run_app(config: UiConfig) {
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
             app_update::install_on_quit(cx);
+            // The background engine outlives this app: banners resume at
+            // once rather than after the last focus report goes stale.
+            let unfocus = quit_state.read(cx).viewport_closing();
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
                     gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
                 });
             async move {
+                if let Some(unfocus) = unfocus {
+                    unfocus.await;
+                }
                 if let Some(task) = shutdown {
                     let _ = task.await;
                 }

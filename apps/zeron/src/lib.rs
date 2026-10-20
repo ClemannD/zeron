@@ -142,7 +142,10 @@ pub fn init_logging(long_running: bool, mode: &str, stderr_only: bool) {
             .init();
         return;
     }
-    let log_file = long_running.then(|| open_log_file(mode)).flatten();
+    let log_file = long_running
+        .then(|| open_log_file(mode))
+        .flatten()
+        .map(|(file, path)| RotatingLog::new(file, path, LOG_LIMIT));
     let registry = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer());
@@ -201,13 +204,91 @@ pub fn run_mcp() -> anyhow::Result<()> {
 /// the exact moment they were needed). A launch that finds the canonical file
 /// locked logs to `zeron-{mode}.{pid}.log` instead; the next lock-holding
 /// launch sweeps pid-suffixed files older than a week.
-pub fn open_log_file(mode: &str) -> Option<std::fs::File> {
+pub fn open_log_file(mode: &str) -> Option<(std::fs::File, std::path::PathBuf)> {
     let dir = paths::data_dir().join("logs");
     open_log_file_in(&dir, mode)
 }
 
+/// How large a log grows before it moves to `.old`: the background engine
+/// and `zeron headless` run for weeks, and rotating only at launch would let
+/// their logs fill the disk.
+const LOG_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// A long-running process's log, kept to a bounded size: past `limit` bytes
+/// the file moves to `.old` (replacing the previous one) and a fresh one
+/// starts, locked as this process's like the first.
+pub struct RotatingLog {
+    state: std::sync::Mutex<LogState>,
+    path: std::path::PathBuf,
+    limit: u64,
+}
+
+struct LogState {
+    file: std::fs::File,
+    written: u64,
+}
+
+impl RotatingLog {
+    pub fn new(file: std::fs::File, path: std::path::PathBuf, limit: u64) -> Self {
+        let written = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        Self {
+            state: std::sync::Mutex::new(LogState { file, written }),
+            path,
+            limit,
+        }
+    }
+
+    fn rotate(&self, state: &mut LogState) {
+        use std::io::Write as _;
+        let _ = state.file.flush();
+        // Whatever happens, count afresh: a failed rotation is retried only
+        // after another `limit` of writes, never on every line.
+        state.written = 0;
+        let mut old = self.path.clone().into_os_string();
+        old.push(".old");
+        // Windows can't rename a file it holds open: keep writing to it then.
+        if std::fs::rename(&self.path, &old).is_err() {
+            return;
+        }
+        if let Ok(file) = std::fs::File::create(&self.path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            }
+            state.file = file;
+        }
+    }
+}
+
+impl std::io::Write for &RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.written >= self.limit {
+            self.rotate(&mut state);
+        }
+        let written = state.file.write(buf)?;
+        state.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .file
+            .flush()
+    }
+}
+
 /// Dir-parameterized body of [`open_log_file`] (unit-testable without env).
-fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> {
+fn open_log_file_in(
+    dir: &std::path::Path,
+    mode: &str,
+) -> Option<(std::fs::File, std::path::PathBuf)> {
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join(format!("zeron-{mode}.log"));
     #[cfg(unix)]
@@ -225,10 +306,10 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
         let rc = unsafe { libc::flock(existing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             // A live process owns the canonical log — leave it alone.
-            return std::fs::File::create(
-                dir.join(format!("zeron-{mode}.{}.log", std::process::id())),
-            )
-            .ok();
+            let overflow = dir.join(format!("zeron-{mode}.{}.log", std::process::id()));
+            return std::fs::File::create(&overflow)
+                .ok()
+                .map(|file| (file, overflow));
         }
         // No live writer: rotate, create fresh, and lock it as ours. (The
         // probe's flock dies with `existing`; a first-ever launch has nothing
@@ -240,12 +321,34 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
         let file = std::fs::File::create(&path).ok()?;
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         sweep_stale_pid_logs(dir, mode);
-        Some(file)
+        Some((file, path))
     }
     #[cfg(not(unix))]
     {
         let _ = std::fs::rename(&path, dir.join(format!("zeron-{mode}.log.old")));
-        std::fs::File::create(&path).ok()
+        std::fs::File::create(&path).ok().map(|file| (file, path))
+    }
+}
+
+#[cfg(test)]
+mod rotating_log_tests {
+    use super::RotatingLog;
+    use std::io::Write as _;
+
+    #[test]
+    fn a_log_past_its_limit_moves_to_old_and_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zeron-engine.log");
+        let file = std::fs::File::create(&path).unwrap();
+        let log = RotatingLog::new(file, path.clone(), 100);
+        let mut writer = &log;
+        writer.write_all(&[b'a'; 120]).unwrap();
+        // Over the limit: the next write rotates first.
+        writer.write_all(b"fresh\n").unwrap();
+        writer.flush().unwrap();
+        let old = dir.path().join("zeron-engine.log.old");
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), 120);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh\n");
     }
 }
 

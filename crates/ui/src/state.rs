@@ -193,6 +193,19 @@ pub fn launch_background_engine() {
     LAUNCH_BACKGROUND_ENGINE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// A background engine that keeps dying goes no further: from here on this
+/// app embeds its engine (sessions then end with the app, as before).
+const ENGINE_LOSS_LIMIT: usize = 3;
+const ENGINE_LOSS_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Record an unasked engine loss; true once they come too often to keep
+/// launching one.
+fn record_engine_loss(losses: &mut Vec<std::time::Instant>, now: std::time::Instant) -> bool {
+    losses.retain(|at| now.saturating_duration_since(*at) < ENGINE_LOSS_WINDOW);
+    losses.push(now);
+    losses.len() >= ENGINE_LOSS_LIMIT
+}
+
 /// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
@@ -265,7 +278,8 @@ impl EngineHandle {
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
         };
-        if LAUNCH_BACKGROUND_ENGINE.load(std::sync::atomic::Ordering::SeqCst)
+        let launching = LAUNCH_BACKGROUND_ENGINE.load(std::sync::atomic::Ordering::SeqCst);
+        if Self::should_launch_background(launching, engine_config.ipc_port).await
             && let Some(handle) = Self::launch_background(&engine_config).await
         {
             return Ok(handle);
@@ -356,6 +370,27 @@ impl EngineHandle {
         Ok(handle)
     }
 
+    /// Whether to start the background engine rather than embed: launching
+    /// is on, the port is a real one (port 0 has no address a background
+    /// engine could be found at), and nothing else holds it — a stranger on
+    /// the port would keep the engine from ever serving, so embed at once
+    /// as before.
+    async fn should_launch_background(launching: bool, ipc_port: u16) -> bool {
+        if !launching || ipc_port == 0 {
+            return false;
+        }
+        let taken = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::net::TcpStream::connect(("127.0.0.1", ipc_port)),
+        )
+        .await
+        .is_ok_and(|connected| connected.is_ok());
+        if taken {
+            tracing::warn!(port = ipc_port, "the engine port is held by something else; embedding");
+        }
+        !taken
+    }
+
     /// Start the app's background engine and attach to it once it serves
     /// the port. `None` falls back to embedding: it couldn't start, exited,
     /// or didn't come up in time.
@@ -381,8 +416,11 @@ impl EngineHandle {
                 return None;
             }
             if std::time::Instant::now() >= deadline {
+                // Ours and never served: stop it, so it lets go of the data
+                // directory the embedded engine is about to take.
                 tracing::warn!("background engine didn't come up in time; embedding one");
-                zeron_engine::managed::reap(child);
+                let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -857,6 +895,8 @@ pub struct AppState {
     /// The next engine exit is ours (sign-out, a workspace switch): the shell
     /// replaces the runtime itself.
     engine_exit_expected: bool,
+    /// When separate engines went away unasked, recently (crash-loop guard).
+    engine_losses: Vec<std::time::Instant>,
     /// This window's id to the engine, and whether one of the app's windows
     /// is focused — the engine holds desktop banners while one is.
     viewport_id: String,
@@ -978,6 +1018,7 @@ impl AppState {
             boot_config: None,
             connection_task: None,
             engine_exit_expected: false,
+            engine_losses: Vec::new(),
             viewport_id: uuid::Uuid::new_v4().to_string(),
             viewport_focused: false,
             focus_task: None,
@@ -3138,6 +3179,13 @@ impl AppState {
         let Some(config) = self.boot_config.clone() else {
             return;
         };
+        if record_engine_loss(&mut self.engine_losses, std::time::Instant::now()) {
+            tracing::error!(
+                losses = self.engine_losses.len(),
+                "the background engine keeps going away; embedding the engine from now on"
+            );
+            LAUNCH_BACKGROUND_ENGINE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         tracing::warn!("lost the engine connection; reconnecting");
         self.engine = None;
         self.watch_tasks.clear();
@@ -3189,6 +3237,21 @@ impl AppState {
                 cx.background_executor().timer(REPEAT).await;
             }
         }));
+    }
+
+    /// Tell the engine this app's windows are going away unfocused (the app
+    /// is quitting), so banners aren't held back for a focus report that's
+    /// about to go stale.
+    pub fn viewport_closing(&self) -> Option<impl std::future::Future<Output = ()> + use<>> {
+        let engine = self.engine.clone().filter(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        })?;
+        let params = serde_json::json!({ "viewportId": self.viewport_id, "focused": false });
+        Some(async move {
+            let _ = engine.client().call(methods::SET_VIEWPORT_FOCUS, params).await;
+        })
     }
 
     /// Whether the engine posts desktop banners itself (the app then posts
@@ -4627,6 +4690,36 @@ mod tests {
 
         b.shutdown().await;
         a.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_background_engine_starts_only_on_a_free_real_port() {
+        let free = free_port().await;
+        assert!(EngineHandle::should_launch_background(true, free).await);
+        assert!(!EngineHandle::should_launch_background(false, free).await);
+        // Port 0 has no address a background engine could be found at.
+        assert!(!EngineHandle::should_launch_background(true, 0).await);
+        // A stranger on the port would keep it from ever serving.
+        let squatter = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let taken = squatter.local_addr().unwrap().port();
+        assert!(!EngineHandle::should_launch_background(true, taken).await);
+    }
+
+    #[test]
+    fn an_engine_that_keeps_dying_stops_being_launched() {
+        let start = std::time::Instant::now();
+        let mut losses = Vec::new();
+        assert!(!record_engine_loss(&mut losses, start));
+        assert!(!record_engine_loss(&mut losses, start + std::time::Duration::from_secs(30)));
+        // Spread out, losses age away: an update restart now and then is fine.
+        assert!(!record_engine_loss(
+            &mut losses,
+            start + ENGINE_LOSS_WINDOW + std::time::Duration::from_secs(40)
+        ));
+        let burst = start + std::time::Duration::from_secs(600);
+        assert!(!record_engine_loss(&mut losses, burst));
+        assert!(!record_engine_loss(&mut losses, burst + std::time::Duration::from_secs(1)));
+        assert!(record_engine_loss(&mut losses, burst + std::time::Duration::from_secs(2)));
     }
 
     #[tokio::test]

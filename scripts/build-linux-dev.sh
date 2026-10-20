@@ -46,12 +46,13 @@ docker run --rm --platform linux/amd64 \
   -e CARGO_TARGET_DIR=/target \
   -e CARGO_PROFILE_RELEASE_LTO=off \
   -w /src "$IMAGE" \
-  sh -c "cargo build --release -p zeron && cp /target/release/zeron /src/target/package-dev/zeron.linux-x86_64"
+  sh -c "cargo build --release -p zeron && cp /target/release/zeron /src/target/package-dev/zeron.linux-x86_64 && cp /target/release/zeron-engine /src/target/package-dev/zeron-engine.linux-x86_64"
 
 STAGE="$OUT/zeron-$VERSION-linux-x86_64"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 mv "$OUT/zeron.linux-x86_64" "$STAGE/zeron"
+mv "$OUT/zeron-engine.linux-x86_64" "$STAGE/zeron-engine"
 tar -czf "$STAGE.tar.gz" -C "$OUT" "$(basename "$STAGE")"
 rm -rf "$STAGE"
 echo "$VERSION" > "$OUT/latest.txt"

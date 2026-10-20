@@ -51,8 +51,11 @@ Binaries `zeron` (app + CLI) and `zeron-engine` (the app's background engine, no
   The app reconnects when the connection drops (starting it again if it is gone) without resetting
   what's on screen, and stops it itself only to replace the runtime (sign-out, the local→synced
   switch). After an app update it restarts into the new version once no run or terminal is live.
-  If it can't start, the app embeds the engine **in-process** as before (RPC over an in-memory
+  If it can't start — or the port is 0, or something else holds the port, or it went away three
+  times in two minutes — the app embeds the engine **in-process** as before (RPC over an in-memory
   duplex — same protocol — and serving that engine on the IPC port); `ZERON_EMBED_ENGINE=1` forces it.
+  The engine stops by itself once idle if its app is moved to the Trash or uninstalled, and its log
+  (like every long-running mode's) moves to `.old` past 64 MB rather than growing for weeks.
 - Desktop banners are the engine's (`desktop_notify.rs`, advertised as `desktop-notifications-v1`):
   finished runs, questions, failures, connection loss and agent updates keep arriving with the app
   closed. Preferences come from the app's `ui-settings.json`; "only in the background" uses window

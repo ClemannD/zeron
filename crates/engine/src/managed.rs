@@ -205,6 +205,34 @@ fn installed_executable(exe: &Path, install: &zeron_update::InstallKind) -> Path
     }
 }
 
+/// The app was moved to the Trash or uninstalled: once nothing is running,
+/// stop — an engine left running from a deleted app would keep the Trash
+/// from emptying ("in use") with no app left to quit it. Updates keep the
+/// installed path, so they never trigger this.
+fn stop_when_uninstalled(
+    runtime: &crate::EngineRuntime,
+    stop: tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    const CHECK: Duration = Duration::from_secs(30);
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let installed = installed_executable(&exe, &zeron_update::detect_install());
+    let sessions = runtime.core().sessions.clone();
+    let terminals = runtime.core().terminals.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(CHECK).await;
+            if installed.exists() || sessions.any_active() || terminals.any_open() {
+                continue;
+            }
+            tracing::info!(path = %installed.display(), "the app is gone; stopping the background engine");
+            let _ = stop.send(());
+            return;
+        }
+    });
+}
+
 /// Relaunch this engine with its own arguments and environment; the new one
 /// waits for this one to release the data directory.
 fn relaunch_self() -> anyhow::Result<()> {
@@ -256,11 +284,18 @@ impl Engine {
             let _ = restart_stop.send(());
             Ok(())
         });
-        let boot = engine.spawn_boot(config.clone(), lock, Some(config.ipc_port), |runtime| {
-            if let Some(updater) = runtime.core().updater() {
-                updater.restart_when_superseded();
-            }
-        });
+        let uninstalled_stop = stop_tx.clone();
+        let boot = engine.spawn_boot(
+            config.clone(),
+            lock,
+            Some(config.ipc_port),
+            move |runtime| {
+                if let Some(updater) = runtime.core().updater() {
+                    updater.restart_when_superseded();
+                }
+                stop_when_uninstalled(runtime, uninstalled_stop);
+            },
+        );
 
         let mut auth_state = engine.auth.watch_state();
         let mut assembly = engine.state();
