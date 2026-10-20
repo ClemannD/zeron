@@ -193,17 +193,28 @@ pub fn launch_background_engine() {
     LAUNCH_BACKGROUND_ENGINE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// A background engine that keeps dying goes no further: from here on this
-/// app embeds its engine (sessions then end with the app, as before).
-const ENGINE_LOSS_LIMIT: usize = 3;
-const ENGINE_LOSS_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// After a background engine goes away unasked, the app starts it again —
+/// first at once-ish, then backing off so a crashing engine can't spin. One
+/// that keeps dying is a bug to see, not hide: past the last delay the app
+/// stops and shows the failure (with Retry). Embedding wouldn't help — an
+/// engine bug crashes an in-process engine too, taking the window with it.
+const ENGINE_RESPAWN_BACKOFF: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+];
+const ENGINE_LOSS_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Record an unasked engine loss; true once they come too often to keep
-/// launching one.
-fn record_engine_loss(losses: &mut Vec<std::time::Instant>, now: std::time::Instant) -> bool {
+/// Record an unasked engine loss: how long to wait before starting it
+/// again, or `None` once losses come too often to keep trying.
+fn record_engine_loss(
+    losses: &mut Vec<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
     losses.retain(|at| now.saturating_duration_since(*at) < ENGINE_LOSS_WINDOW);
     losses.push(now);
-    losses.len() >= ENGINE_LOSS_LIMIT
+    ENGINE_RESPAWN_BACKOFF.get(losses.len() - 1).copied()
 }
 
 /// External daemon over `ws://127.0.0.1:{port}`.
@@ -386,7 +397,10 @@ impl EngineHandle {
         .await
         .is_ok_and(|connected| connected.is_ok());
         if taken {
-            tracing::warn!(port = ipc_port, "the engine port is held by something else; embedding");
+            tracing::warn!(
+                port = ipc_port,
+                "the engine port is held by something else; embedding"
+            );
         }
         !taken
     }
@@ -895,8 +909,10 @@ pub struct AppState {
     /// The next engine exit is ours (sign-out, a workspace switch): the shell
     /// replaces the runtime itself.
     engine_exit_expected: bool,
-    /// When separate engines went away unasked, recently (crash-loop guard).
+    /// When separate engines went away unasked, recently (respawn backoff).
     engine_losses: Vec<std::time::Instant>,
+    /// The pending respawn after a loss.
+    reconnect_task: Option<Task<()>>,
     /// This window's id to the engine, and whether one of the app's windows
     /// is focused — the engine holds desktop banners while one is.
     viewport_id: String,
@@ -1019,6 +1035,7 @@ impl AppState {
             connection_task: None,
             engine_exit_expected: false,
             engine_losses: Vec::new(),
+            reconnect_task: None,
             viewport_id: uuid::Uuid::new_v4().to_string(),
             viewport_focused: false,
             focus_task: None,
@@ -3154,6 +3171,10 @@ impl AppState {
             s.auth = None;
             s.data_dir = Some(data_dir);
             s.boot_config = Some(config.clone());
+            // A deliberate start (launch, Retry, a runtime switch) begins
+            // the respawn backoff afresh.
+            s.engine_losses.clear();
+            s.reconnect_task = None;
             cx.notify();
         });
         Self::connect(state, config, cx);
@@ -3179,22 +3200,43 @@ impl AppState {
         let Some(config) = self.boot_config.clone() else {
             return;
         };
-        if record_engine_loss(&mut self.engine_losses, std::time::Instant::now()) {
-            tracing::error!(
-                losses = self.engine_losses.len(),
-                "the background engine keeps going away; embedding the engine from now on"
-            );
-            LAUNCH_BACKGROUND_ENGINE.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        tracing::warn!("lost the engine connection; reconnecting");
+        let respawn = record_engine_loss(&mut self.engine_losses, std::time::Instant::now());
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
         self.queue_task = None;
         self.change_request_tasks.clear();
         self.focus_task = None;
-        let state = cx.entity();
-        cx.defer(move |cx| Self::connect(state, config, cx));
+        let Some(delay) = respawn else {
+            let log = config.data_dir.join("logs").join("zeron-engine.log");
+            tracing::error!(
+                losses = self.engine_losses.len(),
+                "the background engine keeps stopping; giving up until Retry"
+            );
+            self.connection = ConnectionStatus::Failed(format!(
+                "Zeron's engine keeps stopping unexpectedly. Details are in {}.",
+                log.display()
+            ));
+            cx.notify();
+            return;
+        };
+        tracing::warn!(?delay, "lost the engine connection; reconnecting");
+        self.reconnect_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = cx.update(|cx| {
+                let Some(state) = this.upgrade() else {
+                    return;
+                };
+                // The shell may have replaced the runtime meanwhile.
+                let still_down = {
+                    let state = state.read(cx);
+                    state.engine.is_none() && !state.engine_exit_expected
+                };
+                if still_down {
+                    Self::connect(state, config, cx);
+                }
+            });
+        }));
         cx.notify();
     }
 
@@ -3250,7 +3292,10 @@ impl AppState {
         })?;
         let params = serde_json::json!({ "viewportId": self.viewport_id, "focused": false });
         Some(async move {
-            let _ = engine.client().call(methods::SET_VIEWPORT_FOCUS, params).await;
+            let _ = engine
+                .client()
+                .call(methods::SET_VIEWPORT_FOCUS, params)
+                .await;
         })
     }
 
@@ -4700,26 +4745,45 @@ mod tests {
         // Port 0 has no address a background engine could be found at.
         assert!(!EngineHandle::should_launch_background(true, 0).await);
         // A stranger on the port would keep it from ever serving.
-        let squatter = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let squatter = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let taken = squatter.local_addr().unwrap().port();
         assert!(!EngineHandle::should_launch_background(true, taken).await);
     }
 
     #[test]
-    fn an_engine_that_keeps_dying_stops_being_launched() {
+    fn a_lost_engine_respawns_with_backoff_then_stops_to_show_the_failure() {
+        use std::time::Duration;
         let start = std::time::Instant::now();
         let mut losses = Vec::new();
-        assert!(!record_engine_loss(&mut losses, start));
-        assert!(!record_engine_loss(&mut losses, start + std::time::Duration::from_secs(30)));
-        // Spread out, losses age away: an update restart now and then is fine.
-        assert!(!record_engine_loss(
-            &mut losses,
-            start + ENGINE_LOSS_WINDOW + std::time::Duration::from_secs(40)
-        ));
-        let burst = start + std::time::Duration::from_secs(600);
-        assert!(!record_engine_loss(&mut losses, burst));
-        assert!(!record_engine_loss(&mut losses, burst + std::time::Duration::from_secs(1)));
-        assert!(record_engine_loss(&mut losses, burst + std::time::Duration::from_secs(2)));
+        assert_eq!(
+            record_engine_loss(&mut losses, start),
+            Some(Duration::from_secs(1))
+        );
+        // Spread out, losses age away: an update restart now and then
+        // always gets the short delay.
+        assert_eq!(
+            record_engine_loss(
+                &mut losses,
+                start + ENGINE_LOSS_WINDOW + Duration::from_secs(1)
+            ),
+            Some(Duration::from_secs(1))
+        );
+        let burst = start + Duration::from_secs(3600);
+        let delays: Vec<_> = (0..5)
+            .map(|n| record_engine_loss(&mut losses, burst + Duration::from_secs(n)))
+            .collect();
+        assert_eq!(
+            delays,
+            vec![
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(5)),
+                Some(Duration::from_secs(15)),
+                None,
+            ]
+        );
     }
 
     #[tokio::test]
