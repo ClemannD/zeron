@@ -251,12 +251,23 @@ final class AgentAccountsViewController: UITableViewController {
             cell.accessibilityIdentifier = "account-\(account.id)"
             return cell
         case let .add(row):
+            // Quiet, as on the desktop: a muted plus and the label in the
+            // text color, lined up with the account names above.
             let disabled = signIn != nil || busy != nil
-            let cell = plainCell(text: row.title, detail: nil, symbol: "plus", tint: disabled ? Palette.tertiary : Palette.accent)
-            var c = cell.contentConfiguration as! UIListContentConfiguration
-            c.textProperties.color = disabled ? Palette.tertiary : Palette.accent
-            c.textProperties.font = Fonts.ui(.sansMedium, 16)
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            var c = UIListContentConfiguration.cell()
+            c.text = row.title
+            c.textProperties.font = Fonts.ui(.sansMedium, 15)
+            c.textProperties.color = disabled ? Palette.tertiary : Palette.text
+            c.image = CloudUI.symbol("plus", 14, weight: .semibold)
+            c.imageProperties.tintColor = disabled ? Palette.tertiary : Palette.secondary
+            c.imageProperties.reservedLayoutSize = CGSize(width: 22, height: 22)
+            c.imageToTextPadding = 14
+            c.directionalLayoutMargins.top = 13
+            c.directionalLayoutMargins.bottom = 13
             cell.contentConfiguration = c
+            cell.backgroundColor = Palette.elevated
+            cell.separatorInset = UIEdgeInsets(top: 0, left: 56, bottom: 0, right: 0)
             cell.accessibilityIdentifier = row.id
             return cell
         case .waiting:
