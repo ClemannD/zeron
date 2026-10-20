@@ -466,6 +466,23 @@ pub fn out_of_credits(status: &CloudStatus) -> bool {
     status.credits.is_some_and(|credits| credits <= 0.0)
 }
 
+/// "You're out of Cloud credits", with the button that opens Billing.
+pub fn show_out_of_credits(message: &'static str, cx: &mut gpui::App) {
+    crate::toast::show_with_action(
+        cx,
+        crate::toast::ToastKind::Error,
+        message,
+        "Add credits",
+        |window, cx| {
+            if let Some(Some(shell)) = window.root::<crate::shell::Shell>() {
+                shell.update(cx, |shell, cx| {
+                    shell.open_settings(crate::shell::SettingsSection::Billing, cx)
+                });
+            }
+        },
+    );
+}
+
 /// `CloudStatus`, or why it could not be read.
 pub async fn fetch_status(engine: EngineHandle) -> Result<CloudStatus, String> {
     engine

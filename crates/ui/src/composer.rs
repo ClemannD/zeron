@@ -8811,18 +8811,9 @@ impl Composer {
             _ if no_content => {}
             // Out of credits, a Cloud send can't start or wake its machine:
             // say so instead of a button that silently does nothing.
-            _ if self.out_of_cloud_credits(cx) => crate::toast::show_with_action(
-                cx,
-                crate::toast::ToastKind::Error,
+            _ if self.out_of_cloud_credits(cx) => crate::cloud::show_out_of_credits(
                 "You're out of Cloud credits. Add credits to send.",
-                "Add credits",
-                |window, cx| {
-                    if let Some(Some(shell)) = window.root::<crate::shell::Shell>() {
-                        shell.update(cx, |shell, cx| {
-                            shell.open_settings(crate::shell::SettingsSection::Billing, cx)
-                        });
-                    }
-                },
+                cx,
             ),
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
@@ -9138,9 +9129,14 @@ impl Composer {
                 // the done-chime) in the queue→drain→sync gap.
                 s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
                 // A Cloud chat's machine may be starting or asleep: read
-                // where it stands (and follow it until it is up).
+                // where it stands (and follow it until it is up) — and
+                // whether credits allow it to, which can have changed since
+                // the status was last read.
                 if s.cloud_enabled() {
                     s.refresh_cloud_sessions(cx);
+                    if boot.is_some() {
+                        s.recheck_cloud_credits(cx);
+                    }
                 }
             }
             cx.notify();

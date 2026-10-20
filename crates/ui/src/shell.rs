@@ -13600,8 +13600,12 @@ impl Render for Shell {
                 |this: &mut Shell, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
                     let active = window.is_window_active();
-                    this.state
-                        .update(cx, |state, cx| state.set_viewport_focused(active, cx));
+                    this.state.update(cx, |state, cx| {
+                        state.set_viewport_focused(active, cx);
+                        if active {
+                            state.window_activated(cx);
+                        }
+                    });
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
                     {

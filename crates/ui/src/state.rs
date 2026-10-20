@@ -676,6 +676,18 @@ pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 /// machine's own first step ("Started a machine") replaces it in place.
 const CLOUD_STARTING_STEP: &str = "Starting a machine";
 const CLOUD_WAKING_STEP: &str = "Waking the machine";
+/// The setup step once Cloud refused to start or wake the machine for lack
+/// of credits. The message stays queued: credits added, the machine starts
+/// and runs it.
+const CLOUD_NO_CREDITS_STEP: &str = "Out of Cloud credits";
+
+/// How often Cloud's status (credits above all) is re-read while attached,
+/// and how stale it may be when a window comes forward.
+const CLOUD_STATUS_POLL: std::time::Duration = std::time::Duration::from_secs(120);
+const CLOUD_STATUS_FOCUS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// A Cloud read that failed is tried again this soon (unknown credits let
+/// sends through).
+const CLOUD_STATUS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The one-shot timer behind [`AppState::watch_clock_transitions`].
 #[derive(Default)]
@@ -909,6 +921,10 @@ pub struct AppState {
     /// The next engine exit is ours (sign-out, a workspace switch): the shell
     /// replaces the runtime itself.
     engine_exit_expected: bool,
+    /// When Cloud's status was last read, and the reads under way.
+    cloud_status_read_at: Option<std::time::Instant>,
+    cloud_status_task: Option<Task<()>>,
+    cloud_recheck_task: Option<Task<()>>,
     /// When separate engines went away unasked, recently (respawn backoff).
     engine_losses: Vec<std::time::Instant>,
     /// The pending respawn after a loss.
@@ -1034,6 +1050,9 @@ impl AppState {
             boot_config: None,
             connection_task: None,
             engine_exit_expected: false,
+            cloud_status_read_at: None,
+            cloud_status_task: None,
+            cloud_recheck_task: None,
             engine_losses: Vec::new(),
             reconnect_task: None,
             viewport_id: uuid::Uuid::new_v4().to_string(),
@@ -2409,10 +2428,115 @@ impl AppState {
 
     /// Publish a fresh `CloudStatus`; observers repaint only on change.
     pub fn set_cloud_status(&mut self, status: zeron_proto::CloudStatus, cx: &mut Context<Self>) {
+        self.cloud_status_read_at = Some(std::time::Instant::now());
+        let out_of_credits = crate::cloud::out_of_credits(&status);
         if self.cloud_status.as_ref() != Some(&status) {
             self.cloud_status = Some(status);
             cx.notify();
         }
+        if out_of_credits && self.block_cloud_setups_for_credits() {
+            crate::cloud::show_out_of_credits(
+                "You're out of Cloud credits. Your message will send once you add some.",
+                cx,
+            );
+            cx.notify();
+        }
+    }
+
+    /// Cloud refused (or will refuse) to start or wake a machine for lack of
+    /// credits: every send still waiting on one says so instead of "Waking
+    /// the machine" forever, and stops reading as working. The message
+    /// stays queued for when credits are added. True when any changed.
+    fn block_cloud_setups_for_credits(&mut self) -> bool {
+        let mut blocked = Vec::new();
+        for (chat_id, echoes) in &mut self.echoes {
+            for entry in echoes.iter_mut() {
+                if zeron_proto::cloud_setup_message_id(&entry.id).is_none() {
+                    continue;
+                }
+                for part in &mut entry.parts {
+                    if let zeron_doc::MessagePart::Tool {
+                        call: zeron_proto::ToolCall::Unknown { name, .. },
+                        is_error,
+                        resolved,
+                        ..
+                    } = part
+                        && (name == CLOUD_WAKING_STEP || name == CLOUD_STARTING_STEP)
+                    {
+                        *name = CLOUD_NO_CREDITS_STEP.into();
+                        *is_error = true;
+                        *resolved = true;
+                        blocked.push(chat_id.clone());
+                    }
+                }
+            }
+        }
+        for chat_id in &blocked {
+            self.pending_sends.remove(chat_id);
+        }
+        if !blocked.is_empty() {
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        }
+        !blocked.is_empty()
+    }
+
+    /// Re-read Cloud's status (credits above all), nothing else. A failed
+    /// read is retried soon: unknown credits let a Cloud send through.
+    pub fn refresh_cloud_status(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        if !self.signed_in() {
+            return;
+        }
+        self.cloud_status_task = Some(cx.spawn(async move |this, cx| {
+            let status = crate::cloud::fetch_status(engine).await;
+            this.update(cx, |state, cx| match status {
+                Ok(status) => state.set_cloud_status(status, cx),
+                Err(error) => {
+                    tracing::debug!(%error, "Cloud status read failed; retrying");
+                    state.cloud_status_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(CLOUD_STATUS_RETRY).await;
+                        this.update(cx, |state, cx| state.refresh_cloud_status(cx))
+                            .ok();
+                    }));
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-read Cloud's status when the last read is older than `max_age`.
+    pub fn refresh_cloud_status_if_stale(
+        &mut self,
+        max_age: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .cloud_status_read_at
+            .is_some_and(|at| at.elapsed() < max_age)
+        {
+            return;
+        }
+        self.refresh_cloud_status(cx);
+    }
+
+    /// A window came forward: credits may have run out (or been added)
+    /// while it was away.
+    pub fn window_activated(&mut self, cx: &mut Context<Self>) {
+        self.refresh_cloud_status_if_stale(CLOUD_STATUS_FOCUS_MAX_AGE, cx);
+    }
+
+    /// A send is starting or waking a Cloud machine: read the credits now,
+    /// and again once the edge has had its say on the wake.
+    pub fn recheck_cloud_credits(&mut self, cx: &mut Context<Self>) {
+        const AFTER_WAKE: std::time::Duration = std::time::Duration::from_secs(5);
+        self.refresh_cloud_status(cx);
+        self.cloud_recheck_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AFTER_WAKE).await;
+            this.update(cx, |state, cx| state.refresh_cloud_status(cx))
+                .ok();
+        }));
     }
 
     /// Whether Cloud is on for this account (its logical device exists).
@@ -3417,6 +3541,23 @@ impl AppState {
                 AppState::apply_harness_updates,
             ));
         }
+        // Credits change on their own (use, renewals, purchases elsewhere):
+        // keep the status the composer's Cloud gate reads current.
+        watch_tasks.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CLOUD_STATUS_POLL).await;
+                if this
+                    .update(cx, |state, cx| {
+                        if state.cloud_enabled() {
+                            state.refresh_cloud_status(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -6853,6 +6994,40 @@ mod tests {
         state.push_cloud_setup_echo("c1", "m1", 0, false);
         state.push_cloud_setup_echo("c1", "m2", 0, true);
         assert!(!state.cloud_setup_echo_pending());
+    }
+
+    #[test]
+    fn a_wake_refused_for_credits_says_so_and_stops_working() {
+        let mut state = AppState::new();
+        state.push_cloud_setup_echo("c1", "m1", 0, true);
+        state.begin_pending_send("c1", "m1", chrono::Utc::now());
+        assert!(state.send_pending("c1", chrono::Utc::now()));
+        assert!(state.block_cloud_setups_for_credits());
+        let step = state.echoes["c1"]
+            .iter()
+            .find(|entry| entry.id == zeron_proto::cloud_setup_entry_id("m1"))
+            .expect("placeholder");
+        let zeron_doc::MessagePart::Tool {
+            call,
+            is_error,
+            resolved,
+            ..
+        } = &step.parts[0]
+        else {
+            panic!("{:?}", step.parts)
+        };
+        assert_eq!(
+            call,
+            &zeron_proto::ToolCall::Unknown {
+                name: CLOUD_NO_CREDITS_STEP.into(),
+                input: None,
+            }
+        );
+        assert!(*is_error && *resolved);
+        // No more "working" for a send that can't run yet.
+        assert!(!state.send_pending("c1", chrono::Utc::now()));
+        // Once said, it isn't said again (one toast per send).
+        assert!(!state.block_cloud_setups_for_credits());
     }
 
     #[test]
