@@ -75,6 +75,11 @@ final class OnboardingViewController: UIViewController {
         wallpaper.frame = view.bounds
         wallpaper.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(wallpaper)
+        // The page runs edge to edge on a phone, so it can't sit in a clear
+        // patch of the wallpaper as the desktop's column does: blur it to its
+        // colours instead, so text over it stays legible. The appearance step
+        // previews it sharp.
+        wallpaper.softened = true
         progress.axis = .horizontal
         progress.spacing = 4
         progress.alignment = .center
@@ -289,10 +294,14 @@ final class OnboardingViewController: UIViewController {
             effect.setAccessory(menu)
             rows.append(effect)
         }
+        let wallpaperGroup = UIStackView(arrangedSubviews: [CloudCard(rows: rows)])
+        wallpaperGroup.axis = .vertical
+        wallpaperGroup.spacing = 10
+        if set { wallpaperGroup.insertArrangedSubview(WallpaperPreview(), at: 0) }
         return stack([
             header,
             group("Color scheme", scheme),
-            group("New chat wallpaper", CloudCard(rows: rows)),
+            group("New chat wallpaper", wallpaperGroup),
         ])
     }
 
@@ -599,5 +608,39 @@ final class OnboardingViewController: UIViewController {
         Self.markDone(for: app)
         let done = onFinish
         dismiss(animated: true) { done?(startSession) }
+    }
+}
+
+/// The wallpaper as a new chat shows it — effect and all — since the page
+/// behind onboarding only shows it blurred.
+private final class WallpaperPreview: UIView {
+    private let imageView = UIImageView()
+    private var observer: NSObjectProtocol?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = Palette.controlFill
+        layer.cornerRadius = 18
+        layer.cornerCurve = .continuous
+        clipsToBounds = true
+        imageView.contentMode = .scaleAspectFill
+        imageView.frame = bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(imageView)
+        heightAnchor.constraint(equalToConstant: 132).isActive = true
+        observer = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.reload() }
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: WallpaperPreview, _) in self.reload() }
+        accessibilityIdentifier = "onboarding-wallpaper-preview"
+        reload()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    deinit { observer.map(NotificationCenter.default.removeObserver) }
+
+    private func reload() {
+        WallpaperStore.render(dark: traitCollection.userInterfaceStyle == .dark) { [weak self] render in
+            self?.imageView.image = render?.image
+        }
     }
 }
