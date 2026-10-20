@@ -8811,10 +8811,18 @@ impl Composer {
             _ if no_content => {}
             // Out of credits, a Cloud send can't start or wake its machine:
             // say so instead of a button that silently does nothing.
-            _ if self.out_of_cloud_credits(cx) => crate::toast::show(
+            _ if self.out_of_cloud_credits(cx) => crate::toast::show_with_action(
                 cx,
                 crate::toast::ToastKind::Error,
-                "You're out of Cloud credits. Add credits in Settings → Billing to send.",
+                "You're out of Cloud credits. Add credits to send.",
+                "Add credits",
+                |window, cx| {
+                    if let Some(Some(shell)) = window.root::<crate::shell::Shell>() {
+                        shell.update(cx, |shell, cx| {
+                            shell.open_settings(crate::shell::SettingsSection::Billing, cx)
+                        });
+                    }
+                },
             ),
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
