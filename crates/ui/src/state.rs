@@ -2454,6 +2454,7 @@ impl AppState {
                 if zeron_proto::cloud_setup_message_id(&entry.id).is_none() {
                     continue;
                 }
+                let mut changed = false;
                 for part in &mut entry.parts {
                     if let zeron_doc::MessagePart::Tool {
                         call: zeron_proto::ToolCall::Unknown { name, .. },
@@ -2466,8 +2467,13 @@ impl AppState {
                         *name = CLOUD_NO_CREDITS_STEP.into();
                         *is_error = true;
                         *resolved = true;
-                        blocked.push(chat_id.clone());
+                        changed = true;
                     }
+                }
+                if changed {
+                    // Not streaming any more: the turn isn't under way.
+                    entry.status = Some(zeron_doc::MessageStatus::Complete);
+                    blocked.push(chat_id.clone());
                 }
             }
         }
@@ -6999,10 +7005,30 @@ mod tests {
     #[test]
     fn a_wake_refused_for_credits_says_so_and_stops_working() {
         let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        state.push_echo(
+            "c1",
+            SessionMessageEntry {
+                id: "m1".into(),
+                role: zeron_doc::MessageRole::User,
+                parts: vec![],
+                created_at: 0,
+                device_id: "d".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            },
+        );
         state.push_cloud_setup_echo("c1", "m1", 0, true);
         state.begin_pending_send("c1", "m1", chrono::Utc::now());
         assert!(state.send_pending("c1", chrono::Utc::now()));
+        assert!(state.cloud_setup_streaming());
         assert!(state.block_cloud_setups_for_credits());
+        // Neither the overlay nor the placeholder keeps the chat Working.
+        assert_eq!(
+            state.indicator_for("c1", chrono::Utc::now()),
+            Indicator::None
+        );
         let step = state.echoes["c1"]
             .iter()
             .find(|entry| entry.id == zeron_proto::cloud_setup_entry_id("m1"))

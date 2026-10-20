@@ -8711,7 +8711,16 @@ impl Composer {
             return false;
         }
         match state.selected_chat.as_deref() {
-            Some(chat) => state.chat_cloud_session(chat).is_some(),
+            // A chat hosted on a Cloud session machine — known from its host
+            // device even before the session list has been read.
+            Some(chat) => {
+                state.chat_cloud_session(chat).is_some()
+                    || state
+                        .chats
+                        .iter()
+                        .find(|c| c.id == chat)
+                        .is_some_and(|c| state.is_cloud_session_device(&c.device_id))
+            }
             None => self.pickers.read(cx).runs_on_cloud(cx),
         }
     }
