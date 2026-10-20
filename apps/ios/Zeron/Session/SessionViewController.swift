@@ -92,6 +92,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
             let queued = self.shown.running && mode == .queue
+            // Out of credits, a Cloud send can't wake its machine: say so
+            // (with a way to add some) instead of a send that never lands.
+            if self.isCloud, self.app.cloud.outOfCredits {
+                CloudRoutes.showOutOfCredits(app: self.app, from: self, above: self.bottom)
+                return .kept
+            }
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
             // Sending puts the keyboard away (the composer rests as the capsule).
             DispatchQueue.main.async { self.composer.resignFirstResponder() }
@@ -114,7 +120,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         pill.onTap = { [weak self] in
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
-            if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
+            if case .notDelivered = self.shown.banner {
+                if self.isCloud, self.app.cloud.outOfCredits {
+                    return CloudRoutes.openBilling(app: self.app, from: self)
+                }
+                self.source.retryDelivery()
+            }
+        }
+        if isCloud {
+            cloudToken = app.cloud.observe { [weak self] in self?.render(animated: true) }
         }
 
         bottom.axis = .vertical
@@ -482,6 +496,25 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private var cloudToken: AnyObject?
+
+    private var isCloud: Bool { app.row(chatId)?.isCloud == true }
+
+    /// A Cloud chat whose send can't land says why — out of credits, or its
+    /// machine failed — instead of a bare "Not delivered".
+    private func cloudBanner(_ banner: SessionChrome.Banner) -> SessionChrome.Banner {
+        guard case .notDelivered = banner, isCloud else { return banner }
+        let cloud = app.cloud
+        cloud.refreshSessions()
+        if cloud.outOfCredits {
+            return .failed("Out of Cloud credits · Add credits")
+        }
+        if let error = cloud.sessionError(chat: chatId, device: app.row(chatId)?.deviceId) {
+            return .failed("Cloud machine: \(error) · Tap to retry")
+        }
+        return banner
+    }
+
     private func render(animated: Bool) {
         let c = source.chrome
         let old = shown
@@ -504,7 +537,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.queue.configure(c.queue)
             let editing = self.editingQueueId != nil
             self.pill.superview?.isHidden = c.banner == .none && !editing
-            self.pill.banner = editing ? .editing : c.banner
+            self.pill.banner = editing ? .editing : self.cloudBanner(c.banner)
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }

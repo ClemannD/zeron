@@ -36,6 +36,7 @@ pub mod error;
 pub mod events;
 mod live;
 pub mod provider_login;
+pub mod providers;
 pub mod rpc;
 pub mod runtime;
 pub mod session;

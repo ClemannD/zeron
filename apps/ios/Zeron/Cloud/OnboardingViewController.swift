@@ -1,25 +1,45 @@
 import UIKit
 
-/// First run after signing in: connect GitHub, sign in to the agents (for
-/// Cloud), notifications, and a first Cloud session. Every step can be
-/// skipped and redone from Settings → Cloud.
+/// First run, in the desktop's steps: make it yours (a look and a new-chat
+/// wallpaper), sync (log in), connect GitHub, your agents (Settings →
+/// Providers itself, with its device switcher), then notifications — the
+/// phone's own — and "You're all set". The first two run signed out from the
+/// welcome page; the rest pick up after logging in. Everything can be
+/// changed later in Settings.
 final class OnboardingViewController: UIViewController {
     enum Step: Int, CaseIterable {
-        case github, agents, notifications, done
+        case appearance, sync, github, agents, notifications, done
+
+        /// "2 of 5" (Done has no number).
+        var number: Int? { self == .done ? nil : rawValue + 1 }
+        static let total = 5
+
+        var previous: Step? { Step(rawValue: rawValue - 1) }
+        var next: Step { Step(rawValue: rawValue + 1) ?? .done }
+
+        init?(name: String) {
+            guard let step = Step.allCases.first(where: { "\($0)" == name }) else { return nil }
+            self = step
+        }
     }
+
+    static let appearanceSeenKey = "onboarding.appearanceSeen"
 
     private let app: AppModel
     private var step: Step
-    private let signIn = ProviderSignIn()
-    private var signingIn: String?
-    private var token: AnyObject?
-    /// Called when the flow ends; `startSession` asks for the new-session
-    /// page (opened on a Cloud project when one was picked).
+    private let workos = WorkOSSignIn()
+    private var loggingIn = false
+    private var loginError: String?
+    private var cloudToken: AnyObject?
+    private var wallpaperObserver: NSObjectProtocol?
+    /// Called when the flow ends; `startSession` asks for the new-session page.
     var onFinish: ((_ startSession: Bool) -> Void)?
 
-    private let dots = UIStackView()
+    private let wallpaper = WallpaperView()
+    private let progress = UIStackView()
     private let page = UIView()
     private let footer = UIStackView()
+    private var providers: ProvidersViewController?
 
     static func shouldShow(for app: AppModel) -> Bool {
         guard let client = app.client, !app.isDemo else { return false }
@@ -44,67 +64,90 @@ final class OnboardingViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    deinit { wallpaperObserver.map(NotificationCenter.default.removeObserver) }
+
     @MainActor private var cloud: CloudStore { app.cloud }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
-        dots.axis = .horizontal
-        dots.spacing = 6
-        dots.translatesAutoresizingMaskIntoConstraints = false
+        // The new-chat wallpaper behind every step, so picking one shows it.
+        wallpaper.frame = view.bounds
+        wallpaper.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(wallpaper)
+        progress.axis = .horizontal
+        progress.spacing = 4
+        progress.alignment = .center
+        progress.translatesAutoresizingMaskIntoConstraints = false
         page.translatesAutoresizingMaskIntoConstraints = false
-        footer.axis = .vertical
-        footer.spacing = 6
+        footer.axis = .horizontal
+        footer.spacing = 12
+        footer.alignment = .center
         footer.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(dots)
+        view.addSubview(progress)
         view.addSubview(page)
         view.addSubview(footer)
         let guide = view.safeAreaLayoutGuide
-        let width = page.widthAnchor.constraint(equalToConstant: 520)
+        let width = page.widthAnchor.constraint(equalToConstant: 560)
         width.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            dots.topAnchor.constraint(equalTo: guide.topAnchor, constant: 18),
-            dots.centerXAnchor.constraint(equalTo: guide.centerXAnchor),
-            page.topAnchor.constraint(equalTo: dots.bottomAnchor, constant: 36),
+            progress.topAnchor.constraint(equalTo: guide.topAnchor, constant: 14),
+            progress.leadingAnchor.constraint(equalTo: page.leadingAnchor),
+            progress.heightAnchor.constraint(equalToConstant: 20),
+            page.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 18),
             page.centerXAnchor.constraint(equalTo: guide.centerXAnchor),
             page.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 24),
             page.trailingAnchor.constraint(lessThanOrEqualTo: guide.trailingAnchor, constant: -24),
             width,
+            page.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
             footer.leadingAnchor.constraint(equalTo: page.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: page.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -16),
-            page.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor, constant: -16),
+            footer.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12),
         ])
-        token = cloud.observe { [weak self] in self?.refreshRows() }
-        cloud.refresh()
+        if app.isSignedIn {
+            cloudToken = cloud.observe { [weak self] in self?.refresh() }
+            cloud.refresh()
+        }
+        wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            if self?.step == .appearance { self?.render(animated: false) }
+        }
         render(animated: false)
     }
 
     // MARK: Pages
 
-    private var rowsRefresher: (() -> Void)?
+    /// Re-reads live state into the page in place (sign-ins, GitHub).
+    private var refresher: (() -> Void)?
 
-    private func refreshRows() { rowsRefresher?() }
+    private func refresh() {
+        refresher?()
+        renderFooter()
+    }
+
+    private func go(_ next: Step) {
+        if step == .appearance { UserDefaults.standard.set(true, forKey: Self.appearanceSeenKey) }
+        step = next
+        render(animated: true)
+    }
 
     private func render(animated: Bool) {
-        rowsRefresher = nil
-        dots.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for s in Step.allCases where s != .done {
-            let dot = UIView()
-            dot.backgroundColor = s.rawValue <= step.rawValue ? Palette.accent : Palette.controlFill
-            dot.layer.cornerRadius = 2
-            dot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 26), dot.heightAnchor.constraint(equalToConstant: 4)])
-            dots.addArrangedSubview(dot)
-        }
-        dots.isHidden = step == .done
+        refresher = nil
+        renderProgress()
         let content: UIView
         switch step {
-        case .github: content = githubPage()
+        case .appearance: content = scrolling(appearancePage())
+        case .sync: content = scrolling(syncPage())
+        case .github: content = scrolling(githubPage())
         case .agents: content = agentsPage()
-        case .notifications: content = notificationsPage()
-        case .done: content = donePage()
+        case .notifications: content = scrolling(notificationsPage())
+        case .done: content = scrolling(donePage())
         }
+        if step != .agents, let providers {
+            providers.willMove(toParent: nil)
+            providers.removeFromParent()
+            self.providers = nil
+        }
+        renderFooter()
         content.translatesAutoresizingMaskIntoConstraints = false
         let old = page.subviews
         page.addSubview(content)
@@ -112,15 +155,15 @@ final class OnboardingViewController: UIViewController {
             content.topAnchor.constraint(equalTo: page.topAnchor),
             content.leadingAnchor.constraint(equalTo: page.leadingAnchor),
             content.trailingAnchor.constraint(equalTo: page.trailingAnchor),
-            content.bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor),
+            content.bottomAnchor.constraint(equalTo: page.bottomAnchor),
         ])
         guard animated, !UIAccessibility.isReduceMotionEnabled else {
             old.forEach { $0.removeFromSuperview() }
             return
         }
         content.alpha = 0
-        content.transform = CGAffineTransform(translationX: 24, y: 0)
-        UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseOut]) {
+        content.transform = CGAffineTransform(translationX: 20, y: 0)
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
             content.alpha = 1
             content.transform = .identity
             old.forEach { $0.alpha = 0 }
@@ -129,30 +172,157 @@ final class OnboardingViewController: UIViewController {
         }
     }
 
-    private func setFooter(primary: UIButton, secondary: UIButton?) {
+    /// The desktop's progress: a short bar per step, then "2 of 5".
+    private func renderProgress() {
+        progress.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard let number = step.number else {
+            progress.isHidden = true
+            return
+        }
+        progress.isHidden = false
+        for ix in 1...Step.total {
+            let bar = UIView()
+            bar.backgroundColor = ix <= number ? Palette.accent : Palette.controlFill
+            bar.layer.cornerRadius = 1.5
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([bar.widthAnchor.constraint(equalToConstant: 20), bar.heightAnchor.constraint(equalToConstant: 3)])
+            progress.addArrangedSubview(bar)
+        }
+        let label = UILabel()
+        label.text = "\(number) of \(Step.total)"
+        label.font = Fonts.ui(.sans, 12)
+        label.textColor = Palette.tertiary
+        progress.addArrangedSubview(label)
+        progress.setCustomSpacing(10, after: progress.arrangedSubviews[Step.total - 1])
+    }
+
+    /// Back on the left; Skip and the way forward on the right.
+    private func renderFooter() {
         footer.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        footer.addArrangedSubview(primary)
-        if let secondary { footer.addArrangedSubview(secondary) }
+        guard step != .done else {
+            footer.isHidden = true
+            return
+        }
+        footer.isHidden = false
+        if let previous = step.previous {
+            footer.addArrangedSubview(ghost("Back") { [weak self] in self?.go(previous) })
+        } else if !app.isSignedIn {
+            // Back to the welcome page.
+            footer.addArrangedSubview(ghost("Back") { [weak self] in self?.dismiss(animated: true) })
+        }
+        footer.addArrangedSubview(UIView())
+        switch step {
+        case .appearance:
+            footer.addArrangedSubview(primary("Continue") { [weak self] in self?.go(.sync) })
+        case .sync:
+            if app.isSignedIn {
+                footer.addArrangedSubview(primary("Continue") { [weak self] in self?.go(.github) })
+            } else {
+                let login = primary(loggingIn ? "Logging in…" : "Log in") { [weak self] in self?.logIn() }
+                login.isEnabled = !loggingIn
+                login.accessibilityIdentifier = "onboarding-log-in"
+                footer.addArrangedSubview(login)
+            }
+        case .github:
+            if cloud.githubConnected {
+                footer.addArrangedSubview(primary("Continue") { [weak self] in self?.go(.agents) })
+            } else {
+                footer.addArrangedSubview(ghost("Skip for now") { [weak self] in self?.go(.agents) })
+            }
+        case .agents:
+            footer.addArrangedSubview(primary("Continue") { [weak self] in self?.go(.notifications) })
+        case .notifications:
+            footer.addArrangedSubview(ghost("Not now") { [weak self] in self?.go(.done) })
+            footer.addArrangedSubview(primary("Turn on") { [weak self] in
+                Task { @MainActor in
+                    PushNotifications.shared.enabled = true
+                    await PushNotifications.shared.requestPermission()
+                    self?.go(.done)
+                }
+            })
+        case .done:
+            break
+        }
     }
 
-    private func go(_ next: Step) {
-        step = next
-        render(animated: true)
+    private func appearancePage() -> UIView {
+        let header = heading("Make it yours", "Pick a look. You can change it any time in Settings → Appearance.")
+        let style = UserDefaults.standard.integer(forKey: "appearance")
+        let scheme = UISegmentedControl(items: ["System", "Light", "Dark"])
+        scheme.selectedSegmentIndex = style
+        scheme.accessibilityIdentifier = "onboarding-scheme"
+        scheme.addAction(UIAction { [weak self, weak scheme] _ in
+            let style = scheme?.selectedSegmentIndex ?? 0
+            UserDefaults.standard.set(style, forKey: "appearance")
+            self?.view.window?.overrideUserInterfaceStyle = UIUserInterfaceStyle(rawValue: style) ?? .unspecified
+        }, for: .valueChanged)
+
+        let set = WallpaperStore.isSet
+        let image = CloudRow(tile: CloudUI.tile(image: CloudUI.symbol("photo", 17)), title: set ? (WallpaperStore.name ?? "Wallpaper") : "No wallpaper", detail: "Shows behind every new chat.")
+        image.setAccessory(CloudRow.rowButton(set ? "Change" : "Choose image", prominent: !set) { [weak self] in
+            guard let self else { return }
+            WallpaperPicker.present(from: self)
+        })
+        image.accessibilityIdentifier = "onboarding-wallpaper"
+        var rows: [UIView] = [image]
+        if set {
+            let effect = CloudRow(tile: CloudUI.tile(image: CloudUI.symbol("wand.and.stars", 17)), title: "Background effect", detail: WallpaperStore.detail(WallpaperStore.effect))
+            var c = UIButton.Configuration.glass()
+            c.title = WallpaperStore.label(WallpaperStore.effect)
+            c.image = CloudUI.symbol("chevron.up.chevron.down", 11, weight: .semibold)
+            c.imagePlacement = .trailing
+            c.imagePadding = 6
+            c.baseForegroundColor = Palette.text
+            c.cornerStyle = .capsule
+            c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+                var a = a
+                a.font = Fonts.ui(.sansMedium, 14)
+                return a
+            }
+            let menu = UIButton(configuration: c)
+            menu.menu = UIMenu(children: WallpaperStore.allEffects.map { e in
+                UIAction(title: WallpaperStore.label(e), state: e == WallpaperStore.effect ? .on : .off) { _ in WallpaperStore.effect = e }
+            } + [UIMenu(options: .displayInline, children: [
+                UIAction(title: "Remove Wallpaper", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in WallpaperStore.remove() },
+            ])])
+            menu.showsMenuAsPrimaryAction = true
+            effect.setAccessory(menu)
+            rows.append(effect)
+        }
+        return stack([
+            header,
+            group("Color scheme", scheme),
+            group("New chat wallpaper", CloudCard(rows: rows)),
+        ])
     }
 
-    private func pageStack(_ views: [UIView]) -> UIStackView {
-        let stack = UIStackView(arrangedSubviews: views)
-        stack.axis = .vertical
-        stack.spacing = 28
-        return stack
+    private func syncPage() -> UIView {
+        let header = heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron.")
+        let rows = [
+            ("iphone.and.arrow.forward", "On every device", "Pick up a chat on your phone or another computer, right where you left it."),
+            ("laptopcomputer", "Run agents anywhere", "Start work on any of your machines from whichever one you're at."),
+            ("cloud", "Zeron Cloud", "Hand chats to cloud machines that keep going while your computer sleeps."),
+        ].map { symbol, title, detail in
+            CloudRow(tile: CloudUI.tile(image: CloudUI.symbol(symbol, 17)), title: title, detail: detail)
+        }
+        let status = UILabel()
+        status.font = Fonts.ui(.sans, 14)
+        status.numberOfLines = 0
+        if app.isSignedIn {
+            status.text = AccountProfile.load().email.map { "Signed in as \($0)" } ?? "You're signed in"
+            status.textColor = Palette.secondary
+        } else if let loginError {
+            status.text = loginError
+            status.textColor = Palette.danger
+        }
+        return stack([header, CloudCard(rows: rows), status])
     }
 
     private func githubPage() -> UIView {
-        let header = CloudUI.header("Connect GitHub", "Cloud agents work in your repositories on machines of their own — they keep going while your computer sleeps.")
+        let header = heading("Connect GitHub", "Cloud agents work in your repositories on machines of their own. Connect GitHub so they can clone and push — or skip and do it later in Settings → Cloud.")
         let row = CloudRow(tile: CloudUI.tile(image: CloudUI.githubMark), title: "GitHub", detail: nil)
         row.accessibilityIdentifier = "onboarding-github"
-        let card = CloudCard(rows: [row])
-        rowsRefresher = { [weak self, weak row] in
+        refresher = { [weak self, weak row] in
             guard let self, let row else { return }
             if self.cloud.githubConnected {
                 row.titleLabel.text = self.cloud.githubAccount.map { "@\($0)" } ?? "GitHub"
@@ -165,49 +335,54 @@ final class OnboardingViewController: UIViewController {
                 row.setAccessory(CloudRow.rowButton("Connect") { [weak self] in self?.connectGitHub() })
             }
         }
-        refreshRows()
-        setFooter(
-            primary: CloudUI.primaryButton("Continue") { [weak self] in self?.go(.agents) },
-            secondary: CloudUI.plainButton("Skip for now") { [weak self] in self?.go(.agents) }
-        )
-        return pageStack([header, card])
+        refresher?()
+        return stack([header, CloudCard(rows: [row])])
     }
 
+    /// Settings → Providers itself under the heading: its device switcher,
+    /// switches and accounts.
     private func agentsPage() -> UIView {
-        let header = CloudUI.header("Sign in to your agents", "Cloud runs Claude Code and Codex with your own subscriptions. Cloud keeps the sign-in — not this phone.")
-        let rows = CloudStore.agents.map { agent -> CloudRow in
-            let row = CloudRow(tile: CloudUI.tile(image: BrandMarks.image(for: agent.harness, side: 20)), title: agent.name, detail: nil)
-            row.accessibilityIdentifier = "onboarding-\(agent.harness)"
-            return row
-        }
-        let card = CloudCard(rows: rows)
-        rowsRefresher = { [weak self] in
-            guard let self else { return }
-            for (agent, row) in zip(CloudStore.agents, rows) {
-                if self.signingIn == agent.login {
-                    row.detailLabel.text = "Finishing sign-in…"
-                    let spinner = UIActivityIndicatorView(style: .medium)
-                    spinner.startAnimating()
-                    row.setAccessory(spinner)
-                } else if let active = self.cloud.activeAccount(agent) {
-                    row.detailLabel.text = [active.email ?? (active.kind == "key" ? agent.keyName : nil), active.plan].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Signed in"
-                    row.setAccessory(CloudRow.check())
-                } else {
-                    row.detailLabel.text = agent.login == "claude" ? "Your Claude subscription" : "Your ChatGPT subscription"
-                    row.setAccessory(CloudRow.rowButton("Sign In") { [weak self] in self?.signIn(agent) })
-                }
+        let header = heading("Your agents", "Looking for coding agents…")
+        let detail = header.arrangedSubviews.last as? UILabel
+        let providers = self.providers ?? ProvidersViewController(app: app)
+        providers.onSummary = { place, cloud, names in
+            guard let names else {
+                detail?.text = "Looking for coding agents on \(place)…"
+                return
+            }
+            if cloud {
+                detail?.text = "Cloud runs \(Self.join(names)) with your own subscriptions. Sign in to any you'd like to use."
+            } else if names.isEmpty {
+                detail?.text = "Zeron runs the coding agents you already use, and none are on \(place) yet."
+            } else {
+                detail?.text = "Found \(names.count > 3 ? "\(names.count) agents" : Self.join(names)) on \(place). Turn on the ones you'd like to use."
             }
         }
-        refreshRows()
-        setFooter(
-            primary: CloudUI.primaryButton("Continue") { [weak self] in self?.go(.notifications) },
-            secondary: CloudUI.plainButton("Skip for now") { [weak self] in self?.go(.notifications) }
-        )
-        return pageStack([header, card])
+        if self.providers == nil {
+            addChild(providers)
+            self.providers = providers
+        }
+        let holder = UIView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        providers.view.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(header)
+        holder.addSubview(providers.view)
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: holder.topAnchor),
+            header.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: holder.trailingAnchor),
+            providers.view.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
+            // The list's inset-grouped margins line up with the page's.
+            providers.view.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: -20),
+            providers.view.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: 20),
+            providers.view.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+        ])
+        providers.didMove(toParent: self)
+        return holder
     }
 
     private func notificationsPage() -> UIView {
-        let header = CloudUI.header("Stay in the loop", "Get a notification when an agent finishes, needs an answer, or runs into trouble.")
+        let header = heading("Stay in the loop", "Get a notification when an agent finishes, needs an answer, or runs into trouble.")
         let rows = [
             ("checkmark.circle", "Finished", "A session is done"),
             ("questionmark.bubble", "Needs you", "An agent is waiting on an answer"),
@@ -215,75 +390,209 @@ final class OnboardingViewController: UIViewController {
         ].map { symbol, title, detail in
             CloudRow(tile: CloudUI.tile(image: CloudUI.symbol(symbol, 18)), title: title, detail: detail)
         }
-        setFooter(
-            primary: CloudUI.primaryButton("Turn On Notifications") { [weak self] in
-                Task { @MainActor in
-                    PushNotifications.shared.enabled = true
-                    await PushNotifications.shared.requestPermission()
-                    self?.go(.done)
-                }
-            },
-            secondary: CloudUI.plainButton("Not now") { [weak self] in self?.go(.done) }
-        )
-        return pageStack([header, CloudCard(rows: rows)])
+        return stack([header, CloudCard(rows: rows)])
     }
 
     private func donePage() -> UIView {
-        let check = UIImageView(image: CloudUI.symbol("checkmark.circle.fill", 54, weight: .regular))
+        let badge = UIView()
+        badge.backgroundColor = Palette.accentSoft
+        badge.layer.cornerRadius = 26
+        let check = UIImageView(image: CloudUI.symbol("checkmark", 22, weight: .semibold))
         check.tintColor = Palette.accent
-        check.contentMode = .scaleAspectFit
-        let header = CloudUI.header("You're all set", "Start a session on Cloud, or on any computer running Zeron.", alignment: .center)
-        let summary = CloudCard(rows: [])
-        rowsRefresher = { [weak self, weak summary] in
+        check.translatesAutoresizingMaskIntoConstraints = false
+        badge.addSubview(check)
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            badge.widthAnchor.constraint(equalToConstant: 52),
+            badge.heightAnchor.constraint(equalToConstant: 52),
+            check.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            check.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+        ])
+        let header = CloudUI.header("You're all set", "Pick a project and start a session — on any of your computers, or on Cloud.", alignment: .center)
+        let summary = UIStackView()
+        summary.axis = .vertical
+        summary.backgroundColor = Palette.elevated
+        summary.layer.cornerRadius = 20
+        summary.layer.cornerCurve = .continuous
+        refresher = { [weak self, weak summary] in
             guard let self, let summary else { return }
-            var rows: [UIView] = []
-            let github = CloudRow(tile: CloudUI.tile(image: CloudUI.githubMark), title: "GitHub", detail: self.cloud.githubAccount.map { "@\($0)" } ?? "Not connected")
-            github.setAccessory(self.cloud.githubConnected ? CloudRow.check() : nil)
-            rows.append(github)
-            for agent in CloudStore.agents {
-                let active = self.cloud.activeAccount(agent)
-                let row = CloudRow(tile: CloudUI.tile(image: BrandMarks.image(for: agent.harness, side: 20)), title: agent.name, detail: active.map { $0.email ?? "Signed in" } ?? "Not signed in")
-                row.setAccessory(active != nil ? CloudRow.check() : nil)
-                rows.append(row)
+            summary.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            let style = ["System", "Light", "Dark"][min(2, max(0, UserDefaults.standard.integer(forKey: "appearance")))]
+            let agents = CloudStore.agents.filter { self.cloud.activeAccount($0) != nil }.map(\.name)
+            let lines = [
+                ("Appearance", WallpaperStore.isSet ? "\(style) · Wallpaper" : style),
+                ("Sync", AccountProfile.load().email.map { "Signed in as \($0)" } ?? "Signed in"),
+                ("GitHub", self.cloud.githubConnected ? "Connected" : "Not yet · Settings → Cloud"),
+                ("Cloud agents", agents.isEmpty ? "Not yet · Settings → Providers" : Self.join(agents)),
+            ]
+            for (ix, (label, value)) in lines.enumerated() {
+                if ix > 0 {
+                    let line = UIView()
+                    line.backgroundColor = Palette.hairline
+                    line.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale).isActive = true
+                    summary.addArrangedSubview(self.inset(line, top: 0, bottom: 0))
+                }
+                let l = UILabel()
+                l.text = label
+                l.font = Fonts.ui(.sans, 15)
+                l.textColor = Palette.secondary
+                l.setContentHuggingPriority(.required, for: .horizontal)
+                let v = UILabel()
+                v.text = value
+                v.font = Fonts.ui(.sans, 15)
+                v.textColor = Palette.text
+                v.textAlignment = .right
+                v.lineBreakMode = .byTruncatingTail
+                let row = UIStackView(arrangedSubviews: [l, v])
+                row.spacing = 12
+                summary.addArrangedSubview(self.inset(row, top: 13, bottom: 13))
             }
-            summary.setRows(rows)
         }
-        refreshRows()
-        let top = UIStackView(arrangedSubviews: [check, header])
+        refresher?()
+        let start = CloudUI.primaryButton("Start a session", symbol: "plus") { [weak self] in self?.finish(startSession: true) }
+        start.accessibilityIdentifier = "onboarding-finish"
+        let later = CloudUI.plainButton("I'll do this later") { [weak self] in self?.finish(startSession: false) }
+        let buttons = UIStackView(arrangedSubviews: [start, later])
+        buttons.axis = .vertical
+        buttons.spacing = 8
+        let top = UIStackView(arrangedSubviews: [badge, header])
         top.axis = .vertical
         top.alignment = .center
         top.spacing = 18
-        setFooter(
-            primary: CloudUI.primaryButton("Start a Session", symbol: "plus") { [weak self] in self?.finish(startSession: true) },
-            secondary: CloudUI.plainButton("Done") { [weak self] in self?.finish(startSession: false) }
-        )
-        return pageStack([top, summary])
+        let column = stack([spacer(24), top, summary, buttons])
+        column.setCustomSpacing(0, after: column.arrangedSubviews[0])
+        return column
+    }
+
+    // MARK: Pieces
+
+    private func heading(_ title: String, _ detail: String) -> UIStackView {
+        let t = UILabel()
+        t.text = title
+        t.font = Fonts.ui(.sansSemibold, 26)
+        t.textColor = Palette.text
+        t.numberOfLines = 0
+        let d = UILabel()
+        d.text = detail
+        d.font = Fonts.ui(.sans, 15)
+        d.textColor = Palette.secondary
+        d.numberOfLines = 0
+        let s = UIStackView(arrangedSubviews: [t, d])
+        s.axis = .vertical
+        s.spacing = 8
+        return s
+    }
+
+    /// A small muted label over its control.
+    private func group(_ title: String, _ content: UIView) -> UIView {
+        let label = UILabel()
+        label.text = title
+        label.font = Fonts.ui(.sansMedium, 13)
+        label.textColor = Palette.secondary
+        let s = UIStackView(arrangedSubviews: [inset(label, top: 0, bottom: 0, side: 4), content])
+        s.axis = .vertical
+        s.spacing = 8
+        return s
+    }
+
+    private func stack(_ views: [UIView]) -> UIStackView {
+        let s = UIStackView(arrangedSubviews: views)
+        s.axis = .vertical
+        s.spacing = 28
+        return s
+    }
+
+    private func scrolling(_ content: UIView) -> UIView {
+        let scroll = UIScrollView()
+        scroll.alwaysBounceVertical = false
+        scroll.showsVerticalScrollIndicator = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 6),
+            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -16),
+            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor),
+        ])
+        return scroll
+    }
+
+    private func inset(_ view: UIView, top: CGFloat, bottom: CGFloat, side: CGFloat = 16) -> UIView {
+        let holder = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: holder.topAnchor, constant: top),
+            view.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -bottom),
+            view.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: side),
+            view.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -side),
+        ])
+        return holder
+    }
+
+    private func spacer(_ height: CGFloat) -> UIView {
+        let v = UIView()
+        v.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return v
+    }
+
+    private func primary(_ title: String, action: @escaping () -> Void) -> UIButton {
+        var c = UIButton.Configuration.filled()
+        c.title = title
+        c.baseBackgroundColor = Palette.text
+        c.baseForegroundColor = Palette.background
+        c.cornerStyle = .capsule
+        c.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 22, bottom: 12, trailing: 22)
+        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+            var a = a
+            a.font = Fonts.ui(.sansSemibold, 16)
+            return a
+        }
+        let b = UIButton(configuration: c, primaryAction: UIAction { _ in action() })
+        b.accessibilityIdentifier = b.accessibilityIdentifier ?? "onboarding-continue"
+        return b
+    }
+
+    private func ghost(_ title: String, action: @escaping () -> Void) -> UIButton {
+        var c = UIButton.Configuration.plain()
+        c.title = title
+        c.baseForegroundColor = Palette.secondary
+        c.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 8, bottom: 12, trailing: 8)
+        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+            var a = a
+            a.font = Fonts.ui(.sansMedium, 16)
+            return a
+        }
+        return UIButton(configuration: c, primaryAction: UIAction { _ in action() })
+    }
+
+    /// "Claude Code", "Claude Code and Codex", "A, B and C".
+    static func join(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        default: return names.dropLast().joined(separator: ", ") + " and " + names.last!
+        }
     }
 
     // MARK: Actions
 
-    private func connectGitHub() {
-        present(GitHubConnectViewController.sheet(app: app) { [weak self] _ in self?.refreshRows() }, animated: true)
+    private func logIn() {
+        guard !loggingIn else { return }
+        loggingIn = true
+        loginError = nil
+        renderFooter()
+        Task { @MainActor in
+            let error = await self.workos.run(app: self.app, from: self)
+            // Signed in, the shell takes over and this page goes with it.
+            self.loggingIn = false
+            self.loginError = error
+            if self.view.window != nil { self.render(animated: false) }
+        }
     }
 
-    private func signIn(_ agent: CloudStore.Agent) {
-        guard let client = app.client, signingIn == nil else { return }
-        signingIn = agent.login
-        refreshRows()
-        Task { @MainActor in
-            do {
-                try await self.signIn.run(agent, client: client, from: self.view)
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            } catch is CancellationError {
-            } catch {
-                let a = UIAlertController(title: "Couldn't sign in", message: CloudStore.message(error), preferredStyle: .alert)
-                a.addAction(UIAlertAction(title: "OK", style: .default))
-                self.present(a, animated: true)
-            }
-            self.signingIn = nil
-            self.cloud.refreshAccounts()
-            self.refreshRows()
-        }
+    private func connectGitHub() {
+        present(GitHubConnectViewController.sheet(app: app) { [weak self] _ in self?.refresh() }, animated: true)
     }
 
     private func finish(startSession: Bool) {

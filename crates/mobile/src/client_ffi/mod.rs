@@ -12,6 +12,7 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod cloud;
+mod providers;
 mod session;
 mod voice;
 pub use voice::*;

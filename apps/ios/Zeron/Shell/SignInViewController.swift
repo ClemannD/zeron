@@ -43,12 +43,10 @@ enum Endpoints {
     }
 }
 
-/// Sign in with WorkOS (system web auth sheet).
-final class SignInViewController: UIViewController, ASWebAuthenticationPresentationContextProviding {
+/// Signed out: the welcome page, as on the desktop — the mark, a line, and
+/// "Get started" into the first steps (a look, then logging in).
+final class SignInViewController: UIViewController {
     private let app: AppModel
-    private let status = UILabel()
-    private let signIn = UIButton(type: .system)
-    private var session: ASWebAuthenticationSession?
 
     init(app: AppModel) {
         self.app = app
@@ -60,6 +58,10 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
+        let wallpaper = WallpaperView()
+        wallpaper.frame = view.bounds
+        wallpaper.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(wallpaper)
         let mark = UIImageView(image: CloudUI.zeronMark)
         mark.tintColor = Palette.text
         mark.contentMode = .scaleAspectFit
@@ -70,7 +72,7 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         ])
         let title = UILabel()
         title.text = "Welcome to Zeron"
-        title.font = Fonts.ui(.sansSemibold, 32)
+        title.font = Fonts.ui(.sansSemibold, 30)
         title.textColor = Palette.text
         title.textAlignment = .center
         title.numberOfLines = 0
@@ -80,138 +82,90 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         tagline.textColor = Palette.secondary
         tagline.textAlignment = .center
         tagline.numberOfLines = 0
-
-        let features = [
-            ("cloud", "Agents in the cloud", "Every session gets a machine of its own — it keeps going while you're away."),
-            ("laptopcomputer", "And on your computers", "Start and follow sessions on any computer running Zeron."),
-            ("bell.badge", "Know when it's done", "A notification when an agent finishes or needs you."),
-        ].map { symbol, heading, body -> UIView in
-            let icon = UIImageView(image: CloudUI.symbol(symbol, 18))
-            icon.tintColor = Palette.accent
-            icon.contentMode = .center
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28)])
-            let h = UILabel()
-            h.text = heading
-            h.font = Fonts.ui(.sansSemibold, 16)
-            h.textColor = Palette.text
-            let b = UILabel()
-            b.text = body
-            b.font = Fonts.ui(.sans, 14)
-            b.textColor = Palette.secondary
-            b.numberOfLines = 0
-            let text = UIStackView(arrangedSubviews: [h, b])
-            text.axis = .vertical
-            text.spacing = 2
-            let row = UIStackView(arrangedSubviews: [icon, text])
-            row.spacing = 14
-            row.alignment = .top
-            return row
-        }
-        let list = UIStackView(arrangedSubviews: features)
-        list.axis = .vertical
-        list.spacing = 20
-
-        var primary = UIButton.Configuration.filled()
-        primary.title = "Get Started"
-        primary.baseBackgroundColor = Palette.text
-        primary.baseForegroundColor = Palette.background
-        primary.cornerStyle = .capsule
-        primary.contentInsets = NSDirectionalEdgeInsets(top: 15, leading: 20, bottom: 15, trailing: 20)
-        primary.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
-            var a = a
-            a.font = Fonts.ui(.sansSemibold, 17)
-            a.foregroundColor = Palette.background
-            return a
-        }
-        signIn.configuration = primary
-        signIn.accessibilityIdentifier = "sign-in"
-        signIn.addAction(UIAction { [weak self] _ in self?.startWorkOS() }, for: .touchUpInside)
-
-        status.font = Fonts.ui(.sans, 14)
-        status.textColor = Palette.danger
-        status.numberOfLines = 0
-        status.textAlignment = .center
-
-        let fine = UILabel()
-        fine.text = "Sign in or create an account to continue."
-        fine.font = Fonts.ui(.sans, 13)
-        fine.textColor = Palette.tertiary
-        fine.textAlignment = .center
+        let start = CloudUI.primaryButton("Get started") { [weak self] in self?.getStarted() }
+        start.accessibilityIdentifier = "sign-in"
 
         let top = UIStackView(arrangedSubviews: [mark, title, tagline])
         top.axis = .vertical
         top.alignment = .center
         top.spacing = 12
-        top.setCustomSpacing(22, after: mark)
-        let buttons = UIStackView(arrangedSubviews: [status, signIn, fine])
-        buttons.axis = .vertical
-        buttons.spacing = 12
-        for v in [top, list, buttons] {
+        top.setCustomSpacing(26, after: mark)
+        for v in [top, start] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
-        let readable = view.readableContentGuide
-        let width = list.widthAnchor.constraint(equalToConstant: 440)
-        width.priority = .defaultHigh
+        let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            top.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
-            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 64),
-            top.leadingAnchor.constraint(greaterThanOrEqualTo: readable.leadingAnchor),
-            list.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 44),
-            list.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
-            list.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 32),
-            width,
-            list.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -24),
-            buttons.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
-            buttons.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
-            buttons.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            top.centerXAnchor.constraint(equalTo: guide.centerXAnchor),
+            top.centerYAnchor.constraint(equalTo: guide.centerYAnchor, constant: -40),
+            top.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 32),
+            start.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 24),
+            start.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -24),
+            start.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -16),
         ])
     }
 
-    private func startWorkOS() {
+    private func getStarted() {
+        // The look is this phone's: picked once, then straight to logging in.
+        let seen = UserDefaults.standard.bool(forKey: OnboardingViewController.appearanceSeenKey)
+        let onboarding = OnboardingViewController(app: app, step: seen ? .sync : .appearance)
+        onboarding.modalTransitionStyle = .crossDissolve
+        present(onboarding, animated: true)
+    }
+}
+
+/// Sign in with WorkOS (system web auth sheet), then pick an organization
+/// when there are several.
+@MainActor
+final class WorkOSSignIn: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var session: ASWebAuthenticationSession?
+    private weak var host: UIViewController?
+
+    /// Signs in; returns why it didn't (nil on success or cancel).
+    func run(app: AppModel, from host: UIViewController) async -> String? {
+        self.host = host
         let state = UUID().uuidString
-        let s = ASWebAuthenticationSession(url: Endpoints.authorizeURL(state: state), callback: .customScheme(Endpoints.callbackScheme)) { [weak self] url, error in
-            guard let self else { return }
-            if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin { return }
-            guard let url, let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-                  let code = items.first(where: { $0.name == "code" })?.value,
-                  items.first(where: { $0.name == "state" })?.value == state
-            else {
-                self.status.text = "Sign-in didn't complete. Try again."
-                return
-            }
-            self.signIn.configuration?.showsActivityIndicator = true
-            Task { @MainActor in
-                do {
-                    try await self.app.signIn(code: code) { orgs in await self.pickOrg(orgs) }
-                } catch {
-                    self.status.text = error.localizedDescription
+        let url: URL? = await withCheckedContinuation { cont in
+            let s = ASWebAuthenticationSession(url: Endpoints.authorizeURL(state: state), callback: .customScheme(Endpoints.callbackScheme)) { url, error in
+                if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+                    return cont.resume(returning: nil)
                 }
-                self.signIn.configuration?.showsActivityIndicator = false
+                cont.resume(returning: url ?? URL(string: "zeron://callback?failed=1"))
             }
+            s.presentationContextProvider = self
+            s.prefersEphemeralWebBrowserSession = false
+            session = s
+            if !s.start() { cont.resume(returning: nil) }
         }
-        s.presentationContextProvider = self
-        s.prefersEphemeralWebBrowserSession = false
-        session = s
-        s.start()
+        session = nil
+        guard let url else { return nil }
+        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let code = items.first(where: { $0.name == "code" })?.value,
+              items.first(where: { $0.name == "state" })?.value == state
+        else { return "Sign-in didn't complete. Try again." }
+        do {
+            try await app.signIn(code: code) { [weak self] orgs in await self?.pickOrg(orgs) }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// Several organizations: let the user pick (nil = cancelled).
-    @MainActor
     private func pickOrg(_ orgs: [AuthOrg]) async -> AuthOrg? {
-        await withCheckedContinuation { cont in
+        guard let host else { return nil }
+        return await withCheckedContinuation { cont in
             let sheet = UIAlertController(title: "Choose an organization", message: nil, preferredStyle: .actionSheet)
             for org in orgs {
                 sheet.addAction(UIAlertAction(title: org.name, style: .default) { _ in cont.resume(returning: org) })
             }
             sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in cont.resume(returning: nil) })
-            sheet.popoverPresentationController?.sourceView = signIn
-            present(sheet, animated: true)
+            sheet.popoverPresentationController?.sourceView = host.view
+            host.present(sheet, animated: true)
         }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        view.window ?? ASPresentationAnchor()
+        host?.view.window ?? ASPresentationAnchor()
     }
 }

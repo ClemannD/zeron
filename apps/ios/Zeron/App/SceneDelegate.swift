@@ -24,7 +24,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         app.onSignedIn = { [weak self] in
             self?.showRoot(animated: true)
             self?.shellShown()
-            self?.showOnboardingIfNeeded()
+            // Straight on from the sign-in steps: no sheet sliding up.
+            self?.showOnboardingIfNeeded(animated: false)
         }
         app.onSignOut = { [weak self] in
             guard let self else { return }
@@ -72,21 +73,22 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "search" { router.showSearch() }
                 #if DEBUG
                 // Cloud screens straight away (screenshots, tests).
-                if route.hasPrefix("cloud") { self.openCloudRoute(route) }
+                if route.hasPrefix("cloud") || route.hasPrefix("providers") || route == "billing" || route == "welcome" { self.openCloudRoute(route) }
                 #endif
             }
         }
     }
 
-    /// First run after signing in (or `-onboarding [github|agents|notifications|done]`):
-    /// GitHub, the agents' sign-ins and notifications, over the shell.
-    @MainActor private func showOnboardingIfNeeded() {
+    /// First run after signing in (or `-onboarding <step>`: appearance, sync,
+    /// github, agents, notifications, done): the steps after logging in, over
+    /// the shell.
+    @MainActor private func showOnboardingIfNeeded(animated: Bool = true) {
         let args = ProcessInfo.processInfo.arguments
         let forced = args.firstIndex(of: "-onboarding")
         guard app.isSignedIn, forced != nil || OnboardingViewController.shouldShow(for: app) else { return }
         var step = OnboardingViewController.Step.github
         if let i = forced, i + 1 < args.count {
-            step = ["github": .github, "agents": .agents, "notifications": .notifications, "done": .done][args[i + 1]] ?? .github
+            step = OnboardingViewController.Step(name: args[i + 1]) ?? .github
         }
         let onboarding = OnboardingViewController(app: app, step: step)
         onboarding.onFinish = { [weak self] startSession in
@@ -94,15 +96,28 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             router.presentNewSession(prompt: nil)
         }
         DispatchQueue.main.async { [weak self] in
-            self?.window?.rootViewController?.present(onboarding, animated: !args.contains("-onboarding"))
+            self?.window?.rootViewController?.present(onboarding, animated: animated && !args.contains("-onboarding"))
         }
     }
 
     #if DEBUG
-    /// `-route cloud` · `cloud:billing` · `cloud:agent:<harness>` · `cloud:repos` · `cloud:github`.
+    /// `-route cloud` · `cloud:billing` · `cloud:agent:<harness>` · `cloud:repos`
+    /// · `cloud:github` · `billing` · `providers[:cloud|:<device id>]` · `welcome`.
     @MainActor private func openCloudRoute(_ route: String) {
         guard let root = window?.rootViewController else { return }
         let parts = route.split(separator: ":").map(String.init)
+        if parts.first == "providers" {
+            return root.present(UINavigationController(rootViewController: ProvidersViewController(app: app, target: parts.dropFirst().first)), animated: false)
+        }
+        if parts.first == "welcome" {
+            // The signed-out welcome page, without signing out.
+            let welcome = SignInViewController(app: app)
+            welcome.modalPresentationStyle = .fullScreen
+            return root.present(welcome, animated: false)
+        }
+        if parts.first == "billing" {
+            return root.present(UINavigationController(rootViewController: BillingViewController(app: app)), animated: false)
+        }
         let settings = CloudSettingsViewController(app: app)
         let nav = UINavigationController(rootViewController: settings)
         switch parts.dropFirst().first {

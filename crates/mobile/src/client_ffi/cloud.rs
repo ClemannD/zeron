@@ -191,6 +191,8 @@ pub struct BillingInfo {
     pub credits_total: f64,
     pub credits_monthly: f64,
     pub credits_monthly_total: f64,
+    /// When this period's plan credits reset (epoch ms).
+    pub credits_monthly_ends_ms: Option<i64>,
     pub credits_extra: f64,
     pub plans: Vec<BillingPlanInfo>,
     pub pack_price_cents: u32,
@@ -227,6 +229,7 @@ impl From<zeron_proto::BillingStatus> for BillingInfo {
             credits_total: b.credits.total,
             credits_monthly: b.credits.monthly,
             credits_monthly_total: b.credits.monthly_total,
+            credits_monthly_ends_ms: b.credits.monthly_ends_at,
             credits_extra: b.credits.extra,
             plans: b.plans.into_iter().map(plan_info).collect(),
             pack_price_cents: b.pack.price_cents,

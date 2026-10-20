@@ -29,6 +29,8 @@ final class CloudStore {
     private(set) var repos: [GithubRepoInfo]?
     private(set) var accounts: [String: [CloudAccountInfo]] = [:]
     private(set) var billing: BillingInfo?
+    /// The account's session machines (read when a Cloud chat needs them).
+    private(set) var sessions: [CloudSessionInfo] = []
     private(set) var loading = false
     private(set) var error: String?
 
@@ -46,6 +48,49 @@ final class CloudStore {
 
     var available: Bool { info?.available ?? false }
     var credits: Double? { billing.map(\.creditsTotal) ?? info?.credits }
+
+    /// Cloud can't start or wake a machine (the desktop's rule).
+    var outOfCredits: Bool { (info?.credits ?? billing?.creditsTotal).map { $0 <= 0 } ?? false }
+
+    /// What's wrong with Cloud as a whole, for the top of its page.
+    struct Problem {
+        let title: String
+        let detail: String
+        /// Credits fix it: the row leads to Billing.
+        let billing: Bool
+    }
+
+    var problem: Problem? {
+        guard let info, info.available else { return nil }
+        if info.state == "error" {
+            return Problem(title: "Cloud ran into a problem", detail: info.error ?? "Something went wrong with Cloud.", billing: false)
+        }
+        if outOfCredits {
+            return Problem(title: "Out of credits", detail: "Cloud sessions can't start or wake until you add credits.", billing: true)
+        }
+        return nil
+    }
+
+    /// Why a Cloud chat's machine isn't running, when the edge said.
+    func sessionError(chat chatId: String, device: String?) -> String? {
+        let session = sessions.first { $0.chatId == chatId } ?? sessions.first { $0.deviceId == device }
+        guard let session, session.state == "error" else { return nil }
+        return session.error ?? "Its machine failed to start."
+    }
+
+    private var sessionsRead: Date?
+
+    /// Re-read the session machines (at most every few seconds).
+    func refreshSessions() {
+        guard let client, available || info == nil else { return }
+        if let last = sessionsRead, Date().timeIntervalSince(last) < 8 { return }
+        sessionsRead = Date()
+        Task { [weak self] in
+            if let list = try? await client.cloudSessions() { self?.sessions = list }
+            self?.info = (try? await client.cloudStatus()) ?? self?.info
+            self?.changed()
+        }
+    }
 
     var githubAccount: String? {
         vault?.connections.first { $0.provider == "github" && !$0.needsReconnect }?.account
@@ -170,6 +215,8 @@ final class CloudStore {
         repos = nil
         accounts = [:]
         billing = nil
+        sessions = []
+        sessionsRead = nil
         error = nil
         changed()
     }

@@ -258,3 +258,22 @@ final class CloudCard: UIView {
         }
     }
 }
+
+extension UIFont {
+    /// Figures that don't shift as they change.
+    func withMonospacedDigits() -> UIFont {
+        let descriptor = fontDescriptor.addingAttributes([
+            .featureSettings: [[UIFontDescriptor.FeatureKey.type: kNumberSpacingType, UIFontDescriptor.FeatureKey.selector: kMonospacedNumbersSelector]],
+        ])
+        return UIFont(descriptor: descriptor, size: pointSize)
+    }
+}
+
+extension UIImage {
+    /// The image, fainter (a dimmed row's mark).
+    func withAlpha(_ alpha: CGFloat) -> UIImage? {
+        UIGraphicsImageRenderer(size: size, format: imageRendererFormat).image { _ in
+            draw(at: .zero, blendMode: .normal, alpha: alpha)
+        }
+    }
+}

@@ -1351,6 +1351,26 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func vaultStatus() async throws  -> VaultInfo
     
     /**
+     * Run `harness` on `account_id` from now on.
+     */
+    func deviceActivateAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
+    
+    /**
+     * The CLI logins on `device_id`, every agent's.
+     */
+    func deviceAgentAccounts(deviceId: String) async throws  -> [DeviceAccountInfo]
+    
+    /**
+     * Remove a saved login from `device_id`.
+     */
+    func deviceForgetAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
+    
+    /**
+     * Offer `harness` on `device_id` or not; the device's fresh catalog.
+     */
+    func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws  -> [HarnessInfo]
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2558,6 +2578,82 @@ open func vaultStatus()async throws  -> VaultInfo  {
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeVaultInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Run `harness` on `account_id` from now on.
+     */
+open func deviceActivateAccount(deviceId: String, harness: String, accountId: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_activate_account(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterString.lower(accountId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The CLI logins on `device_id`, every agent's.
+     */
+open func deviceAgentAccounts(deviceId: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_agent_accounts(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Remove a saved login from `device_id`.
+     */
+open func deviceForgetAccount(deviceId: String, harness: String, accountId: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_forget_account(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterString.lower(accountId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Offer `harness` on `device_id` or not; the device's fresh catalog.
+     */
+open func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool)async throws  -> [HarnessInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_set_harness_enabled(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeHarnessInfo.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -6021,6 +6117,10 @@ public struct BillingInfo: Equatable, Hashable {
     public var creditsTotal: Double
     public var creditsMonthly: Double
     public var creditsMonthlyTotal: Double
+    /**
+     * When this period's plan credits reset (epoch ms).
+     */
+    public var creditsMonthlyEndsMs: Int64?
     public var creditsExtra: Double
     public var plans: [BillingPlanInfo]
     public var packPriceCents: UInt32
@@ -6035,7 +6135,10 @@ public struct BillingInfo: Equatable, Hashable {
          */available: Bool, plan: BillingPlanInfo?, 
         /**
          * `active` · `trialing` · `past_due` · …
-         */planStatus: String?, periodEndMs: Int64?, cancelAtPeriodEnd: Bool, creditsTotal: Double, creditsMonthly: Double, creditsMonthlyTotal: Double, creditsExtra: Double, plans: [BillingPlanInfo], packPriceCents: UInt32, packCredits: Double, hasCustomer: Bool) {
+         */planStatus: String?, periodEndMs: Int64?, cancelAtPeriodEnd: Bool, creditsTotal: Double, creditsMonthly: Double, creditsMonthlyTotal: Double, 
+        /**
+         * When this period's plan credits reset (epoch ms).
+         */creditsMonthlyEndsMs: Int64?, creditsExtra: Double, plans: [BillingPlanInfo], packPriceCents: UInt32, packCredits: Double, hasCustomer: Bool) {
         self.available = available
         self.plan = plan
         self.planStatus = planStatus
@@ -6044,6 +6147,7 @@ public struct BillingInfo: Equatable, Hashable {
         self.creditsTotal = creditsTotal
         self.creditsMonthly = creditsMonthly
         self.creditsMonthlyTotal = creditsMonthlyTotal
+        self.creditsMonthlyEndsMs = creditsMonthlyEndsMs
         self.creditsExtra = creditsExtra
         self.plans = plans
         self.packPriceCents = packPriceCents
@@ -6075,6 +6179,7 @@ public struct FfiConverterTypeBillingInfo: FfiConverterRustBuffer {
                 creditsTotal: FfiConverterDouble.read(from: &buf), 
                 creditsMonthly: FfiConverterDouble.read(from: &buf), 
                 creditsMonthlyTotal: FfiConverterDouble.read(from: &buf), 
+                creditsMonthlyEndsMs: FfiConverterOptionInt64.read(from: &buf), 
                 creditsExtra: FfiConverterDouble.read(from: &buf), 
                 plans: FfiConverterSequenceTypeBillingPlanInfo.read(from: &buf), 
                 packPriceCents: FfiConverterUInt32.read(from: &buf), 
@@ -6092,6 +6197,7 @@ public struct FfiConverterTypeBillingInfo: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.creditsTotal, into: &buf)
         FfiConverterDouble.write(value.creditsMonthly, into: &buf)
         FfiConverterDouble.write(value.creditsMonthlyTotal, into: &buf)
+        FfiConverterOptionInt64.write(value.creditsMonthlyEndsMs, into: &buf)
         FfiConverterDouble.write(value.creditsExtra, into: &buf)
         FfiConverterSequenceTypeBillingPlanInfo.write(value.plans, into: &buf)
         FfiConverterUInt32.write(value.packPriceCents, into: &buf)
@@ -7279,6 +7385,102 @@ public func FfiConverterTypeDemoOptions_lift(_ buf: RustBuffer) throws -> DemoOp
 #endif
 public func FfiConverterTypeDemoOptions_lower(_ value: DemoOptions) -> RustBuffer {
     return FfiConverterTypeDemoOptions.lower(value)
+}
+
+
+public struct DeviceAccountInfo: Equatable, Hashable {
+    public var id: String
+    /**
+     * `claude-code` · `codex` · …
+     */
+    public var harness: String
+    public var email: String?
+    public var displayName: String?
+    public var planLabel: String?
+    public var active: Bool
+    /**
+     * Can be switched to / removed (false for logins Zeron can't read).
+     */
+    public var switchable: Bool
+    /**
+     * An API key rather than an account.
+     */
+    public var apiKey: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, 
+        /**
+         * `claude-code` · `codex` · …
+         */harness: String, email: String?, displayName: String?, planLabel: String?, active: Bool, 
+        /**
+         * Can be switched to / removed (false for logins Zeron can't read).
+         */switchable: Bool, 
+        /**
+         * An API key rather than an account.
+         */apiKey: Bool) {
+        self.id = id
+        self.harness = harness
+        self.email = email
+        self.displayName = displayName
+        self.planLabel = planLabel
+        self.active = active
+        self.switchable = switchable
+        self.apiKey = apiKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceAccountInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceAccountInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceAccountInfo {
+        return
+            try DeviceAccountInfo(
+                id: FfiConverterString.read(from: &buf), 
+                harness: FfiConverterString.read(from: &buf), 
+                email: FfiConverterOptionString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf), 
+                planLabel: FfiConverterOptionString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf), 
+                switchable: FfiConverterBool.read(from: &buf), 
+                apiKey: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceAccountInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterOptionString.write(value.email, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterOptionString.write(value.planLabel, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterBool.write(value.switchable, into: &buf)
+        FfiConverterBool.write(value.apiKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceAccountInfo_lift(_ buf: RustBuffer) throws -> DeviceAccountInfo {
+    return try FfiConverterTypeDeviceAccountInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceAccountInfo_lower(_ value: DeviceAccountInfo) -> RustBuffer {
+    return FfiConverterTypeDeviceAccountInfo.lower(value)
 }
 
 
@@ -17458,6 +17660,31 @@ fileprivate struct FfiConverterSequenceTypeDebugEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDeviceAccountInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [DeviceAccountInfo]
+
+    public static func write(_ value: [DeviceAccountInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeviceAccountInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeviceAccountInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeviceAccountInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeviceAccountInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeDeviceView: FfiConverterRustBuffer {
     typealias SwiftType = [DeviceView]
 
@@ -19022,6 +19249,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_vault_status() != 51383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_activate_account() != 7247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_agent_accounts() != 45781) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_forget_account() != 47260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_harness_enabled() != 59215) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {

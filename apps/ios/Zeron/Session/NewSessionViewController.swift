@@ -540,6 +540,9 @@ extension NewSessionViewController {
     /// takes over as for any session; the text stays put until then.
     fileprivate func createOnCloud(text: String, images: [StagedImage]) {
         guard !cloudStarting else { return }
+        if app.cloud.outOfCredits {
+            return CloudRoutes.showOutOfCredits(app: app, from: self, above: composer)
+        }
         cloudStarting = true
         composer.isUserInteractionEnabled = false
         let hud = CloudStartingHUD()
@@ -560,6 +563,8 @@ extension NewSessionViewController {
                 self.composer.text = ""
                 self.composer.images = []
                 self.onCreatedHandler(chatId, handoff)
+            } catch where CloudRoutes.isOutOfCredits(error) {
+                CloudRoutes.showOutOfCredits(app: self.app, from: self, above: self.composer)
             } catch {
                 let alert = UIAlertController(title: "Couldn't start on Cloud", message: CloudStore.message(error), preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: "OK", style: .default))

@@ -78,7 +78,7 @@ pub(crate) struct ClientInner {
     path_online: AtomicBool,
     foreground: AtomicBool,
     synced: AtomicBool,
-    harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    pub(crate) harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
 }
 
 impl Drop for ClientInner {
@@ -1139,7 +1139,9 @@ impl Client {
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
         let list = match self.inner.backend() {
-            Backend::Demo(demo) => demo.list_harnesses(device_id).await,
+            Backend::Demo(demo) => {
+                crate::providers::with_demo_toggles(true, demo.list_harnesses(device_id).await)
+            }
             Backend::Live(live) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
                 let reply = live

@@ -1,7 +1,8 @@
 import UIKit
 import UserNotifications
 
-/// Settings & utilities: account, devices, appearance, archive, diagnostics.
+/// Settings & utilities: account, providers, Cloud and billing, devices,
+/// appearance, archive.
 final class MoreViewController: UIViewController, UICollectionViewDelegate {
     private let app: AppModel
     private var collectionView: UICollectionView!
@@ -193,17 +194,19 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([
             Row(id: "account", title: app.accountName, subtitle: app.accountDetail, symbol: "person.crop.circle", accessory: .none),
         ])
+        // Agents and where they run, as the desktop groups them: Providers,
+        // then Cloud and Billing while signed in.
+        s.appendSections(["Agents"])
+        var agents = [Row(id: "providers", title: "Providers", subtitle: "Agents and their accounts on each device", symbol: "cpu")]
         if !app.isDemo || ProcessInfo.processInfo.arguments.contains("-cloud") {
-            s.appendSections(["Cloud"])
             let cloud = app.cloud
+            let github = cloud.githubAccount.map { "GitHub @\($0)" } ?? "Connect GitHub"
+            agents.append(Row(id: "cloud", title: "Cloud", subtitle: cloud.problem?.title ?? github, symbol: "cloud"))
             let credits = cloud.credits.map { "\(CloudUI.credits($0)) credits" }
             let plan = cloud.billing?.plan.map { "\($0.name) plan" }
-            s.appendItems([
-                Row(id: "cloud", title: "Cloud", subtitle: [credits, plan].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Agents on machines of their own", symbol: "cloud", tint: Palette.accent),
-                Row(id: "cloud:github", title: "GitHub", subtitle: cloud.githubAccount.map { "@\($0)" } ?? "Not connected", symbol: "chevron.left.forwardslash.chevron.right"),
-                Row(id: "cloud:agents", title: "Agent Accounts", subtitle: CloudStore.agents.compactMap { cloud.activeAccount($0) != nil ? $0.name : nil }.joined(separator: ", ").nonEmpty ?? "Sign in to Claude or ChatGPT", symbol: "person.2"),
-            ])
+            agents.append(Row(id: "billing", title: "Billing", subtitle: [plan, credits].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Plans and credits", symbol: "creditcard"))
         }
+        s.appendItems(agents)
         s.appendSections(["Devices"])
         s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
         if app.voice.available {
@@ -250,14 +253,12 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
-        case "cloud", "cloud:agents":
+        case "providers":
+            navigationController?.pushViewController(ProvidersViewController(app: app), animated: true)
+        case "cloud":
             navigationController?.pushViewController(CloudSettingsViewController(app: app), animated: true)
-        case "cloud:github":
-            if app.cloud.githubConnected {
-                navigationController?.pushViewController(CloudSettingsViewController(app: app), animated: true)
-            } else {
-                present(GitHubConnectViewController.sheet(app: app), animated: true)
-            }
+        case "billing":
+            navigationController?.pushViewController(BillingViewController(app: app), animated: true)
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")
