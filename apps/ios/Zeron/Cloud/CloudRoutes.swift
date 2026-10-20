@@ -4,7 +4,8 @@ import UIKit
 /// chat's banner), and the Cloud errors those places show.
 @MainActor
 enum CloudRoutes {
-    static let outOfCreditsMessage = "You're out of Cloud credits. Add credits to send."
+    /// Short enough for a toast beside its button.
+    static let outOfCreditsMessage = "Out of Cloud credits"
 
     /// Settings → Billing over whatever is showing.
     static func openBilling(app: AppModel, from host: UIViewController) {

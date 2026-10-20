@@ -13,6 +13,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let questions = QuestionPanel()
     private let queue = QueuePanel()
     private let pill = StatusPill()
+    /// A Cloud chat out of credits says so once, above the composer.
+    private let creditsNotice = CloudCreditsNotice()
     private let bottom = UIStackView()
     private var bottomRest: NSLayoutConstraint?
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
@@ -94,8 +96,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             let queued = self.shown.running && mode == .queue
             // Out of credits, a Cloud send can't wake its machine: say so
             // (with a way to add some) instead of a send that never lands.
-            if self.isCloud, self.app.cloud.outOfCredits {
-                CloudRoutes.showOutOfCredits(app: self.app, from: self, above: self.bottom)
+            if self.cloudOutOfCredits {
+                self.creditsNotice.nudge()
                 return .kept
             }
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
@@ -121,9 +123,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
             if case .notDelivered = self.shown.banner {
-                if self.isCloud, self.app.cloud.outOfCredits {
-                    return CloudRoutes.openBilling(app: self.app, from: self)
-                }
                 self.source.retryDelivery()
             }
         }
@@ -137,7 +136,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.translatesAutoresizingMaskIntoConstraints = false
         let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
         pillRow.axis = .horizontal
-        for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        creditsNotice.onAddCredits = { [weak self] in
+            guard let self else { return }
+            CloudRoutes.openBilling(app: self.app, from: self)
+        }
+        creditsNotice.isHidden = true
+        for v in [creditsNotice, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -500,14 +504,18 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private var isCloud: Bool { app.row(chatId)?.isCloud == true }
 
-    /// A Cloud chat whose send can't land says why — out of credits, or its
-    /// machine failed — instead of a bare "Not delivered".
+    /// Out of credits, the chat's Cloud machine can't start or wake.
+    private var cloudOutOfCredits: Bool { isCloud && app.cloud.outOfCredits }
+
+    /// A Cloud chat whose send can't land says why instead of a bare "Not
+    /// delivered": out of credits, the credits notice already does (the
+    /// pill steps aside); a failed machine, the pill names it.
     private func cloudBanner(_ banner: SessionChrome.Banner) -> SessionChrome.Banner {
         guard case .notDelivered = banner, isCloud else { return banner }
         let cloud = app.cloud
         cloud.refreshSessions()
         if cloud.outOfCredits {
-            return .failed("Out of Cloud credits · Add credits")
+            return .none
         }
         if let error = cloud.sessionError(chat: chatId, device: app.row(chatId)?.deviceId) {
             return .failed("Cloud machine: \(error) · Tap to retry")
@@ -536,8 +544,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
             let editing = self.editingQueueId != nil
-            self.pill.superview?.isHidden = c.banner == .none && !editing
-            self.pill.banner = editing ? .editing : self.cloudBanner(c.banner)
+            let banner = editing ? .editing : self.cloudBanner(c.banner)
+            self.pill.superview?.isHidden = banner == .none
+            self.pill.banner = banner
+            self.creditsNotice.isHidden = !self.cloudOutOfCredits
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
@@ -641,6 +651,70 @@ final class SessionTitleView: UIView {
         title.text = t
         subtitle.text = s
         subtitle.isHidden = s.isEmpty
+    }
+}
+
+/// "Out of Cloud credits" with its one way forward, above a Cloud chat's
+/// composer while the balance is spent. A send nudges it.
+final class CloudCreditsNotice: UIView {
+    var onAddCredits: (() -> Void)?
+    private let glass = Glass.surface()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(glass)
+        let icon = UIImageView(image: CloudUI.symbol("exclamationmark.triangle.fill", 13, weight: .semibold))
+        icon.tintColor = Palette.danger
+        icon.contentMode = .center
+        let label = UILabel()
+        label.text = "Out of Cloud credits"
+        label.font = Fonts.ui(.sansMedium, 14)
+        label.textColor = Palette.text
+        label.setContentHuggingPriority(UILayoutPriority(1), for: .horizontal)
+        var c = UIButton.Configuration.filled()
+        c.title = "Add credits"
+        c.baseBackgroundColor = Palette.text
+        c.baseForegroundColor = Palette.background
+        c.cornerStyle = .capsule
+        c.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
+        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+            var a = a
+            a.font = Fonts.ui(.sansSemibold, 13)
+            return a
+        }
+        let button = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in self?.onAddCredits?() })
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.accessibilityIdentifier = "add-credits"
+        let row = UIStackView(arrangedSubviews: [icon, label, button])
+        row.alignment = .center
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        glass.contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: topAnchor),
+            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 6),
+            row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
+            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6),
+        ])
+        accessibilityIdentifier = "cloud-credits-notice"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// A send was refused: a short shake and a warning tap point at it.
+    func nudge() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let shake = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        shake.values = [0, -8, 8, -5, 5, -2, 0]
+        shake.duration = 0.4
+        layer.add(shake, forKey: "nudge")
     }
 }
 
