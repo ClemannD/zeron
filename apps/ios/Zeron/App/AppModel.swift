@@ -189,8 +189,7 @@ final class AppModel {
     /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
     static var edgeURL: String {
         #if DEBUG
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-edge"), i + 1 < args.count { return args[i + 1] }
+        if let edge = Endpoints.debugOverride("-edge", key: "debugEdgeURL") { return edge }
         #endif
         return Endpoints.edgeURL.absoluteString
     }

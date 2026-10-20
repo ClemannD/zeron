@@ -3,8 +3,32 @@ import UIKit
 
 enum Endpoints {
     static let edgeURL = URL(string: "https://edge.zeron.sh")!
-    static let workosClientId = "client_01KWD0EAKZKD50YCQJNYSRE4BY"
+    static var workosClientId: String {
+        #if DEBUG
+        if let id = debugOverride("-workos", key: "debugWorkosClientId") { return id }
+        #endif
+        return "client_01KWD0EAKZKD50YCQJNYSRE4BY"
+    }
     static let callbackScheme = "zeron"
+
+    #if DEBUG
+    /// A launch argument that sticks: `-edge <url>` / `-workos <client>` point
+    /// the app at another stack (staging) and are remembered, so reopening it
+    /// from the home screen stays there. `-edge prod` goes back.
+    static func debugOverride(_ flag: String, key: String) -> String? {
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: flag), i + 1 < args.count {
+            let value = args[i + 1]
+            if value == "prod" {
+                UserDefaults.standard.removeObject(forKey: key)
+                return nil
+            }
+            UserDefaults.standard.set(value, forKey: key)
+            return value
+        }
+        return UserDefaults.standard.string(forKey: key)
+    }
+    #endif
 
     static func authorizeURL(state: String) -> URL {
         var c = URLComponents(string: "https://api.workos.com/user_management/authorize")!
