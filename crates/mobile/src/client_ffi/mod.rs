@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod cloud;
 mod session;
 mod voice;
 pub use voice::*;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 
 use zeron_client as zc;
 
+pub use cloud::*;
 pub use session::*;
 pub use types::*;
 
