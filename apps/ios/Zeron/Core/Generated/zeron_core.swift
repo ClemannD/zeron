@@ -1365,6 +1365,21 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func deviceForgetAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
     
+    func deviceLoginCancel(deviceId: String, loginId: String) 
+    
+    /**
+     * The code the sign-in page showed (Claude's paste fallback).
+     */
+    func deviceLoginComplete(deviceId: String, loginId: String, code: String) async throws  -> [DeviceAccountInfo]
+    
+    func deviceLoginPoll(deviceId: String, loginId: String, doneUrl: String) async throws  -> DeviceLoginPollInfo
+    
+    /**
+     * Start signing `harness` in on `device_id` (`provider`: a login
+     * option's, `None` for the default).
+     */
+    func deviceLoginStart(deviceId: String, harness: String, provider: String?, doneUrl: String) async throws  -> DeviceLoginInfo
+    
     /**
      * Offer `harness` on `device_id` or not; the device's fresh catalog.
      */
@@ -2635,6 +2650,71 @@ open func deviceForgetAccount(deviceId: String, harness: String, accountId: Stri
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func deviceLoginCancel(deviceId: String, loginId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_device_login_cancel(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),
+        FfiConverterString.lower(loginId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The code the sign-in page showed (Claude's paste fallback).
+     */
+open func deviceLoginComplete(deviceId: String, loginId: String, code: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_login_complete(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(loginId),FfiConverterString.lower(code)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func deviceLoginPoll(deviceId: String, loginId: String, doneUrl: String)async throws  -> DeviceLoginPollInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_login_poll(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(loginId),FfiConverterString.lower(doneUrl)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDeviceLoginPollInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Start signing `harness` in on `device_id` (`provider`: a login
+     * option's, `None` for the default).
+     */
+open func deviceLoginStart(deviceId: String, harness: String, provider: String?, doneUrl: String)async throws  -> DeviceLoginInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_login_start(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterOptionString.lower(provider),FfiConverterString.lower(doneUrl)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDeviceLoginInfo_lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -5814,6 +5894,103 @@ public func FfiConverterTypeVoiceSessionListener_lower(_ value: VoiceSessionList
 
 
 
+/**
+ * How an agent signs in, from the rules every platform's Providers follows.
+ */
+public struct AgentLoginRules: Equatable, Hashable {
+    /**
+     * The agent has accounts Zeron can sign in to at all.
+     */
+    public var signsIn: Bool
+    /**
+     * Zeron switches between its accounts (not Hermes, not Antigravity).
+     */
+    public var switches: Bool
+    /**
+     * It holds one login: once connected there is nothing to add.
+     */
+    public var keepsOneLogin: Bool
+    public var reportsUsage: Bool
+    /**
+     * A standing note for an agent whose accounts work differently.
+     */
+    public var note: String?
+    public var options: [LoginOptionInfo]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The agent has accounts Zeron can sign in to at all.
+         */signsIn: Bool, 
+        /**
+         * Zeron switches between its accounts (not Hermes, not Antigravity).
+         */switches: Bool, 
+        /**
+         * It holds one login: once connected there is nothing to add.
+         */keepsOneLogin: Bool, reportsUsage: Bool, 
+        /**
+         * A standing note for an agent whose accounts work differently.
+         */note: String?, options: [LoginOptionInfo]) {
+        self.signsIn = signsIn
+        self.switches = switches
+        self.keepsOneLogin = keepsOneLogin
+        self.reportsUsage = reportsUsage
+        self.note = note
+        self.options = options
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AgentLoginRules: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentLoginRules: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentLoginRules {
+        return
+            try AgentLoginRules(
+                signsIn: FfiConverterBool.read(from: &buf), 
+                switches: FfiConverterBool.read(from: &buf), 
+                keepsOneLogin: FfiConverterBool.read(from: &buf), 
+                reportsUsage: FfiConverterBool.read(from: &buf), 
+                note: FfiConverterOptionString.read(from: &buf), 
+                options: FfiConverterSequenceTypeLoginOptionInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AgentLoginRules, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.signsIn, into: &buf)
+        FfiConverterBool.write(value.switches, into: &buf)
+        FfiConverterBool.write(value.keepsOneLogin, into: &buf)
+        FfiConverterBool.write(value.reportsUsage, into: &buf)
+        FfiConverterOptionString.write(value.note, into: &buf)
+        FfiConverterSequenceTypeLoginOptionInfo.write(value.options, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentLoginRules_lift(_ buf: RustBuffer) throws -> AgentLoginRules {
+    return try FfiConverterTypeAgentLoginRules.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentLoginRules_lower(_ value: AgentLoginRules) -> RustBuffer {
+    return FfiConverterTypeAgentLoginRules.lower(value)
+}
+
+
 public struct AppshotLabel: Equatable, Hashable {
     public var appName: String
     public var windowTitle: String?
@@ -7406,6 +7583,17 @@ public struct DeviceAccountInfo: Equatable, Hashable {
      * An API key rather than an account.
      */
     public var apiKey: Bool
+    public var organization: String?
+    /**
+     * The upstream login of an agent that keeps one per model provider
+     * (OpenCode's `openai`, …).
+     */
+    public var provider: String?
+    public var usage: [UsageWindowInfo]
+    /**
+     * Why usage couldn't be read ("Sign in again", "Rate limited …").
+     */
+    public var usageError: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7418,7 +7606,14 @@ public struct DeviceAccountInfo: Equatable, Hashable {
          */switchable: Bool, 
         /**
          * An API key rather than an account.
-         */apiKey: Bool) {
+         */apiKey: Bool, organization: String?, 
+        /**
+         * The upstream login of an agent that keeps one per model provider
+         * (OpenCode's `openai`, …).
+         */provider: String?, usage: [UsageWindowInfo], 
+        /**
+         * Why usage couldn't be read ("Sign in again", "Rate limited …").
+         */usageError: String?) {
         self.id = id
         self.harness = harness
         self.email = email
@@ -7427,6 +7622,10 @@ public struct DeviceAccountInfo: Equatable, Hashable {
         self.active = active
         self.switchable = switchable
         self.apiKey = apiKey
+        self.organization = organization
+        self.provider = provider
+        self.usage = usage
+        self.usageError = usageError
     }
 
     
@@ -7452,7 +7651,11 @@ public struct FfiConverterTypeDeviceAccountInfo: FfiConverterRustBuffer {
                 planLabel: FfiConverterOptionString.read(from: &buf), 
                 active: FfiConverterBool.read(from: &buf), 
                 switchable: FfiConverterBool.read(from: &buf), 
-                apiKey: FfiConverterBool.read(from: &buf)
+                apiKey: FfiConverterBool.read(from: &buf), 
+                organization: FfiConverterOptionString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                usage: FfiConverterSequenceTypeUsageWindowInfo.read(from: &buf), 
+                usageError: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -7465,6 +7668,10 @@ public struct FfiConverterTypeDeviceAccountInfo: FfiConverterRustBuffer {
         FfiConverterBool.write(value.active, into: &buf)
         FfiConverterBool.write(value.switchable, into: &buf)
         FfiConverterBool.write(value.apiKey, into: &buf)
+        FfiConverterOptionString.write(value.organization, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterSequenceTypeUsageWindowInfo.write(value.usage, into: &buf)
+        FfiConverterOptionString.write(value.usageError, into: &buf)
     }
 }
 
@@ -7481,6 +7688,145 @@ public func FfiConverterTypeDeviceAccountInfo_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeDeviceAccountInfo_lower(_ value: DeviceAccountInfo) -> RustBuffer {
     return FfiConverterTypeDeviceAccountInfo.lower(value)
+}
+
+
+/**
+ * A computer's sign-in under way: open `url` in an auth sheet waiting for
+ * the `done_url` scheme; poll until done — or, `paste_code`, take the code
+ * the page shows back with `device_login_complete`.
+ */
+public struct DeviceLoginInfo: Equatable, Hashable {
+    public var loginId: String
+    /**
+     * Empty when the page is only known later (a poll carries it).
+     */
+    public var url: String
+    public var pasteCode: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(loginId: String, 
+        /**
+         * Empty when the page is only known later (a poll carries it).
+         */url: String, pasteCode: Bool) {
+        self.loginId = loginId
+        self.url = url
+        self.pasteCode = pasteCode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceLoginInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceLoginInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceLoginInfo {
+        return
+            try DeviceLoginInfo(
+                loginId: FfiConverterString.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                pasteCode: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceLoginInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.loginId, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterBool.write(value.pasteCode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceLoginInfo_lift(_ buf: RustBuffer) throws -> DeviceLoginInfo {
+    return try FfiConverterTypeDeviceLoginInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceLoginInfo_lower(_ value: DeviceLoginInfo) -> RustBuffer {
+    return FfiConverterTypeDeviceLoginInfo.lower(value)
+}
+
+
+public struct DeviceLoginPollInfo: Equatable, Hashable {
+    /**
+     * `pending` · `done` · `error`.
+     */
+    public var status: String
+    public var message: String?
+    /**
+     * A page first known now, to open.
+     */
+    public var url: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `pending` · `done` · `error`.
+         */status: String, message: String?, 
+        /**
+         * A page first known now, to open.
+         */url: String?) {
+        self.status = status
+        self.message = message
+        self.url = url
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceLoginPollInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceLoginPollInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceLoginPollInfo {
+        return
+            try DeviceLoginPollInfo(
+                status: FfiConverterString.read(from: &buf), 
+                message: FfiConverterOptionString.read(from: &buf), 
+                url: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceLoginPollInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.message, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceLoginPollInfo_lift(_ buf: RustBuffer) throws -> DeviceLoginPollInfo {
+    return try FfiConverterTypeDeviceLoginPollInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceLoginPollInfo_lower(_ value: DeviceLoginPollInfo) -> RustBuffer {
+    return FfiConverterTypeDeviceLoginPollInfo.lower(value)
 }
 
 
@@ -8787,6 +9133,80 @@ public func FfiConverterTypeLiveStatus_lift(_ buf: RustBuffer) throws -> LiveSta
 #endif
 public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer {
     return FfiConverterTypeLiveStatus.lower(value)
+}
+
+
+public struct LoginOptionInfo: Equatable, Hashable {
+    /**
+     * The engine's `provider` (`None`: the agent's only login).
+     */
+    public var provider: String?
+    public var label: String
+    /**
+     * The add row's title with no account yet, and with some.
+     */
+    public var firstTitle: String
+    public var moreTitle: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The engine's `provider` (`None`: the agent's only login).
+         */provider: String?, label: String, 
+        /**
+         * The add row's title with no account yet, and with some.
+         */firstTitle: String, moreTitle: String) {
+        self.provider = provider
+        self.label = label
+        self.firstTitle = firstTitle
+        self.moreTitle = moreTitle
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LoginOptionInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLoginOptionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LoginOptionInfo {
+        return
+            try LoginOptionInfo(
+                provider: FfiConverterOptionString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                firstTitle: FfiConverterString.read(from: &buf), 
+                moreTitle: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LoginOptionInfo, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.firstTitle, into: &buf)
+        FfiConverterString.write(value.moreTitle, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLoginOptionInfo_lift(_ buf: RustBuffer) throws -> LoginOptionInfo {
+    return try FfiConverterTypeLoginOptionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLoginOptionInfo_lower(_ value: LoginOptionInfo) -> RustBuffer {
+    return FfiConverterTypeLoginOptionInfo.lower(value)
 }
 
 
@@ -11215,6 +11635,73 @@ public func FfiConverterTypeTranscriptStatus_lift(_ buf: RustBuffer) throws -> T
 #endif
 public func FfiConverterTypeTranscriptStatus_lower(_ value: TranscriptStatus) -> RustBuffer {
     return FfiConverterTypeTranscriptStatus.lower(value)
+}
+
+
+/**
+ * One plan rate-limit window ("Session", "Week").
+ */
+public struct UsageWindowInfo: Equatable, Hashable {
+    public var label: String
+    /**
+     * 0.0…1.0 of the window used.
+     */
+    public var usedFraction: Float
+    public var resetsAtMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, 
+        /**
+         * 0.0…1.0 of the window used.
+         */usedFraction: Float, resetsAtMs: Int64?) {
+        self.label = label
+        self.usedFraction = usedFraction
+        self.resetsAtMs = resetsAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension UsageWindowInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUsageWindowInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UsageWindowInfo {
+        return
+            try UsageWindowInfo(
+                label: FfiConverterString.read(from: &buf), 
+                usedFraction: FfiConverterFloat.read(from: &buf), 
+                resetsAtMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: UsageWindowInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterFloat.write(value.usedFraction, into: &buf)
+        FfiConverterOptionInt64.write(value.resetsAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUsageWindowInfo_lift(_ buf: RustBuffer) throws -> UsageWindowInfo {
+    return try FfiConverterTypeUsageWindowInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUsageWindowInfo_lower(_ value: UsageWindowInfo) -> RustBuffer {
+    return FfiConverterTypeUsageWindowInfo.lower(value)
 }
 
 
@@ -17910,6 +18397,31 @@ fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeLoginOptionInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [LoginOptionInfo]
+
+    public static func write(_ value: [LoginOptionInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLoginOptionInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LoginOptionInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LoginOptionInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLoginOptionInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeModelInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ModelInfo]
 
@@ -18277,6 +18789,31 @@ fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTextRun.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeUsageWindowInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [UsageWindowInfo]
+
+    public static func write(_ value: [UsageWindowInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUsageWindowInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UsageWindowInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UsageWindowInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeUsageWindowInfo.read(from: &buf))
         }
         return seq
     }
@@ -18795,6 +19332,17 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * [`AgentLoginRules`] for `harness` (`claude-code`, `codex`, …).
+ */
+public func agentLoginRules(harness: String) -> AgentLoginRules  {
+    return try!  FfiConverterTypeAgentLoginRules_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_agent_login_rules(
+        FfiConverterString.lower(harness),uniffiCallStatus
+    )
+})
+}
+/**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
 public func fileMentionLink(path: String, isDir: Bool) -> String  {
@@ -18976,6 +19524,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_agent_login_rules() != 18451) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
@@ -19258,6 +19809,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_forget_account() != 47260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_cancel() != 47230) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_complete() != 32418) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_poll() != 8555) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_start() != 47566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_harness_enabled() != 59215) {

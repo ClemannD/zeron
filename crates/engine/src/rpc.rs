@@ -1841,6 +1841,7 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            | methods::RELAY_AGENT_LOGIN_CALLBACK
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -4085,6 +4086,22 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
+            }
+            methods::RELAY_AGENT_LOGIN_CALLBACK => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    login_id: String,
+                    requester_device_id: String,
+                    path: String,
+                }
+                let p: Params = parse_params(params)?;
+                let relayed = self
+                    .agent_accounts
+                    .relay_callback(&p.login_id, &p.requester_device_id, &p.path)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&relayed)
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;

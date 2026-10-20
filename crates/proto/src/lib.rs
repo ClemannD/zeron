@@ -15,6 +15,7 @@ pub mod invocation;
 pub mod motion;
 pub mod preview;
 pub mod projectless;
+pub mod providers;
 pub mod sidebar_pins;
 pub mod view;
 pub mod voice;

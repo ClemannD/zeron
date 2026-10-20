@@ -73,7 +73,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "search" { router.showSearch() }
                 #if DEBUG
                 // Cloud screens straight away (screenshots, tests).
-                if route.hasPrefix("cloud") || route.hasPrefix("providers") || route == "billing" || route == "welcome" { self.openCloudRoute(route) }
+                if route.hasPrefix("cloud") || route.hasPrefix("providers") || route.hasPrefix("accounts") || route == "billing" || route == "welcome" { self.openCloudRoute(route) }
                 #endif
             }
         }
@@ -109,6 +109,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         if parts.first == "providers" {
             return root.present(UINavigationController(rootViewController: ProvidersViewController(app: app, target: parts.dropFirst().first)), animated: false)
         }
+        if parts.first == "accounts", let harness = parts.dropFirst().first, let host = app.hostOptions.first {
+            // A computer's accounts for one agent (the first computer).
+            let vc = AgentAccountsViewController(app: app, target: .device(id: host.id, name: host.name, harness: harness, label: harness))
+            return root.present(UINavigationController(rootViewController: vc), animated: false)
+        }
         if parts.first == "welcome" {
             // The signed-out welcome page, without signing out.
             let welcome = SignInViewController(app: app)
@@ -124,7 +129,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         case "billing": nav.pushViewController(BillingViewController(app: app), animated: false)
         case "agent":
             if let h = parts.dropFirst(2).first, let agent = CloudStore.agents.first(where: { $0.harness == h }) {
-                nav.pushViewController(AgentAccountsViewController(app: app, agent: agent), animated: false)
+                nav.pushViewController(AgentAccountsViewController(app: app, target: .cloud(agent)), animated: false)
             }
         case "repos":
             root.present(UINavigationController(rootViewController: CloudRepoPickerViewController(app: app)), animated: false)

@@ -433,7 +433,7 @@ async fn await_callback(
 }
 
 /// The request target of a browser's `GET` (headers read and discarded).
-async fn read_request_target(socket: &mut TcpStream) -> Option<String> {
+pub(crate) async fn read_request_target(socket: &mut TcpStream) -> Option<String> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 2048];
     let read = async {
@@ -458,7 +458,7 @@ async fn read_request_target(socket: &mut TcpStream) -> Option<String> {
         .map(str::to_string)
 }
 
-fn http_response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+pub(crate) fn http_response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
     let mut response = format!("HTTP/1.1 {status}\r\n");
     for (name, value) in headers {
         response.push_str(&format!("{name}: {value}\r\n"));

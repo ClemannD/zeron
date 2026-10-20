@@ -94,6 +94,16 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+/// What a relayed sign-in callback answered ([`AgentAccounts::relay_callback`]):
+/// the device that caught the browser redirect answers the browser alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayedCallback {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
@@ -2438,6 +2448,78 @@ impl AgentAccounts {
         };
         self.remove_flow(login_id);
         Some(poll)
+    }
+
+    /// Replay a sign-in's browser callback that another device caught on its
+    /// own loopback (the phone, which can't pipe the connection): one GET of
+    /// `path` to the port this login registered for `requester` — only a
+    /// live login that device started, only that port, only a plain path.
+    /// The CLI (or engine) listening there finishes the login as if the
+    /// browser had landed on this computer.
+    pub async fn relay_callback(
+        &self,
+        login_id: &str,
+        requester: &str,
+        path: &str,
+    ) -> Result<RelayedCallback, EngineError> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let port = self
+            .inner
+            .callback_routes
+            .port_for(login_id, requester)
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        if !path.starts_with('/')
+            || path.len() > 8 * 1024
+            || path.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(EngineError::Other("not a sign-in callback path".into()));
+        }
+        let connect = async {
+            match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                Ok(socket) => Ok(socket),
+                Err(v4) => tokio::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port))
+                    .await
+                    .map_err(|_| v4),
+            }
+        };
+        let exchange = async {
+            let mut socket = connect.await?;
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(request.as_bytes()).await?;
+            let mut response = Vec::new();
+            let mut buf = [0u8; 4096];
+            while response.len() < 64 * 1024 {
+                let read = socket.read(&mut buf).await?;
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&buf[..read]);
+                if response.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(response)
+        };
+        let response = tokio::time::timeout(Duration::from_secs(20), exchange)
+            .await
+            .map_err(|_| EngineError::Other("the sign-in didn't answer its callback".into()))?
+            .map_err(|e| EngineError::Other(format!("couldn't reach the sign-in: {e}")))?;
+        let head = String::from_utf8_lossy(&response);
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+        let location = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("location")
+                .then(|| value.trim().to_owned())
+        });
+        Ok(RelayedCallback { status, location })
     }
 
     /// Drop a flow's bookkeeping, and with it any callback route it published.
@@ -5473,6 +5555,52 @@ mod login_tests {
         let poll = poll_until_settled(&accounts, &start.login_id).await;
         assert_eq!(poll.status, AgentLoginStatus::Error);
         assert!(poll.message.unwrap().contains("User declined"));
+    }
+
+    #[tokio::test]
+    async fn a_relayed_callback_reaches_only_the_requesters_login_port() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = zeron_preview::login::CallbackRoutes::default();
+        let accounts = AgentAccounts::with_callback_routes(config(tmp.path()), routes.clone());
+        // The CLI's loopback listener, waiting for the browser.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cli = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            socket
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: https://example.com/done\r\n\r\n")
+                .await
+                .unwrap();
+            request
+        });
+        routes.register("login-1", port, "phone", Duration::from_secs(60));
+        // Another device, an unknown login, or a request that isn't a plain
+        // path go nowhere.
+        for (login, requester, path) in [
+            ("login-1", "laptop", "/callback"),
+            ("login-2", "phone", "/callback"),
+            ("login-1", "phone", "/callback HTTP/1.1\r\nX: y"),
+            ("login-1", "phone", "http://evil/"),
+        ] {
+            let refused = accounts.relay_callback(login, requester, path).await;
+            assert!(refused.is_err(), "{login} {requester} {path:?}");
+        }
+        // The phone's relay lands on the CLI exactly as the browser would.
+        let relayed = accounts
+            .relay_callback("login-1", "phone", "/callback?code=abc&state=xyz")
+            .await
+            .unwrap();
+        assert_eq!(relayed.status, 302);
+        assert_eq!(
+            relayed.location.as_deref(),
+            Some("https://example.com/done")
+        );
+        let request = cli.await.unwrap();
+        assert!(request.starts_with("GET /callback?code=abc&state=xyz HTTP/1.1\r\n"));
     }
 
     #[tokio::test]

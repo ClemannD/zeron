@@ -294,7 +294,7 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
             } else if accounts[target] == nil {
                 subtitle = failed[target] ?? (online ? "Installed" : "Offline")
             } else {
-                subtitle = Self.summary(active: mine.first(where: \.active).map(Self.accountTitle), count: mine.count, showsNone: Self.signsIn(h.id))
+                subtitle = Self.summary(active: mine.first(where: \.active).map(Self.accountTitle), count: mine.count, showsNone: agentLoginRules(harness: h.id).signsIn)
             }
             return Row(
                 id: "\(target):\(h.id)",
@@ -305,15 +305,12 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
                 // The last agent standing stays on: new sessions need one.
                 toggleEnabled: online && h.installed && !(on && enabledCount <= 1),
                 dimmed: !h.installed,
-                disclosure: h.installed && !mine.isEmpty,
+                // Every agent with logins opens its accounts — to add the
+                // first one too.
+                disclosure: h.installed && (agentLoginRules(harness: h.id).signsIn || !mine.isEmpty),
                 busy: toggling.contains(h.id)
             )
         }
-    }
-
-    /// Agents whose logins Zeron lists (an account summary means something).
-    private static func signsIn(_ harness: String) -> Bool {
-        ["claude-code", "codex", "cursor", "opencode", "pi", "hermes", "grok", "devin"].contains(harness)
     }
 
     static func accountTitle(_ a: DeviceAccountInfo) -> String {
@@ -390,125 +387,20 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
         guard let row = dataSource.itemIdentifier(for: path), row.disclosure, let harness = row.harness else { return }
         if onCloud {
             guard let agent = CloudStore.agents.first(where: { $0.harness == harness }) else { return }
-            show(AgentAccountsViewController(app: app, agent: agent))
+            show(AgentAccountsViewController(app: app, target: .cloud(agent)))
         } else {
-            let vc = DeviceAccountsViewController(app: app, device: target, deviceName: targetName, harness: harness, label: row.title, accounts: accounts[target] ?? [])
+            let device = target
+            let vc = AgentAccountsViewController(
+                app: app,
+                target: .device(id: device, name: targetName, harness: harness, label: row.title),
+                accounts: accounts[device]
+            )
             vc.onChange = { [weak self] list in
                 guard let self else { return }
-                self.accounts[vc.device] = list
+                self.accounts[device] = list
                 self.reload()
             }
             show(vc)
-        }
-    }
-}
-
-/// One agent's logins on a computer: the one in use, switching, removing.
-/// New logins are made on that computer (its browser reaches its loopback).
-final class DeviceAccountsViewController: UITableViewController {
-    private let app: AppModel
-    let device: String
-    private let deviceName: String
-    private let harness: String
-    private var all: [DeviceAccountInfo]
-    private var busy: String?
-    var onChange: (([DeviceAccountInfo]) -> Void)?
-
-    init(app: AppModel, device: String, deviceName: String, harness: String, label: String, accounts: [DeviceAccountInfo]) {
-        self.app = app
-        self.device = device
-        self.deviceName = deviceName
-        self.harness = harness
-        self.all = accounts
-        super.init(style: .insetGrouped)
-        title = label
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    private var rows: [DeviceAccountInfo] { all.filter { $0.harness == harness } }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = Palette.background
-        tableView.backgroundColor = .clear
-        navigationItem.largeTitleDisplayMode = .never
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "account")
-    }
-
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
-
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        "Accounts on \(deviceName)"
-    }
-
-    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        "New sessions on \(deviceName) use the account marked in use. Tap another to switch; swipe to remove. To add one, sign in from Zeron on that computer."
-    }
-
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let a = rows[indexPath.row]
-        let cell = tableView.dequeueReusableCell(withIdentifier: "account", for: indexPath)
-        var c = UIListContentConfiguration.subtitleCell()
-        c.text = ProvidersViewController.accountTitle(a)
-        c.textProperties.font = Fonts.ui(.sansMedium, 16)
-        c.textProperties.color = a.switchable || a.active ? Palette.text : Palette.tertiary
-        c.secondaryText = [a.planLabel, a.active ? "In use" : nil, a.switchable ? nil : "Can't switch from here"].compactMap { $0 }.joined(separator: " · ").nonEmpty
-        c.secondaryTextProperties.font = Fonts.ui(.sans, 13)
-        c.secondaryTextProperties.color = Palette.secondary
-        c.image = a.apiKey ? CloudUI.symbol("key.fill", 15) : BrandMarks.image(for: harness, side: 20)
-        c.imageProperties.tintColor = Palette.text
-        c.imageProperties.reservedLayoutSize = CGSize(width: 28, height: 28)
-        cell.contentConfiguration = c
-        cell.backgroundColor = Palette.elevated
-        if busy == a.id {
-            let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.startAnimating()
-            cell.accessoryView = spinner
-            cell.accessoryType = .none
-        } else {
-            cell.accessoryView = nil
-            cell.accessoryType = a.active ? .checkmark : .none
-        }
-        cell.tintColor = Palette.accent
-        cell.accessibilityIdentifier = "device-account-\(a.id)"
-        return cell
-    }
-
-    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
-        let a = rows[indexPath.row]
-        guard busy == nil, !a.active, a.switchable else { return }
-        run(a.id) { client in try await client.deviceActivateAccount(deviceId: self.device, harness: self.harness, accountId: a.id) }
-    }
-
-    override func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        let a = rows[indexPath.row]
-        guard a.switchable, busy == nil else { return nil }
-        let remove = UIContextualAction(style: .destructive, title: "Remove") { [weak self] _, _, done in
-            guard let self else { return done(false) }
-            self.run(a.id) { client in try await client.deviceForgetAccount(deviceId: self.device, harness: self.harness, accountId: a.id) }
-            done(true)
-        }
-        return UISwipeActionsConfiguration(actions: [remove])
-    }
-
-    private func run(_ id: String, _ work: @escaping (CoreClient) async throws -> [DeviceAccountInfo]) {
-        guard let client = app.client else { return }
-        busy = id
-        tableView.reloadData()
-        Task { @MainActor in
-            do {
-                self.all = try await work(client)
-                self.onChange?(self.all)
-                UISelectionFeedbackGenerator().selectionChanged()
-            } catch {
-                let a = UIAlertController(title: "Couldn't update the account", message: CloudStore.message(error), preferredStyle: .alert)
-                a.addAction(UIAlertAction(title: "OK", style: .default))
-                self.present(a, animated: true)
-            }
-            self.busy = nil
-            self.tableView.reloadData()
         }
     }
 }

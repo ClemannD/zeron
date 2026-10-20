@@ -231,6 +231,10 @@ pub mod methods {
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
+    /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
+    /// callback the requesting device caught on its own loopback (a phone
+    /// signing a computer's agent in). Answers `{status, location?}`.
+    pub const RELAY_AGENT_LOGIN_CALLBACK: &str = "RelayAgentLoginCallback";
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
