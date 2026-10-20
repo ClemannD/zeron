@@ -40,13 +40,23 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   refreshes, so parallel sessions never race a refresh token).
 
 ### Headed / headless
-Single binary `zeron`:
-- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
-  otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
-  serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
-  port**. The embedded engine is not private: any other viewport can attach to the running app
-  without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
-  window still opens, having lost only the ability to host peers.
+Binaries `zeron` (app + CLI) and `zeron-engine` (the app's background engine, no UI linked):
+- `zeron` — headed. If an engine is already listening on the IPC port, connect to it. Otherwise
+  start the **background engine** (`crates/engine/src/managed.rs`) — `zeron-engine` beside the app
+  ("Zeron Engine" inside the macOS bundle), or `zeron engine` where no separate executable ships
+  (Windows, which updates as a single `zeron.exe`) — and attach to it. It is spawned detached from
+  the app (own session/process group, no inherited pipes), not through a service manager, so on
+  macOS privacy permissions stay attributed to the app and no background-item approval is needed.
+  Closing or quitting the app leaves it running with every session; it shows up as its own process.
+  The app reconnects when the connection drops (starting it again if it is gone) without resetting
+  what's on screen, and stops it itself only to replace the runtime (sign-out, the local→synced
+  switch). After an app update it restarts into the new version once no run or terminal is live.
+  If it can't start, the app embeds the engine **in-process** as before (RPC over an in-memory
+  duplex — same protocol — and serving that engine on the IPC port); `ZERON_EMBED_ENGINE=1` forces it.
+- Desktop banners are the engine's (`desktop_notify.rs`, advertised as `desktop-notifications-v1`):
+  finished runs, questions, failures, connection loss and agent updates keep arriving with the app
+  closed. Preferences come from the app's `ui-settings.json`; "only in the background" uses window
+  focus the app reports (`SetViewportFocus`). The app keeps the chimes, decided by the same baselines.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles

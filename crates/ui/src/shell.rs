@@ -3056,13 +3056,18 @@ impl Shell {
             // focused app still stays a chime — you're already looking at
             // Zeron; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
+            // The engine posts the banners when it can (with the window
+            // closed too); the app then only chimes.
+            let engine_posts = state.read(cx).engine_posts_banners();
             for (chat_id, status, send_pending, title, notify) in sessions {
                 let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
                 // Keep side-chat baselines current, but never emit their
                 // completion, input-request, or failure sounds/banners.
                 if notify
                     && let Some(prev) = prev
-                    && let Some(sound) = status.sound_since(&prev, send_pending)
+                    && let Some(sound) = status
+                        .ping_since(&prev, send_pending)
+                        .map(crate::sound::Sound::from)
                 {
                     if self.settings.session_sound_enabled(sound) {
                         let should_play = sound != crate::sound::Sound::Attention
@@ -3073,7 +3078,8 @@ impl Shell {
                             crate::sound::play(sound);
                         }
                     }
-                    if self.settings.notifications_enabled
+                    if !engine_posts
+                        && self.settings.notifications_enabled
                         && !(self.settings.notifications_background_only && app_focused)
                     {
                         let title = title.unwrap_or_else(|| "New session".into());
@@ -3086,11 +3092,11 @@ impl Shell {
                     }
                 }
             }
-            if let Some(sound) = self.connectivity_notifications.update(
-                connectivity,
-                connectivity_observed,
-                std::time::Instant::now(),
-            ) {
+            if let Some(sound) = self
+                .connectivity_notifications
+                .update(connectivity, connectivity_observed, std::time::Instant::now())
+                .map(crate::sound::Sound::from)
+            {
                 if self.settings.session_sound_enabled(sound)
                     && self
                         .attention_sound_gate
@@ -3098,7 +3104,8 @@ impl Shell {
                 {
                     crate::sound::play(sound);
                 }
-                if self.settings.notifications_enabled
+                if !engine_posts
+                    && self.settings.notifications_enabled
                     && !(self.settings.notifications_background_only && app_focused)
                 {
                     let body = match connectivity {
@@ -3156,7 +3163,8 @@ impl Shell {
                         this.harness_update_seen.insert(key.clone());
                     }
                     let focused = cx.active_window().is_some();
-                    if this.settings.notifications_enabled
+                    if !this.state.read(cx).engine_posts_banners()
+                        && this.settings.notifications_enabled
                         && this.settings.agent_update_notifications
                         && !(this.settings.notifications_background_only && focused)
                     {
@@ -6536,6 +6544,7 @@ impl Shell {
         };
         self.sync_flow = SyncFlow::SigningOut;
         self.runtime_change_error = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown_dir = data_dir.clone();
@@ -6681,6 +6690,7 @@ impl Shell {
         self.sync_flow = SyncFlow::Switching { import };
         self.runtime_change_error = None;
         self.import_current = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
@@ -6884,6 +6894,7 @@ impl Shell {
         }
 
         self.runtime_change_error = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown = Tokio::spawn(cx, async move {
@@ -13580,10 +13591,17 @@ impl Render for Shell {
         }
 
         if self.activation_sub.is_none() {
+            // The window's focus as it opens; changes follow below.
+            let active = window.is_window_active();
+            self.state
+                .update(cx, |state, cx| state.set_viewport_focused(active, cx));
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
+                    let active = window.is_window_active();
+                    this.state
+                        .update(cx, |state, cx| state.set_viewport_focused(active, cx));
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
                     {

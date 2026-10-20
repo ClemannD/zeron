@@ -717,6 +717,8 @@ pub struct EngineRpc {
     local_import: Option<crate::local_import::LocalImporter>,
     /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
     credentials: Option<crate::credentials::CredentialBroker>,
+    /// Viewports' window focus, for desktop banners.
+    viewport_focus: crate::desktop_notify::ViewportFocus,
     engine_info: EngineInfo,
 }
 
@@ -741,7 +743,14 @@ impl EngineRpc {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: {
+                let mut capabilities = zeron_proto::capabilities::current();
+                if crate::desktop_notify::enabled() {
+                    capabilities
+                        .push(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1.to_string());
+                }
+                capabilities
+            },
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
@@ -766,6 +775,7 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             credentials: None,
+            viewport_focus: Default::default(),
             engine_info,
         }
     }
@@ -790,6 +800,12 @@ impl EngineRpc {
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
     pub fn with_updater(mut self, updater: zeron_update::Updater) -> Self {
         self.updater = Some(updater);
+        self
+    }
+
+    /// Share the core's viewport focus (`SetViewportFocus` writes it).
+    pub fn with_viewport_focus(mut self, focus: crate::desktop_notify::ViewportFocus) -> Self {
+        self.viewport_focus = focus;
         self
     }
 
@@ -2435,6 +2451,17 @@ impl RpcService for EngineRpc {
                 self.doc_host.persist_fork(&target).map_err(failed)?;
                 self.workspace.import_chat_row(&chat).map_err(failed)?;
                 RpcReply::value(&chat)
+            }
+            methods::SET_VIEWPORT_FOCUS => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    viewport_id: String,
+                    focused: bool,
+                }
+                let p: Params = parse_params(params)?;
+                self.viewport_focus.set(&p.viewport_id, p.focused);
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::FOCUS_CHAT => {
                 let p: ChatParams = parse_params(params)?;

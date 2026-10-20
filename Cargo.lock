@@ -13574,6 +13574,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-mcp",
+ "zeron-notify",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
@@ -13670,6 +13671,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
+ "zeron-notify",
  "zeron-preview",
  "zeron-proto",
  "zeron-rpc",
@@ -13758,6 +13760,14 @@ dependencies = [
  "zeron-visual",
  "zeron-visual-gpu",
  "zeron-voice-session",
+]
+
+[[package]]
+name = "zeron-notify"
+version = "0.2.114"
+dependencies = [
+ "objc",
+ "tracing",
 ]
 
 [[package]]
@@ -13979,6 +13989,7 @@ dependencies = [
  "zeron-engine",
  "zeron-harness",
  "zeron-markdown",
+ "zeron-notify",
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",

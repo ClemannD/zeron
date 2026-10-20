@@ -72,6 +72,10 @@ pub mod methods {
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";
+    /// `{viewportId, focused}`: an app window gained or lost focus (desktop
+    /// banners hold back while one is focused). Focused viewports repeat it;
+    /// a report goes stale after 45 s.
+    pub const SET_VIEWPORT_FOCUS: &str = "SetViewportFocus";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";

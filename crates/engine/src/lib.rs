@@ -24,6 +24,8 @@ mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
 pub mod credentials;
+pub mod deferred;
+pub mod desktop_notify;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
@@ -32,6 +34,7 @@ pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+pub mod managed;
 mod model_catalogs;
 pub mod profile;
 pub mod project_actions;
@@ -153,6 +156,8 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
+    /// Which app windows are focused (desktop banners hold back while one is).
+    pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
@@ -367,6 +372,7 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             cloud: std::sync::Mutex::new(None),
+            viewport_focus: desktop_notify::ViewportFocus::default(),
             _instance_lock: lock,
         })
     }
@@ -500,7 +506,8 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
-        .with_harness_updates(self.harness_updates.clone());
+        .with_harness_updates(self.harness_updates.clone())
+        .with_viewport_focus(self.viewport_focus.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -616,6 +623,8 @@ pub struct Engine {
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    /// Desktop banners for this engine's sessions (desktop engines only).
+    notifier: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -673,13 +682,26 @@ impl EngineRuntime {
     }
 
     pub async fn shutdown(&self) {
+        self.stop_notifier();
         self.disconnect_edge();
         self.core.shutdown().await;
+    }
+
+    fn stop_notifier(&self) {
+        if let Some(task) = self
+            .notifier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
     }
 }
 
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
+        self.stop_notifier();
         self.host_relay
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -797,7 +819,14 @@ impl Engine {
             device_id: load_or_create_device_id(&config.data_dir)?,
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: {
+                let mut capabilities = zeron_proto::capabilities::current();
+                if desktop_notify::enabled() {
+                    capabilities
+                        .push(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1.to_string());
+                }
+                capabilities
+            },
         })
     }
 
@@ -1001,9 +1030,12 @@ impl Engine {
             core.start_host_relay(&edge.url)
         });
 
+        let notifier = desktop_notify::enabled()
+            .then(|| desktop_notify::spawn(&core, config.data_dir.clone()));
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
+            notifier: std::sync::Mutex::new(notifier),
         })
     }
 

@@ -29,12 +29,12 @@ use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
-use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
+use zeron_engine::{EngineConfig, EngineRuntime, InstanceLock};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcService, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -128,6 +128,11 @@ trait EngineBackend: Send + Sync {
     }
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
+    /// Resolves when the connection to the engine is lost (a separate
+    /// engine exited or crashed). Never for an in-process engine.
+    async fn closed(&self) {
+        std::future::pending::<()>().await
+    }
 }
 
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
@@ -171,75 +176,21 @@ impl EngineBackend for InProcessEngine {
     }
 }
 
-#[derive(Clone)]
-enum DeferredEngineState {
-    Waiting,
-    Ready,
-    Failed(String),
-}
+use zeron_engine::deferred::{
+    DeferredEngine, DeferredState as DeferredEngineState, wait as wait_for_deferred_engine,
+};
 
-/// Serves engine identity and AuthRpc immediately, then holds data calls only
-/// while a captured synced profile still needs organization onboarding.
-/// Existing subscriptions attach to the assembled service without reconnecting.
-struct DeferredEngineRpc {
-    auth: AuthRpc,
-    engine_info: EngineInfo,
-    state: tokio::sync::watch::Receiver<DeferredEngineState>,
-    service: Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>,
-}
+/// Start the app's background engine when no engine serves the port, and
+/// attach to it, rather than embedding one (set once at startup by the app;
+/// tests and fixtures embed).
+static LAUNCH_BACKGROUND_ENGINE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-#[async_trait]
-impl RpcService for DeferredEngineRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if method == methods::ENGINE_INFO {
-            return RpcReply::value(&self.engine_info);
-        }
-        if method == methods::ENGINE_READY {
-            let mut state = self.state.clone();
-            return match wait_for_deferred_engine(&mut state).await {
-                Ok(()) => RpcReply::value(&serde_json::json!({ "ready": true })),
-                Err(message) => Err(RpcError::Failed(message)),
-            };
-        }
-        if AuthRpc::handles(method) {
-            return self.auth.handle(method, params).await;
-        }
-
-        let mut state = self.state.clone();
-        loop {
-            let current = { state.borrow().clone() };
-            match current {
-                DeferredEngineState::Waiting => {}
-                DeferredEngineState::Ready => {
-                    let service = self.service.get().ok_or_else(|| {
-                        RpcError::Failed(
-                            "embedded engine became ready without an RPC service".into(),
-                        )
-                    })?;
-                    return service.handle(method, params).await;
-                }
-                DeferredEngineState::Failed(message) => return Err(RpcError::Failed(message)),
-            }
-            state.changed().await.map_err(|_| RpcError::Closed)?;
-        }
-    }
-}
-
-async fn wait_for_deferred_engine(
-    state: &mut tokio::sync::watch::Receiver<DeferredEngineState>,
-) -> Result<(), String> {
-    loop {
-        let current = { state.borrow().clone() };
-        match current {
-            DeferredEngineState::Waiting => {}
-            DeferredEngineState::Ready => return Ok(()),
-            DeferredEngineState::Failed(message) => return Err(message),
-        }
-        state
-            .changed()
-            .await
-            .map_err(|_| "embedded engine assembly ended without a result".to_string())?;
-    }
+/// Have [`EngineHandle::bootstrap`] start the background engine
+/// (`zeron_engine::managed`) instead of embedding one. Embedding stays the
+/// fallback when it can't start.
+pub fn launch_background_engine() {
+    LAUNCH_BACKGROUND_ENGINE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// External daemon over `ws://127.0.0.1:{port}`.
@@ -265,6 +216,9 @@ impl EngineBackend for RemoteEngine {
         EngineMode::Remote {
             url: self.url.clone(),
         }
+    }
+    async fn closed(&self) {
+        self.client.closed().await;
     }
     async fn shutdown(&self) {
         // The daemon outlives this viewport; only stop our readiness probe.
@@ -302,7 +256,6 @@ impl EngineHandle {
             return Ok(handle);
         }
 
-        tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
         let engine_config = EngineConfig {
             data_dir: config.data_dir,
             edge_url: config.edge_url,
@@ -312,7 +265,13 @@ impl EngineHandle {
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
         };
+        if LAUNCH_BACKGROUND_ENGINE.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(handle) = Self::launch_background(&engine_config).await
+        {
+            return Ok(handle);
+        }
 
+        tracing::info!(data_dir = %engine_config.data_dir.display(), "no engine on port; embedding one");
         // Own the data dir before opening anything under it or binding IPC —
         // the lock, not the port bind, is the ownership decision. A failed
         // acquire means an out-of-process engine holds the dir but was not
@@ -338,20 +297,8 @@ impl EngineHandle {
             }
         };
 
-        let auth = Engine::build_auth(&engine_config).await;
-        let workspace_scope = Engine::initial_workspace_scope(&auth);
-        let initial_profile = Engine::resolve_profile(&engine_config, &auth, workspace_scope)?;
-        let profile_is_resolved = initial_profile.is_some();
-        let engine_info = Engine::engine_info(&engine_config, workspace_scope)?;
-        let refresh_task = auth.spawn_refresh_loop();
-        let (state_tx, mut state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let assembled_service = Arc::new(tokio::sync::OnceCell::new());
-        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc {
-            auth: AuthRpc::new(auth.clone()),
-            engine_info: engine_info.clone(),
-            state: state_rx.clone(),
-            service: assembled_service.clone(),
-        });
+        let mut deferred = DeferredEngine::prepare(&engine_config).await?;
+        let service = deferred.service.clone();
         let client = memory_client(service.clone());
 
         // Serve the same service on the IPC port so a terminal viewport can
@@ -379,91 +326,67 @@ impl EngineHandle {
                 None
             }
         };
-        let runtime = Arc::new(tokio::sync::Mutex::new(None));
-        let runtime_for_boot = runtime.clone();
-        let service_for_boot = assembled_service.clone();
         // Agents only learn a port THIS window serves: a lost bind race must
         // not point their injected MCP server at some other engine.
         let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
-        let ipc_token_file = zeron_rpc::ipc_auth::token_path(&engine_config.data_dir);
-        // The instance lock rides into the boot task and is consumed by
-        // assembly — held through sign-in onboarding too, because this process
-        // owns the data dir from the moment it decided to embed.
-        let boot_task = tokio::spawn(async move {
-            let profile = match initial_profile {
-                Some(profile) => profile,
-                None => {
-                    let mut auth_state = auth.watch_state();
-                    while !auth_state.borrow().is_signed_in() {
-                        if auth_state.changed().await.is_err() {
-                            state_tx.send_replace(DeferredEngineState::Failed(
-                                "authentication state closed before workspace onboarding".into(),
-                            ));
-                            return;
-                        }
-                    }
-                    match Engine::resolve_profile(&engine_config, &auth, workspace_scope) {
-                        Ok(Some(profile)) => profile,
-                        Ok(None) => {
-                            state_tx.send_replace(DeferredEngineState::Failed(
-                                "workspace onboarding completed without an organization".into(),
-                            ));
-                            return;
-                        }
-                        Err(err) => {
-                            state_tx.send_replace(DeferredEngineState::Failed(err.to_string()));
-                            return;
-                        }
-                    }
-                }
-            };
-
-            match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
-                Ok(engine_runtime) => {
-                    let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
-                    if let Some(port) = served_ipc_port {
-                        engine_runtime.core().sessions.set_ipc_port(port);
-                        engine_runtime
-                            .core()
-                            .sessions
-                            .set_ipc_token_file(ipc_token_file);
-                    }
-                    *runtime_for_boot.lock().await = Some(engine_runtime);
-                    if service_for_boot.set(service).is_err() {
-                        state_tx.send_replace(DeferredEngineState::Failed(
-                            "embedded engine RPC service was assembled more than once".into(),
-                        ));
-                        return;
-                    }
-                    state_tx.send_replace(DeferredEngineState::Ready);
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, "embedded engine assembly failed");
-                    state_tx.send_replace(DeferredEngineState::Failed(format!("{err:#}")));
-                }
-            }
-        });
+        let boot_task = deferred.spawn_boot(engine_config, lock, served_ipc_port, |_| {});
+        let mut state_rx = deferred.state();
         let handle = EngineHandle {
             inner: Arc::new(InProcessEngine {
                 service,
-                runtime,
+                runtime: deferred.runtime.clone(),
                 boot_task,
-                refresh_task,
+                refresh_task: deferred.refresh_task,
                 ipc_task: tokio::sync::Mutex::new(ipc_task),
                 client,
             }),
-            engine_info,
+            engine_info: deferred.engine_info,
             deferred_state: Some(state_rx.clone()),
         };
         // Local, development, and already-resolved synced profiles need no
         // authentication UI while assembling. Keep the viewport Connecting
         // until their stores and journals are actually open, and surface a
         // boot failure through the existing bootstrap error path.
-        if profile_is_resolved && let Err(message) = wait_for_deferred_engine(&mut state_rx).await {
+        if deferred.profile_is_resolved
+            && let Err(message) = wait_for_deferred_engine(&mut state_rx).await
+        {
             handle.shutdown().await;
             return Err(anyhow::anyhow!(message));
         }
         Ok(handle)
+    }
+
+    /// Start the app's background engine and attach to it once it serves
+    /// the port. `None` falls back to embedding: it couldn't start, exited,
+    /// or didn't come up in time.
+    async fn launch_background(config: &EngineConfig) -> Option<EngineHandle> {
+        const STARTUP: std::time::Duration = std::time::Duration::from_secs(20);
+        let app = std::env::current_exe().ok()?;
+        let mut child = match zeron_engine::managed::launch(config, &app) {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::warn!(error = %err, "couldn't start the background engine; embedding one");
+                return None;
+            }
+        };
+        tracing::info!(pid = child.id(), "background engine started");
+        let deadline = std::time::Instant::now() + STARTUP;
+        loop {
+            if let Some(handle) = Self::attach_to_daemon(config.ipc_port, &config.data_dir).await {
+                zeron_engine::managed::reap(child);
+                return Some(handle);
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                tracing::warn!(%status, "background engine exited during startup; embedding one");
+                return None;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!("background engine didn't come up in time; embedding one");
+                zeron_engine::managed::reap(child);
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
     }
 
     /// Probe the IPC port and, if a live engine answers, attach as a remote
@@ -578,6 +501,11 @@ impl EngineHandle {
 
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
+    }
+
+    /// Resolves when the connection to a separate engine is lost.
+    pub async fn closed(&self) {
+        self.inner.closed().await;
     }
 }
 
@@ -920,6 +848,20 @@ pub struct AppState {
     clock: ClockTransitions,
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
+    /// How the current engine was reached, kept to reconnect with.
+    boot_config: Option<EngineBootConfig>,
+    /// Watches the engine connection; a separate engine going away (crash,
+    /// restart into an update, sign-out elsewhere) reconnects — starting it
+    /// again when nothing serves the port.
+    connection_task: Option<Task<()>>,
+    /// The next engine exit is ours (sign-out, a workspace switch): the shell
+    /// replaces the runtime itself.
+    engine_exit_expected: bool,
+    /// This window's id to the engine, and whether one of the app's windows
+    /// is focused — the engine holds desktop banners while one is.
+    viewport_id: String,
+    viewport_focused: bool,
+    focus_task: Option<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
@@ -1033,6 +975,12 @@ impl AppState {
             clock: ClockTransitions::default(),
             engine: None,
             watch_tasks: Vec::new(),
+            boot_config: None,
+            connection_task: None,
+            engine_exit_expected: false,
+            viewport_id: uuid::Uuid::new_v4().to_string(),
+            viewport_focused: false,
+            focus_task: None,
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
@@ -3164,8 +3112,96 @@ impl AppState {
             s.workspace_scope = None;
             s.auth = None;
             s.data_dir = Some(data_dir);
+            s.boot_config = Some(config.clone());
             cx.notify();
         });
+        Self::connect(state, config, cx);
+    }
+
+    /// The next engine exit is the shell's doing (it stops the engine to
+    /// replace the runtime): don't reconnect on it.
+    pub fn expect_engine_exit(&mut self) {
+        self.engine_exit_expected = true;
+    }
+
+    /// A separate engine went away unasked: reconnect — the bootstrap probe
+    /// starts it again when nothing serves the port. What's on screen stays
+    /// while it does; the new engine's watches replace it frame by frame.
+    fn engine_connection_lost(&mut self, handle: &EngineHandle, cx: &mut Context<Self>) {
+        let current = self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.same_connection(handle));
+        if !current || self.engine_exit_expected {
+            return;
+        }
+        let Some(config) = self.boot_config.clone() else {
+            return;
+        };
+        tracing::warn!("lost the engine connection; reconnecting");
+        self.engine = None;
+        self.watch_tasks.clear();
+        self.transcript_task = None;
+        self.queue_task = None;
+        self.change_request_tasks.clear();
+        self.focus_task = None;
+        let state = cx.entity();
+        cx.defer(move |cx| Self::connect(state, config, cx));
+        cx.notify();
+    }
+
+    /// Whether one of the app's windows is focused, for the engine's desktop
+    /// banners ("only while Zeron isn't focused"). Repeated while focused, so
+    /// a window that dies focused stops counting.
+    pub fn set_viewport_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.viewport_focused == focused && self.focus_task.is_some() {
+            return;
+        }
+        self.viewport_focused = focused;
+        self.report_focus(cx);
+    }
+
+    fn report_focus(&mut self, cx: &mut Context<Self>) {
+        const REPEAT: std::time::Duration = std::time::Duration::from_secs(20);
+        let Some(engine) = self.engine.clone().filter(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        }) else {
+            self.focus_task = None;
+            return;
+        };
+        let viewport_id = self.viewport_id.clone();
+        let focused = self.viewport_focused;
+        self.focus_task = Some(cx.spawn(async move |_, cx| {
+            loop {
+                let params = serde_json::json!({ "viewportId": viewport_id, "focused": focused });
+                if let Err(error) = engine
+                    .client()
+                    .call(methods::SET_VIEWPORT_FOCUS, params)
+                    .await
+                {
+                    tracing::debug!(%error, "viewport focus report failed");
+                }
+                if !focused {
+                    return;
+                }
+                cx.background_executor().timer(REPEAT).await;
+            }
+        }));
+    }
+
+    /// Whether the engine posts desktop banners itself (the app then posts
+    /// none, so nothing doubles up).
+    pub fn engine_posts_banners(&self) -> bool {
+        self.engine.as_ref().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1)
+        })
+    }
+
+    fn connect(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config));
         cx.spawn(async move |cx| {
             let outcome = match boot.await {
@@ -3206,6 +3242,14 @@ impl AppState {
             self.harness_updates.clear();
         }
         self.engine = Some(handle.clone());
+        self.engine_exit_expected = false;
+        let watched = handle.clone();
+        self.connection_task = Some(cx.spawn(async move |this, cx| {
+            watched.closed().await;
+            this.update(cx, |state, cx| state.engine_connection_lost(&watched, cx))
+                .ok();
+        }));
+        self.report_focus(cx);
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -4237,6 +4281,7 @@ mod tests {
     use chrono::TimeDelta;
     use gpui::AppContext;
     use zeron_engine::{EngineCore, default_registry};
+    use zeron_rpc::RpcReply;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
     use zeron_proto::{SessionStatus, UserProfile};

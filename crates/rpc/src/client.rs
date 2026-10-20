@@ -42,6 +42,8 @@ pub struct RpcClient {
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
+    /// Flips to true once the server side of the duplex is gone.
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Owned stream receiver whose drop immediately cancels the server task.
@@ -93,6 +95,7 @@ impl RpcClient {
         });
         let reader_shared = shared.clone();
         let reader_out = out.clone();
+        let (closed_tx, closed) = tokio::sync::watch::channel(false);
         let reader = tokio::spawn(async move {
             while let Some(payload) = inbound.recv().await {
                 for line in payload.lines() {
@@ -129,13 +132,22 @@ impl RpcClient {
                 }
                 // Stream item receivers end by sender drop.
             }
+            let _ = closed_tx.send(true);
         });
         Self {
             out,
             shared,
             next_id: AtomicU64::new(1),
             reader,
+            closed,
         }
+    }
+
+    /// Resolves once the connection has closed (the server went away). An
+    /// in-memory client's never does while its service lives.
+    pub async fn closed(&self) {
+        let mut closed = self.closed.clone();
+        let _ = closed.wait_for(|closed| *closed).await;
     }
 
     /// Unary request.
