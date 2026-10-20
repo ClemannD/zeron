@@ -13,6 +13,7 @@
 
 mod cloud;
 mod providers;
+pub use providers::UsageWindowInfo;
 mod session;
 mod voice;
 pub use voice::*;

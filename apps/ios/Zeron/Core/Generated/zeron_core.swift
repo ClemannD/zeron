@@ -1351,6 +1351,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func vaultStatus() async throws  -> VaultInfo
     
     /**
+     * A Cloud login's plan usage (windows, live plan), read by the vault.
+     */
+    func vaultUsage(provider: String, slot: String) async throws  -> CloudUsageInfo
+    
+    /**
      * Run `harness` on `account_id` from now on.
      */
     func deviceActivateAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
@@ -2593,6 +2598,25 @@ open func vaultStatus()async throws  -> VaultInfo  {
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeVaultInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * A Cloud login's plan usage (windows, live plan), read by the vault.
+     */
+open func vaultUsage(provider: String, slot: String)async throws  -> CloudUsageInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_vault_usage(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(slot)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCloudUsageInfo_lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -7039,6 +7063,69 @@ public func FfiConverterTypeCloudSessionInfo_lift(_ buf: RustBuffer) throws -> C
 #endif
 public func FfiConverterTypeCloudSessionInfo_lower(_ value: CloudSessionInfo) -> RustBuffer {
     return FfiConverterTypeCloudSessionInfo.lower(value)
+}
+
+
+/**
+ * A Cloud login's plan usage.
+ */
+public struct CloudUsageInfo: Equatable, Hashable {
+    public var windows: [UsageWindowInfo]
+    /**
+     * The live plan ("ChatGPT Plus"), when the reply names it.
+     */
+    public var plan: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(windows: [UsageWindowInfo], 
+        /**
+         * The live plan ("ChatGPT Plus"), when the reply names it.
+         */plan: String?) {
+        self.windows = windows
+        self.plan = plan
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CloudUsageInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCloudUsageInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CloudUsageInfo {
+        return
+            try CloudUsageInfo(
+                windows: FfiConverterSequenceTypeUsageWindowInfo.read(from: &buf), 
+                plan: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CloudUsageInfo, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeUsageWindowInfo.write(value.windows, into: &buf)
+        FfiConverterOptionString.write(value.plan, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudUsageInfo_lift(_ buf: RustBuffer) throws -> CloudUsageInfo {
+    return try FfiConverterTypeCloudUsageInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCloudUsageInfo_lower(_ value: CloudUsageInfo) -> RustBuffer {
+    return FfiConverterTypeCloudUsageInfo.lower(value)
 }
 
 
@@ -19812,6 +19899,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_vault_status() != 51383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_usage() != 58618) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_activate_account() != 7247) {

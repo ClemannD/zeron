@@ -28,6 +28,10 @@ final class CloudStore {
     private(set) var vault: VaultInfo?
     private(set) var repos: [GithubRepoInfo]?
     private(set) var accounts: [String: [CloudAccountInfo]] = [:]
+    /// Each Cloud login's plan usage, by `provider:slot` (read by the vault),
+    /// and why it couldn't be read.
+    private(set) var usage: [String: CloudUsageInfo] = [:]
+    private(set) var usageErrors: [String: String] = [:]
     private(set) var billing: BillingInfo?
     /// The account's session machines (read when a Cloud chat needs them).
     private(set) var sessions: [CloudSessionInfo] = []
@@ -171,6 +175,7 @@ final class CloudStore {
                 self?.repos = await repos ?? []
                 self?.billing = await billing
                 self?.accounts = lists
+                self?.refreshUsage()
             } catch {
                 self?.error = Self.message(error)
             }
@@ -188,6 +193,38 @@ final class CloudStore {
             }
             self?.accounts = lists
             self?.vault = (try? await client.vaultStatus()) ?? self?.vault
+            self?.changed()
+            self?.refreshUsage()
+        }
+    }
+
+    /// Re-read every Cloud login's plan usage (keys have none).
+    func refreshUsage() {
+        guard let client else { return }
+        let logins = Self.agents.flatMap { agent in
+            (accounts[agent.login] ?? []).map { (agent.login, $0.slot) }
+        }
+        Task { [weak self] in
+            await withTaskGroup(of: (String, Result<CloudUsageInfo, Error>).self) { group in
+                for (provider, slot) in logins {
+                    group.addTask {
+                        do {
+                            return ("\(provider):\(slot)", .success(try await client.vaultUsage(provider: provider, slot: slot)))
+                        } catch {
+                            return ("\(provider):\(slot)", .failure(error))
+                        }
+                    }
+                }
+                for await (key, result) in group {
+                    switch result {
+                    case let .success(usage):
+                        self?.usage[key] = usage
+                        self?.usageErrors[key] = nil
+                    case let .failure(error):
+                        self?.usageErrors[key] = Self.message(error)
+                    }
+                }
+            }
             self?.changed()
         }
     }
@@ -214,6 +251,8 @@ final class CloudStore {
         vault = nil
         repos = nil
         accounts = [:]
+        usage = [:]
+        usageErrors = [:]
         billing = nil
         sessions = []
         sessionsRead = nil

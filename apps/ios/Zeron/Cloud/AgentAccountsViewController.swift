@@ -144,10 +144,14 @@ final class AgentAccountsViewController: UITableViewController {
         switch target {
         case let .cloud(agent):
             let logins = (cloud.accounts[agent.login] ?? []).map { a in
-                Account(id: "\(agent.login):\(a.slot)", title: a.email ?? a.displayName ?? "\(agent.name) account",
-                        detail: [a.plan, a.organization].compactMap { $0 }.joined(separator: " · ").nonEmpty,
-                        usage: [], usageNote: a.needsReconnect ? "Sign in again" : nil,
-                        active: a.active, switchable: true, isKey: false, cloudProvider: agent.login)
+                let key = "\(agent.login):\(a.slot)"
+                let usage = cloud.usage[key]
+                // The live plan from the usage reply beats the sign-in's.
+                return Account(id: key, title: a.email ?? a.displayName ?? "\(agent.name) account",
+                               detail: [usage?.plan ?? a.plan, a.organization].compactMap { $0 }.joined(separator: " · ").nonEmpty,
+                               usage: usage?.windows ?? [],
+                               usageNote: a.needsReconnect ? "Sign in again" : usage?.windows.isEmpty == false ? nil : cloud.usageErrors[key],
+                               active: a.active, switchable: true, isKey: false, cloudProvider: agent.login)
             }
             let keys = (cloud.accounts[agent.key] ?? []).map { a in
                 Account(id: "\(agent.key):\(a.slot)", title: agent.keyName, detail: nil, usage: [], usageNote: nil,

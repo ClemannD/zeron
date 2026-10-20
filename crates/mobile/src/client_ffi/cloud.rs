@@ -239,6 +239,14 @@ impl From<zeron_proto::BillingStatus> for BillingInfo {
     }
 }
 
+/// A Cloud login's plan usage.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct CloudUsageInfo {
+    pub windows: Vec<super::UsageWindowInfo>,
+    /// The live plan ("ChatGPT Plus"), when the reply names it.
+    pub plan: Option<String>,
+}
+
 /// A provider sign-in under way: open `url` in an auth sheet that waits for
 /// the `done_url` scheme it was started with, then await
 /// `provider_login_finish(login_id)`.
@@ -339,6 +347,31 @@ impl CoreClient {
         on_runtime(async move { client.vault_status().await })
             .await
             .map(Into::into)
+    }
+
+    /// A Cloud login's plan usage (windows, live plan), read by the vault.
+    pub async fn vault_usage(&self, provider: String, slot: String) -> CoreResult<CloudUsageInfo> {
+        let provider = vault_provider(&provider)?;
+        let client = self.client.clone();
+        on_runtime(async move { client.vault_usage(provider, &slot).await })
+            .await
+            .map(|usage| match usage {
+                Some((windows, plan)) => CloudUsageInfo {
+                    windows: windows
+                        .into_iter()
+                        .map(|w| super::UsageWindowInfo {
+                            label: w.label,
+                            used_fraction: w.used_fraction,
+                            resets_at_ms: w.resets_at.map(|at| at.timestamp_millis()),
+                        })
+                        .collect(),
+                    plan,
+                },
+                None => CloudUsageInfo {
+                    windows: Vec::new(),
+                    plan: None,
+                },
+            })
     }
 
     /// Every login Cloud keeps for `provider` (`claude` · `codex`).

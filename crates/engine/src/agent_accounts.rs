@@ -3467,14 +3467,7 @@ fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
 }
 
 fn codex_plan(plan: Option<&str>) -> Option<String> {
-    let plan = plan?;
-    let mut chars = plan.chars();
-    let first = chars.next()?;
-    Some(format!(
-        "ChatGPT {}{}",
-        first.to_uppercase(),
-        chars.as_str()
-    ))
+    zeron_proto::plan_usage::codex_plan(plan)
 }
 
 /// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
@@ -3483,14 +3476,7 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
 /// week" rule mislabeled the monthly window "Week"; thresholds in seconds
 /// leave the middle gaps to the nearest label rather than guessing a plan.
 fn codex_window_label(span_seconds: i64) -> &'static str {
-    const DAY: i64 = 86_400;
-    if span_seconds >= 28 * DAY {
-        "Month"
-    } else if span_seconds >= 5 * DAY {
-        "Week"
-    } else {
-        "Session"
-    }
+    zeron_proto::plan_usage::codex_window_label(span_seconds)
 }
 
 /// Compose a target Claude login with the machine's current shared fields.
@@ -3673,13 +3659,7 @@ fn cursor_key_usable(auth: &serde_json::Value) -> bool {
 }
 
 fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
-    match value? {
-        serde_json::Value::Number(n) => DateTime::<Utc>::from_timestamp(n.as_i64()?, 0),
-        serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|t| t.with_timezone(&Utc)),
-        _ => None,
-    }
+    zeron_proto::plan_usage::parse_when(value)
 }
 
 fn usage_key(harness: HarnessId, account_key: &str) -> String {
@@ -3895,31 +3875,7 @@ pub(crate) fn usage_windows_from_reply(
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
 fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let rl = body.get("rate_limit")?;
-    let mut windows = Vec::new();
-    for key in ["primary_window", "secondary_window"] {
-        if let Some(w) = rl.get(key)
-            && let Some(used) = w.get("used_percent").and_then(|v| v.as_f64())
-        {
-            let span = w
-                .get("limit_window_seconds")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            windows.push(AgentUsageWindow {
-                label: codex_window_label(span).to_string(),
-                used_fraction: (used / 100.0) as f32,
-                resets_at: parse_when(w.get("reset_at")),
-            });
-        }
-    }
-    if windows.is_empty() {
-        return None;
-    }
-    // Live plan ("free"/"plus"/"pro"…) — beats the login-time JWT claim,
-    // so a plan change shows up on the next forced refresh without a
-    // re-login.
-    let plan_label = codex_plan(str_field(body, "plan_type").as_deref());
-    Some(UsageSnapshot {
+    zeron_proto::plan_usage::codex(body).map(|(windows, plan_label)| UsageSnapshot {
         windows,
         plan_label,
     })
@@ -3928,19 +3884,7 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
 /// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let mut windows = Vec::new();
-    for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
-        if let Some(w) = body.get(key)
-            && let Some(utilization) = w.get("utilization").and_then(|v| v.as_f64())
-        {
-            windows.push(AgentUsageWindow {
-                label: label.to_string(),
-                used_fraction: (utilization / 100.0) as f32,
-                resets_at: parse_when(w.get("resets_at")),
-            });
-        }
-    }
-    (!windows.is_empty()).then_some(UsageSnapshot {
+    zeron_proto::plan_usage::claude(body).map(|windows| UsageSnapshot {
         windows,
         plan_label: None,
     })
