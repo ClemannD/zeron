@@ -70,6 +70,10 @@ type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnsw
 struct HarnessSessionRef {
     session_id: String,
     cwd: String,
+    /// The harness that minted `session_id`; `None` = not yet known (an id
+    /// read from a row that predates the tag). A resume id only means
+    /// something to its own harness.
+    harness: Option<HarnessId>,
 }
 
 /// The configuration a live harness runtime launched with. The steering
@@ -792,6 +796,11 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
+            // A chat whose last provider session belongs to another harness
+            // has changed provider: mark the seam above this message, before
+            // the resume lookup below turns the foreign session id away.
+            self.inner
+                .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
         let credential = self.inner.registry.run_credential(harness_id).await;
@@ -805,7 +814,10 @@ impl SessionsEngine {
         // and starting the retry fresh silently dropped a good conversation.
         let mut resume_injected = false;
         if request.resume.is_none() {
-            request.resume = self.inner.resume_for(chat_id, &request.cwd);
+            request.resume = self
+                .inner
+                .resume_for(chat_id, &request.cwd, harness_id)
+                .or_else(|| Inner::own_provider_session(handle.doc(), harness_id, &request.cwd));
             resume_injected = request.resume.is_some();
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
@@ -1264,9 +1276,11 @@ impl SessionsEngine {
             // exist in the journal (the debounced workspace-row write may
             // never have landed) — remember it so the revived run resumes the
             // same harness conversation (zeron recoverDraft, sessions.ts:538).
-            if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
+            if let Some((session_id, cwd, Some(owner))) =
+                self.inner.journal_harness_session(&chat_id)
+            {
                 self.inner
-                    .remember_harness_session(&chat_id, &session_id, &cwd);
+                    .remember_harness_session(&chat_id, &session_id, &cwd, owner);
             }
             // The revival prompt: the last user message (idempotent re-dispatch
             // under the SAME id — `write_user_message` dedupes by id, so the
@@ -1342,7 +1356,7 @@ impl SessionsEngine {
                     // Last resort: the journal's own cwd (zeron's draft config)
                     // — a crash can predate the debounced workspace-row write.
                     .or_else(|| {
-                        let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
+                        let (_, cwd, _) = sessions.inner.journal_harness_session(&chat_id)?;
                         Some(RunRequest {
                             mcp: None,
                             prompt: String::new(),
@@ -1737,7 +1751,13 @@ impl Inner {
     /// Record the chat's harness-native session id (and its cwd): live-process
     /// cache plus the durable workspace chat row — the row is what survives an
     /// engine restart (zeron sessions.ts:1039).
-    fn remember_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
+    fn remember_harness_session(
+        &self,
+        chat_id: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: HarnessId,
+    ) {
         if session_id.is_empty() {
             return;
         }
@@ -1746,10 +1766,11 @@ impl Inner {
             HarnessSessionRef {
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string(),
+                harness: Some(harness),
             },
         );
         if let Some(ws) = self.workspace() {
-            ws.set_chat_harness_session(chat_id, session_id, cwd);
+            ws.set_chat_harness_session(chat_id, session_id, cwd, Some(harness));
         }
     }
 
@@ -1760,50 +1781,160 @@ impl Inner {
     // conversations (user incident 2026-08-13). A truly stale id simply
     // yields a fresh session whose SessionStarted overwrites the row.
 
-    /// The session id to resume for a run in `chat_id` launching from `cwd`
-    /// (zeron sessions.ts:736, looked up on every dispatch):
+    /// The session id to resume for a run of `harness` in `chat_id` launching
+    /// from `cwd` (zeron sessions.ts:736, looked up on every dispatch):
     /// live-process cache → workspace chat row → journal scan (the crash path
     /// where the debounced row write never landed — SessionStarted/Done events
     /// are journaled per event, flushed immediately). Cwd-gated throughout:
     /// harness session stores are keyed by cwd, so a session created elsewhere
-    /// never rides `--resume`. An empty stored id is the explicit tombstone —
-    /// no resume, no falling through to staler sources.
-    fn resume_for(&self, chat_id: &str, cwd: &str) -> Option<String> {
-        // The same directory, however it is spelled: an agent reports where
-        // it runs with symlinks resolved (`/private/var/…` for `/var/…` on
-        // macOS), and until a turn's Done restores the request's spelling a
-        // mid-turn crash leaves that one stored — a string compare then
-        // started the resumed run in a fresh session, its history gone.
-        let cwd_ok = |session_cwd: &str| {
-            session_cwd.is_empty()
-                || session_cwd == cwd
-                || std::fs::canonicalize(session_cwd)
-                    .is_ok_and(|a| std::fs::canonicalize(cwd).is_ok_and(|b| a == b))
-        };
-        if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
-            return (!known.session_id.is_empty() && cwd_ok(&known.cwd))
+    /// never rides `--resume`. Owner-gated too: an id minted by another
+    /// harness (the chat switched provider since) is meaningless to `harness`
+    /// and never resumed. An empty stored id is the explicit tombstone — no
+    /// resume, no falling through to staler sources.
+    fn resume_for(&self, chat_id: &str, cwd: &str, harness: HarnessId) -> Option<String> {
+        let cwd_ok = |session_cwd: &str| session_cwd_matches(session_cwd, cwd);
+        if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned()
+            && let Some(owner) = known.harness
+        {
+            return (!known.session_id.is_empty() && cwd_ok(&known.cwd) && owner == harness)
                 .then_some(known.session_id);
         }
         if let Some(ws) = self.workspace()
-            && let Some((session_id, session_cwd)) = ws.chat_harness_session(chat_id)
+            && let Some(stored) = ws.chat_harness_session(chat_id)
         {
-            return (!session_id.is_empty() && cwd_ok(session_cwd.as_deref().unwrap_or("")))
-                .then_some(session_id);
+            if stored.session_id.is_empty() {
+                return None;
+            }
+            // Rows that predate the owner tag: the journal names the harness
+            // that started the session. Resolve once and write the tag back so
+            // later dispatches (and restarts) skip the scan.
+            let owner = stored.harness.or_else(|| {
+                let (id, session_cwd, owner) = self.journal_harness_session(chat_id)?;
+                let owner = owner?;
+                self.remember_harness_session(chat_id, &id, &session_cwd, owner);
+                Some(owner)
+            });
+            let cwd_ok_row = cwd_ok(stored.cwd.as_deref().unwrap_or(""));
+            if let Some(owner) = owner {
+                lock(&self.harness_sessions).insert(
+                    chat_id.to_string(),
+                    HarnessSessionRef {
+                        session_id: stored.session_id.clone(),
+                        cwd: stored.cwd.clone().unwrap_or_default(),
+                        harness: Some(owner),
+                    },
+                );
+            }
+            // Owner still unknown (journal pruned): the chat's own harness at
+            // the time it was written is the best available guess.
+            return (cwd_ok_row && owner.is_none_or(|owner| owner == harness))
+                .then_some(stored.session_id);
         }
-        let (session_id, session_cwd) = self.journal_harness_session(chat_id)?;
+        let (session_id, session_cwd, owner) = self.journal_harness_session(chat_id)?;
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
-        self.remember_harness_session(chat_id, &session_id, &session_cwd);
-        cwd_ok(&session_cwd).then_some(session_id)
+        if let Some(owner) = owner {
+            self.remember_harness_session(chat_id, &session_id, &session_cwd, owner);
+        }
+        (cwd_ok(&session_cwd) && owner.is_none_or(|owner| owner == harness)).then_some(session_id)
+    }
+
+    /// The chat's stored resume id with its cwd and the harness that owns
+    /// it — what a dispatch compares its own harness to, to notice the chat
+    /// moved provider. Same source order as [`Self::resume_for`], without
+    /// the cwd gate (the question is who ran last, not whether to resume).
+    fn owned_session(&self, chat_id: &str) -> Option<HarnessSessionRef> {
+        if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned()
+            && known.harness.is_some()
+        {
+            return Some(known);
+        }
+        if let Some(ws) = self.workspace()
+            && let Some(stored) = ws.chat_harness_session(chat_id)
+        {
+            if stored.session_id.is_empty() {
+                return None;
+            }
+            let harness = stored
+                .harness
+                .or_else(|| self.journal_harness_session(chat_id)?.2)?;
+            return Some(HarnessSessionRef {
+                session_id: stored.session_id,
+                cwd: stored.cwd.unwrap_or_default(),
+                harness: Some(harness),
+            });
+        }
+        let (session_id, cwd, harness) = self.journal_harness_session(chat_id)?;
+        Some(HarnessSessionRef {
+            session_id,
+            cwd,
+            harness: Some(harness?),
+        })
+    }
+
+    /// `harness`'s own earlier session in a chat that changed provider, when
+    /// the stored resume id belongs to another harness: switching back
+    /// resumes it rather than starting over, so the provider keeps its native
+    /// history and its prompt cache. Cwd-gated like [`Self::resume_for`].
+    fn own_provider_session(doc: &SessionDoc, harness: HarnessId, cwd: &str) -> Option<String> {
+        if !doc.provider_switched() {
+            return None;
+        }
+        doc.provider_session(harness.as_str())
+            .filter(|mark| !mark.session_id.is_empty() && session_cwd_matches(&mark.cwd, cwd))
+            .map(|mark| mark.session_id)
+    }
+
+    /// Record `harness`'s session in a chat that changed provider, with the
+    /// last transcript entry it has seen: `through` when the session has
+    /// seen at least that far (its turn's own message, at SessionStarted),
+    /// else the end of the transcript (its turn is done). A watermark never
+    /// moves back within the same session.
+    fn note_provider_session(
+        doc: &SessionDoc,
+        harness: HarnessId,
+        session_id: &str,
+        cwd: &str,
+        through: Option<&str>,
+    ) {
+        if session_id.is_empty() || !doc.provider_switched() {
+            return;
+        }
+        let entries = doc.read_entries().unwrap_or_default();
+        let position = |id: &str| entries.iter().position(|entry| entry.id == id);
+        let seen = match through {
+            Some(id) => position(id).map(|_| id.to_owned()),
+            None => entries.last().map(|entry| entry.id.clone()),
+        };
+        let previous = doc
+            .provider_session(harness.as_str())
+            .filter(|mark| mark.session_id == session_id);
+        let seen = match (previous.and_then(|mark| mark.seen), seen) {
+            (Some(old), Some(new)) if position(&old) > position(&new) => Some(old),
+            (old, new) => new.or(old),
+        };
+        let mark = zeron_doc::ProviderSessionMark {
+            session_id: session_id.to_owned(),
+            cwd: cwd.to_owned(),
+            seen,
+        };
+        if let Err(err) = doc.set_provider_session(harness.as_str(), &mark) {
+            tracing::warn!(error = %err, "provider session record write failed");
+        }
     }
 
     /// The last harness session id named anywhere in the chat's journal, with
-    /// the cwd of the `SessionStarted` that governs it. `Done.session_id`
-    /// inherits the cwd of the most recent `SessionStarted` (same run).
+    /// the cwd and harness of the `SessionStarted` that governs it.
+    /// `Done.session_id` inherits both from the most recent `SessionStarted`
+    /// (same run).
     ///
     /// Walks the journal newest-first and stops at the answer, so boot recovery
     /// doesn't load whole multi-MB journals: the newest non-empty id wins, and a
-    /// `Done` id takes the cwd of the nearest earlier `SessionStarted` (any id).
-    fn journal_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
+    /// `Done` id takes the cwd and harness of the nearest earlier
+    /// `SessionStarted` (any id).
+    fn journal_harness_session(
+        &self,
+        chat_id: &str,
+    ) -> Option<(String, String, Option<HarnessId>)> {
         let warn = |err: crate::run_journal::JournalError| {
             tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
         };
@@ -1829,13 +1960,16 @@ impl Inner {
             }
             match event {
                 AgentEvent::SessionStarted {
-                    session_id, cwd, ..
+                    session_id,
+                    cwd,
+                    harness,
+                    ..
                 } => {
                     if let Some(id) = done_id {
-                        return Some((id, cwd));
+                        return Some((id, cwd, Some(harness)));
                     }
                     if !session_id.is_empty() {
-                        return Some((session_id, cwd));
+                        return Some((session_id, cwd, Some(harness)));
                     }
                 }
                 AgentEvent::Done {
@@ -1847,7 +1981,7 @@ impl Inner {
                 _ => {}
             }
         }
-        done_id.map(|id| (id, String::new()))
+        done_id.map(|id| (id, String::new(), None))
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -1877,12 +2011,108 @@ fn note_fork_history_session(doc: &SessionDoc, carried: bool, session_id: &str) 
     }
 }
 
+/// Whether a session created in `session_cwd` may resume for a run in `cwd`:
+/// the same directory, however it is spelled. An agent reports where it runs
+/// with symlinks resolved (`/private/var/…` for `/var/…` on macOS), and until
+/// a turn's Done restores the request's spelling a mid-turn crash leaves that
+/// one stored — a string compare then started the resumed run in a fresh
+/// session, its history gone. Empty = not recorded, never a mismatch.
+fn session_cwd_matches(session_cwd: &str, cwd: &str) -> bool {
+    session_cwd.is_empty()
+        || session_cwd == cwd
+        || std::fs::canonicalize(session_cwd)
+            .is_ok_and(|a| std::fs::canonicalize(cwd).is_ok_and(|b| a == b))
+}
+
+/// Ceiling on the prior conversation replayed into a provider session that
+/// lacks it. Characters of serialized history, not tokens: roughly 20k
+/// tokens, small enough to leave every supported model room to work.
+const HISTORY_REPLAY_CHARS: usize = 80_000;
+/// One message's replayed text is cut past this, keeping its head.
+const HISTORY_MESSAGE_CHARS: usize = 8_000;
+/// A replayed tool call keeps only this much of its output.
+const HISTORY_TOOL_OUTPUT_CHARS: usize = 600;
+
+/// `text` cut to `max` characters on a char boundary, with a marker when cut.
+fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}… [truncated]", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
 impl Inner {
-    /// `prompt` with the conversation a side chat's provider session lacks in
-    /// front of it, or `None` when it lacks nothing. A fresh session gets the
-    /// whole transcript (`current` excluded); a continued one only the fork's
-    /// copied history before the seam, until that went out to that session.
-    /// Native commands are never wrapped: providers route a leading `/name`.
+    /// Note that `chat_id` is about to run on `harness_id` although its last
+    /// turn ran on another harness: the chat's latest seam names it, or
+    /// (before any switch) the stored resume id's owner. Writes the transcript
+    /// seam once; the foreign session id itself is turned away by
+    /// [`Self::resume_for`]. On the first switch, the outgoing provider's
+    /// session is recorded as having seen the whole transcript so far, so a
+    /// switch back can resume it.
+    fn note_provider_switch(&self, chat_id: &str, harness_id: HarnessId, doc: &ChatDocHandle) {
+        let entries = doc.doc().read_entries().unwrap_or_default();
+        let owned = || self.owned_session(chat_id);
+        let previous = match crate::doc_host::latest_switch(&entries) {
+            Some(to) => to,
+            None => owned().and_then(|known| known.harness),
+        };
+        let Some(previous) = previous else {
+            return;
+        };
+        if previous == harness_id {
+            return;
+        }
+        if !doc.doc().provider_switched()
+            && let Some(known) = owned().filter(|known| known.harness == Some(previous))
+            && !known.session_id.is_empty()
+            && let Err(err) = doc.doc().set_provider_session(
+                previous.as_str(),
+                &zeron_doc::ProviderSessionMark {
+                    session_id: known.session_id,
+                    cwd: known.cwd,
+                    seen: entries.last().map(|entry| entry.id.clone()),
+                },
+            )
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "provider session record write failed");
+        }
+        let label = |id: HarnessId| {
+            self.registry
+                .descriptors()
+                .into_iter()
+                .find(|d| d.id == id)
+                .map_or_else(|| id.as_str().to_owned(), |d| d.name)
+        };
+        match doc.write_provider_switch(
+            (previous, &label(previous)),
+            (harness_id, &label(harness_id)),
+            now_ms(),
+        ) {
+            Ok(true) => tracing::info!(
+                chat = %chat_id,
+                from = previous.as_str(),
+                to = harness_id.as_str(),
+                "chat switched provider"
+            ),
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "provider switch marker write failed");
+            }
+        }
+    }
+
+    /// `prompt` with the conversation this provider session lacks in front of
+    /// it, or `None` when it lacks nothing. Two kinds of chat owe their
+    /// provider session a history: a side chat (its transcript was copied
+    /// from the parent) and a chat that switched provider (the earlier turns
+    /// ran on another harness). A fresh session gets the whole transcript
+    /// (`current` excluded). A continued one that a switched chat recorded
+    /// gets only what came after the last entry it saw: its own turns are
+    /// already in its native history, and the catch-up rides after them so
+    /// the provider's cached prefix stays valid. Any other continued session
+    /// gets the history before the latest seam, until that went out to that
+    /// session. Native commands are never wrapped: providers route a leading
+    /// `/name`.
     fn fork_history_prompt(
         &self,
         chat_id: &str,
@@ -1892,32 +2122,47 @@ impl Inner {
         current: Option<&str>,
         provider: ProviderSession<'_>,
     ) -> Option<String> {
-        if native_command(prompt, harness_id)
-            || !self
-                .workspace()
-                .and_then(|ws| ws.chat(chat_id).ok().flatten())
-                .is_some_and(|chat| chat.parent_chat_id.is_some())
-        {
+        let side_chat = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.parent_chat_id.is_some());
+        let switched = doc.provider_switched();
+        if native_command(prompt, harness_id) || !(side_chat || switched) {
             return None;
         }
-        let entries: Vec<_> = doc
-            .read_entries()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| Some(entry.id.as_str()) != current)
-            .collect();
+        let mut entries = doc.read_entries().unwrap_or_default();
+        // A session this switched chat recorded, resumed: what it has seen.
+        let watermark = match provider {
+            ProviderSession::Continued(session) if switched => doc
+                .provider_session(harness_id.as_str())
+                .filter(|mark| session.is_none_or(|id| id == mark.session_id))
+                .map(|mark| mark.seen),
+            _ => None,
+        };
+        if let Some(seen) = &watermark {
+            let start = seen
+                .as_deref()
+                .and_then(|seen| entries.iter().position(|entry| entry.id == seen))
+                .map_or(0, |ix| ix + 1);
+            entries.drain(..start);
+        }
+        entries.retain(|entry| Some(entry.id.as_str()) != current);
         let end = match provider {
             ProviderSession::Fresh => entries.len(),
+            ProviderSession::Continued(_) if watermark.is_some() => entries.len(),
             ProviderSession::Continued(session) => {
                 let delivered = doc.fork_history_session();
                 if session.is_some() && delivered.as_deref() == session {
                     return None;
                 }
-                entries.iter().position(|entry| {
-                    entry
-                        .parts
-                        .iter()
-                        .any(|part| matches!(part, zeron_doc::MessagePart::Fork { .. }))
+                entries.iter().rposition(|entry| {
+                    entry.parts.iter().any(|part| {
+                        matches!(
+                            part,
+                            zeron_doc::MessagePart::Fork { .. }
+                                | zeron_doc::MessagePart::Switch { .. }
+                        )
+                    })
                 })?
             }
         };
@@ -1932,24 +2177,56 @@ impl Inner {
                         zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
                             "Tool: {}\n{}",
                             serde_json::to_string(call).unwrap_or_default(),
-                            output.clone().unwrap_or_default()
+                            clip_chars(
+                                output.as_deref().unwrap_or_default(),
+                                HISTORY_TOOL_OUTPUT_CHARS
+                            )
                         )),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                (entry.role, text)
+                (entry.role, clip_chars(&text, HISTORY_MESSAGE_CHARS))
             })
             .filter(|(_, text)| !text.is_empty())
             .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
             .collect();
-        (!history.is_empty()).then(|| {
-            format!(
-                "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
-                serde_json::to_string(&history).unwrap_or_default(),
-                prompt
-            )
-        })
+        // Newest messages win the budget: what was just said matters most.
+        let mut budget = HISTORY_REPLAY_CHARS;
+        let mut kept = history
+            .iter()
+            .rev()
+            .take_while(|message| {
+                let cost = message.to_string().len();
+                let fits = cost <= budget;
+                budget = budget.saturating_sub(cost);
+                fits
+            })
+            .count();
+        // A single message over the whole budget still goes out (clipped).
+        kept = kept.max(1.min(history.len()));
+        let omitted = history.len() - kept;
+        let history = &history[omitted..];
+        if history.is_empty() {
+            return None;
+        }
+        let intro = if watermark.is_some() {
+            "While you were away, this conversation continued with a different AI provider. The messages you missed are below; answer the final request as the continuation of the whole conversation. Tool calls listed below ran on the other provider — do not assume their state is still live."
+        } else if switched {
+            "This conversation was started with a different AI provider and you are now taking over. The earlier messages are below as context; answer the final request as the continuation of that conversation. Tool calls listed below ran on the previous provider — do not assume their state is still live."
+        } else {
+            "Continue this side conversation using the following prior conversation as context."
+        };
+        let omitted_note = if omitted > 0 {
+            format!("({omitted} earlier messages omitted for length.)\n")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "{intro}\n{omitted_note}<conversation>\n{}\n</conversation>\n\n{}",
+            serde_json::to_string(history).unwrap_or_default(),
+            prompt
+        ))
     }
 }
 
@@ -2358,6 +2635,8 @@ async fn drive_run(
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
     // conversation, never resume (and mutate) the parent's provider session.
     let mut carried_history = false;
+    // This run's provider session and where it lives, once the harness names it.
+    let mut run_session: Option<(String, String)> = None;
     let provider = match request.resume.as_deref() {
         None => ProviderSession::Fresh,
         resumed => ProviderSession::Continued(resumed),
@@ -3378,15 +3657,31 @@ async fn drive_run(
                 saw_session_started = true;
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
-                inner.remember_harness_session(&chat_id, session_id, cwd);
+                inner.remember_harness_session(&chat_id, session_id, cwd, harness_id);
                 note_fork_history_session(&doc, carried_history, session_id);
+                // An idle start's fresh session has seen nothing yet.
+                if !resume_state.idle {
+                    Inner::note_provider_session(
+                        &doc,
+                        harness_id,
+                        session_id,
+                        cwd,
+                        Some(&resume_state.user_message_id),
+                    );
+                }
+                run_session = Some((session_id.clone(), cwd.clone()));
             }
             AgentEvent::Done {
                 session_id: Some(session_id),
                 ..
             } => {
-                inner.remember_harness_session(&chat_id, session_id, &run_cwd);
+                inner.remember_harness_session(&chat_id, session_id, &run_cwd, harness_id);
                 note_fork_history_session(&doc, carried_history, session_id);
+                let cwd = run_session
+                    .take()
+                    .filter(|(started, _)| started == session_id)
+                    .map_or_else(|| run_cwd.clone(), |(_, cwd)| cwd);
+                run_session = Some((session_id.clone(), cwd));
             }
             AgentEvent::InputRequested { .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
@@ -3460,6 +3755,10 @@ async fn drive_run(
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
                 }
                 inner.note_message(&chat_id, &folded_text(&folded));
+            }
+            // The turn's session has now seen the transcript through its reply.
+            if let Some((session_id, cwd)) = &run_session {
+                Inner::note_provider_session(&doc, harness_id, session_id, cwd, None);
             }
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival
@@ -3934,7 +4233,11 @@ mod tests {
             let want = want.map(|(id, cwd)| (id.to_string(), cwd.to_string()));
             let replayed = sessions.inner.journal.replay(chat, 0).unwrap();
             assert_eq!(forward(replayed), want, "{chat}: reference");
-            assert_eq!(sessions.inner.journal_harness_session(chat), want, "{chat}");
+            let found = sessions
+                .inner
+                .journal_harness_session(chat)
+                .map(|(id, cwd, _)| (id, cwd));
+            assert_eq!(found, want, "{chat}");
         }
         // Torn tail: the last complete SessionStarted still governs.
         let path = dir.path().join("journals").join("started-only.jsonl");
@@ -3942,7 +4245,7 @@ mod tests {
         std::io::Write::write_all(&mut f, b"{\"seq\":3,\"event\":{\"type\":\"done\"").unwrap();
         assert_eq!(
             sessions.inner.journal_harness_session("started-only"),
-            Some(("s1".into(), "/a".into()))
+            Some(("s1".into(), "/a".into(), Some(zeron_proto::HarnessId::ClaudeCode)))
         );
     }
 
@@ -4064,7 +4367,7 @@ mod tests {
         request.prompt.clear();
         core.sessions
             .inner
-            .remember_harness_session("idle", "old-native-thread", &request.cwd);
+            .remember_harness_session("idle", "old-native-thread", &request.cwd, HarnessId::Codex);
         core.sessions.start_idle("idle", request).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -4073,7 +4376,10 @@ mod tests {
                         .session_status("idle")
                         .is_some_and(|s| s.status == SessionStatus::Errored)
                 } else {
-                    core.sessions.inner.resume_for("idle", "/tmp").as_deref()
+                    core.sessions
+                        .inner
+                        .resume_for("idle", "/tmp", HarnessId::Codex)
+                        .as_deref()
                         == Some("new-native-thread")
                 };
                 if completed {
@@ -4105,7 +4411,7 @@ mod tests {
                 SessionStatus::Idle
             );
             assert_eq!(
-                core.workspace.chat_harness_session("idle").unwrap().0,
+                core.workspace.chat_harness_session("idle").unwrap().session_id,
                 "new-native-thread"
             );
             let events = core.sessions.inner.journal.replay("idle", 0).unwrap();

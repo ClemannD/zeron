@@ -1260,6 +1260,10 @@ impl RegistryDoc {
                 "harnessSessionCwd",
                 opt_str(chat.harness_session_cwd.as_deref()),
             ),
+            (
+                "harnessSessionHarness",
+                opt_str(chat.harness_session_harness.as_deref()),
+            ),
             ("spaceId", opt_str(chat.space_id.as_deref())),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
             ("lastSeenAt", opt_ms(chat.last_seen_at)),
@@ -1470,6 +1474,7 @@ impl RegistryDoc {
         chat_id: &str,
         session_id: &str,
         cwd: &str,
+        harness: Option<&str>,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
@@ -1481,6 +1486,7 @@ impl RegistryDoc {
             fields([
                 ("harnessSessionId", json!(session_id)),
                 ("harnessSessionCwd", json!(cwd)),
+                ("harnessSessionHarness", opt_str(harness)),
             ]),
         );
         Ok(true)
@@ -1691,6 +1697,10 @@ impl RegistryDoc {
                     (
                         "harnessSessionCwd",
                         opt_str(chat.harness_session_cwd.as_deref()),
+                    ),
+                    (
+                        "harnessSessionHarness",
+                        opt_str(chat.harness_session_harness.as_deref()),
                     ),
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),

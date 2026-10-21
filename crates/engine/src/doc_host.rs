@@ -692,6 +692,25 @@ impl Drop for ChatDocHandle {
     }
 }
 
+/// The provider the chat's own latest switch seam moved to: `None` when the
+/// chat never switched, `Some(None)` for a seam naming no known harness.
+/// Seams above a fork's seam were copied from the source chat and don't
+/// count: the fork's own provider history starts there.
+pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<HarnessId>> {
+    for entry in entries.iter().rev() {
+        for part in &entry.parts {
+            match part {
+                MessagePart::Switch { to_harness, .. } => {
+                    return Some(to_harness.as_deref().and_then(HarnessId::from_slug));
+                }
+                MessagePart::Fork { .. } => return None,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 impl ChatDocHandle {
     /// The turn ending now is followed at once by a message the user has
     /// already sent: one still on its way through the command log (a burst
@@ -880,6 +899,47 @@ impl ChatDocHandle {
             continuation_of: None,
             duration_ms: None,
         })
+    }
+
+    /// Record that the chat moved from provider `from` to provider `to`: a
+    /// system entry carrying the [`MessagePart::Switch`] seam, plus the
+    /// `providerSwitched` meta flag that makes the next fresh provider session
+    /// owe the transcript. Idempotent against a retried dispatch: nothing is
+    /// written while the chat's latest seam already points at `to`. Returns
+    /// whether a seam was written.
+    pub fn write_provider_switch(
+        &self,
+        from: (HarnessId, &str),
+        to: (HarnessId, &str),
+        created_at: i64,
+    ) -> Result<bool, DocError> {
+        let ((from_id, from), (to_id, to)) = (from, to);
+        let entries = self.doc.read_entries()?;
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        if latest_switch(&entries) == Some(Some(to_id)) {
+            return Ok(false);
+        }
+        let id = format!("switch:{created_at}");
+        self.doc.push_message(&SessionMessageEntry {
+            id: id.clone(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Switch {
+                id,
+                from: from.to_string(),
+                to: to.to_string(),
+                from_harness: Some(from_id.as_str().to_owned()),
+                to_harness: Some(to_id.as_str().to_owned()),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.doc.mark_provider_switched()?;
+        Ok(true)
     }
 
     /// Recovery sweep: settle this device's running subagent chips (including
