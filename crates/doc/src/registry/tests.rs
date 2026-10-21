@@ -297,6 +297,8 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        last_turn_outcome: None,
+        terminal_activity: None,
         running_subagents: 0,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
@@ -304,6 +306,49 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
     }
+}
+
+#[test]
+fn program_activity_and_native_outcome_survive_replication_and_restart() {
+    use zeron_proto::{
+        DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity,
+    };
+    let now = ts(3_500);
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Interrupted,
+        finished_at: now,
+    });
+    row.terminal_activity = Some(TerminalActivity {
+        terminal_id: "pty".into(),
+        updated_at: ts(3_400),
+        report: ProgramStatus {
+            id: "worker".into(),
+            state: ProgramState::Blocked,
+            kind: Some(ProgramInputKind::Auth),
+            app: Some("demo".into()),
+            title: None,
+            message: Some("Sign in".into()),
+            progress: None,
+        },
+    });
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    let restored = RegistryDoc::from_bytes(&viewer.to_bytes().unwrap(), "viewer").unwrap();
+    assert_eq!(restored.read_sessions().unwrap(), vec![row.clone()]);
+    row.terminal_activity = None;
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Completed,
+        finished_at: now,
+    });
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
 }
 
 /// Stand-in for the server: applies every pushable batch from `docs` to a row

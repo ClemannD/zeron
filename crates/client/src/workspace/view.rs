@@ -82,8 +82,8 @@ pub struct SessionRow {
     pub branch: Option<String>,
     pub cwd: Option<String>,
     pub indicator: ChatIndicator,
-    /// Host-reported status (45s staleness-gated). Stop/busy logic keys off
-    /// this; an outgoing send is not evidence of a running turn.
+    /// Native host status (45s staleness-gated). Stop/busy logic keys off
+    /// this; terminal reports and outgoing sends are not native run evidence.
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
@@ -445,9 +445,9 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let now_ms = cx.now.timestamp_millis();
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
-    let host_indicator = display_status(chat, session, cx.now);
-    let indicator = host_indicator;
-    let working_since_ms = match indicator {
+    let host_indicator = zeron_proto::view::native_display_status(chat, session, cx.now);
+    let indicator = display_status(chat, session, cx.now);
+    let working_since_ms = match host_indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
             .map(|t| t.timestamp_millis()),
@@ -522,7 +522,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),
-        unseen: chat.unseen(),
+        unseen: zeron_proto::view::has_unseen_activity(chat, session),
         archived: chat.archived,
         pinned: rc.pinned.contains(chat.id.as_str()),
         section_id: rc.section_of.get(chat.id.as_str()).map(|s| (*s).to_owned()),

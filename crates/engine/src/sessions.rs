@@ -35,6 +35,9 @@ use zeron_proto::{
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
+
+#[path = "session_activity.rs"]
+mod activity;
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -227,6 +230,10 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    /// View-only projection. Native control and completion receipts continue
+    /// to read `statuses`; terminal activity is merged at this boundary.
+    activity_tx: OnceLock<watch::Sender<Vec<Session>>>,
+    activity_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -281,6 +288,8 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                activity_tx: OnceLock::new(),
+                activity_task: Mutex::new(None),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -369,7 +378,11 @@ impl SessionsEngine {
 
     /// Status watch: the full session list, re-sent on every transition.
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
-        self.inner.sessions_tx.subscribe()
+        self.inner
+            .activity_tx
+            .get()
+            .unwrap_or(&self.inner.sessions_tx)
+            .subscribe()
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1303,7 +1316,13 @@ impl SessionsEngine {
             };
             self.inner.publish(&chat_id, &done);
             let stamped = handle.mark_abandoned_streams(note)?.len();
-            self.set_status(&chat_id, SessionStatus::Idle, false);
+            self.inner.set_status_with_completion(
+                &chat_id,
+                SessionStatus::Idle,
+                false,
+                None,
+                Some(DoneStatus::Interrupted),
+            );
             tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
             recovered += 1;
 
@@ -1522,13 +1541,15 @@ impl Inner {
             self.sessions_tx.send_replace(list);
             session
         };
-        if let Some(ws) = self.workspace() {
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
             ws.record_session(&session);
         }
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
-        self.set_status_with_completion(chat_id, status, fresh_start, None);
+        self.set_status_with_completion(chat_id, status, fresh_start, None, None);
     }
 
     /// Publish how many subagents of `chat_id` are streaming. A change is
@@ -1553,7 +1574,9 @@ impl Inner {
             self.sessions_tx.send_replace(list);
             session
         };
-        if let Some(ws) = self.workspace() {
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
             ws.record_session(&session);
         }
     }
@@ -1573,6 +1596,7 @@ impl Inner {
         status: SessionStatus,
         fresh_start: bool,
         completed_turn: Option<String>,
+        outcome: Option<DoneStatus>,
     ) {
         let now = Utc::now();
         let session = {
@@ -1586,6 +1610,8 @@ impl Inner {
                     status,
                     started_at: None,
                     updated_at: now,
+                    last_turn_outcome: None,
+                    terminal_activity: None,
                     running_subagents: 0,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
@@ -1602,6 +1628,19 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
+            if let Some(outcome) = outcome {
+                entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+                    status: outcome,
+                    finished_at: now,
+                });
+            } else if status == SessionStatus::Errored {
+                entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+                    status: DoneStatus::Errored,
+                    finished_at: now,
+                });
+            } else if status == SessionStatus::Working && (fresh_start || !was_active) {
+                entry.last_turn_outcome = None;
+            }
             entry.updated_at = now;
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
@@ -1622,7 +1661,9 @@ impl Inner {
         };
         // Mirror the transition into the workspace doc's session-status row so
         // remote devices' sidebars show this run (staleness-checked client-side).
-        if let Some(ws) = self.workspace() {
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
             ws.record_session(&session);
         }
     }
@@ -2654,6 +2695,7 @@ async fn drive_run(
     let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
     let mut final_completed_turn = None;
+    let mut final_outcome = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -2874,7 +2916,7 @@ async fn drive_run(
                     reap_deferred_until = None;
                     self_continued_turn = false;
                     inner.set_status_with_completion(
-                        &chat_id, SessionStatus::Idle, false, completed_turn,
+                        &chat_id, SessionStatus::Idle, false, completed_turn, Some(DoneStatus::Completed),
                     );
                     continue;
                 }
@@ -3486,10 +3528,13 @@ async fn drive_run(
                     },
                     false,
                     completed_turn,
+                    (!pending_steer && turn_was_active).then_some(*status),
                 );
                 continue;
             }
             final_completed_turn = completed_turn;
+            // Retiring an already parked process is not a new turn outcome.
+            final_outcome = turn_was_active.then_some(*status);
             break match status {
                 DoneStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
@@ -3532,7 +3577,13 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
+    inner.set_status_with_completion(
+        &chat_id,
+        final_status,
+        false,
+        final_completed_turn,
+        final_outcome,
+    );
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.
     let orphans: Vec<RoutedSteer> = if inner

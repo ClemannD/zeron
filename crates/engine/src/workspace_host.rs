@@ -2105,6 +2105,8 @@ mod tests {
             last_completed_turn: None,
             started_at: None,
             updated_at: at,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
         }
     }

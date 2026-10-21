@@ -15,6 +15,7 @@ pub mod invocation;
 pub mod motion;
 pub mod plan_usage;
 pub mod preview;
+pub mod program_status;
 pub mod projectless;
 pub mod providers;
 pub mod sidebar_pins;
@@ -26,6 +27,7 @@ pub use agent::*;
 pub use cloud::*;
 pub use entities::*;
 pub use preview::*;
+pub use program_status::*;
 pub use sidebar_pins::*;
 pub use workspace::*;
 

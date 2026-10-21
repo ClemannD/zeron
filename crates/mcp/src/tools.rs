@@ -26,9 +26,6 @@ use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 const MAX_BATCH: usize = 32;
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
-/// A session row older than this is not trusted to still be working
-/// (the UI's staleness window): a crashed host must not read as busy forever.
-const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,7 +97,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with their project, host device, harness/model, live status, and last activity. Newest activity first.",
+            description: "Chats with project, device, harness/model, sidebar status, and last activity. Status is working, awaitingInput (needs input), completed (unseen result), errored, or idle. statusStale marks expired live reports; terminalActivity explains OSC 7501 reports. sessionStatus is native execution state. Newest activity first.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -162,7 +159,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message.",
+            description: "Wait for completed, awaitingInput, interrupted, errored, or timedOut. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion. Returns assistant replies when available.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -606,13 +603,11 @@ fn status_of(session: Option<&Session>) -> (String, Option<i64>) {
         return ("idle".into(), None);
     };
     let age = chrono::Utc::now() - session.updated_at;
-    let stale = age > SESSION_STALE;
-    let label = match session.status {
-        SessionStatus::Working if stale => "working (stale — host may be offline)",
-        SessionStatus::Working => "working",
-        SessionStatus::AwaitingInput => "awaitingInput",
-        SessionStatus::Errored => "errored",
-        SessionStatus::Idle => "idle",
+    let label = match zeron_proto::view::effective_indicator(Some(session), chrono::Utc::now()) {
+        zeron_proto::view::Indicator::Working => "working",
+        zeron_proto::view::Indicator::AwaitingInput => "awaitingInput",
+        zeron_proto::view::Indicator::Errored => "errored",
+        zeron_proto::view::Indicator::None => "idle",
     };
     (label.into(), Some(age.num_seconds().max(0)))
 }
@@ -623,7 +618,9 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         .as_deref()
         .and_then(|id| spaces.iter().find(|s| s.id == id));
     let session = session_for(sessions, chat);
-    let (status, status_age) = status_of(session.as_ref());
+    let (_, status_age) = status_of(session.as_ref());
+    let now = chrono::Utc::now();
+    let status = zeron_proto::view::display_status(chat, session.as_ref(), now);
     json!({
         "id": chat.id,
         "title": chat.title,
@@ -641,6 +638,10 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
         "status": status,
+        "sessionStatus": session.as_ref().map(|s| s.status),
+        "statusStale": session.as_ref().is_some_and(|s| zeron_proto::view::session_stale(s, now)),
+        "lastTurnOutcome": session.as_ref().and_then(|s| s.last_turn_outcome),
+        "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
         "statusAgeSecs": status_age,
         "lastMessageAt": chat.last_message_at,
         "lastMessagePreview": chat.last_message_preview,
@@ -881,7 +882,11 @@ impl Tools {
         let rendered = render_entries(&entries, RenderOptions::default());
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
         summary["messageCount"] = json!(rendered.len());
-        summary["pendingInput"] = last_pending_input(&rendered).unwrap_or(Value::Null);
+        summary["pendingInput"] = if summary["statusStale"] == true {
+            Value::Null
+        } else {
+            last_pending_input(&rendered).unwrap_or(Value::Null)
+        };
         summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
         Ok(summary)
     }
@@ -1489,12 +1494,20 @@ impl Tools {
             }
             tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
         }
-        let (status, _) = status_of(session.as_ref());
+        let now = chrono::Utc::now();
+        let status = zeron_proto::view::display_status(chat, session.as_ref(), now);
+        let stale = session
+            .as_ref()
+            .is_some_and(|s| zeron_proto::view::session_stale(s, now));
         Ok(json!({
             "outcome": outcome,
             "status": status,
+            "sessionStatus": session.as_ref().map(|s| s.status),
+            "lastTurnOutcome": session.as_ref().and_then(|s| s.last_turn_outcome),
+            "statusStale": stale,
+            "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
             "timedOut": outcome == TurnOutcome::TimedOut,
-            "pendingInput": last_pending_input(&rendered),
+            "pendingInput": if stale { None } else { last_pending_input(&rendered) },
             "replies": replies,
         }))
     }
@@ -1869,6 +1882,8 @@ mod tests {
             started_at: None,
             updated_at: chrono::Utc::now() - chrono::Duration::minutes(10),
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
         };
         // No mid-turn capability is required for a live mailbox delivery.

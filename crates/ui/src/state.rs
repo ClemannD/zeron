@@ -2990,8 +2990,8 @@ impl AppState {
         running_subagents(self.session_for(chat_id), now)
     }
 
-    /// Staleness-checked status dot for a chat row. A send in flight reads as
-    /// Working (see [`Self::display_status_for`]).
+    /// Native run indicator for composer/Stop controls. Sidebar attention is
+    /// derived separately by `display_status_for`, including terminal reports.
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
         if self.send_pending(chat_id, now) {
             return Indicator::Working;
@@ -3002,7 +3002,7 @@ impl AppState {
         if self.selected_chat.as_deref() == Some(chat_id) && self.cloud_setup_streaming() {
             return Indicator::Working;
         }
-        effective_indicator(self.session_for(chat_id), now)
+        zeron_proto::view::native_indicator(self.session_for(chat_id), now)
     }
 
     /// The earliest moment after `now` at which a clock-derived value flips
@@ -3033,7 +3033,7 @@ impl AppState {
             .iter()
             .filter(|session| {
                 matches!(
-                    session.status,
+                    session.activity_status(),
                     zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
                 )
             })
@@ -3960,10 +3960,17 @@ impl AppState {
     }
 
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let unseen = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| {
+                zeron_proto::view::has_unseen_activity(chat, self.session_for(chat_id))
+            });
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;
         };
-        if !chat.unseen() {
+        if !unseen {
             return;
         }
         chat.last_seen_at = Some(Utc::now());
@@ -5175,6 +5182,8 @@ mod tests {
     ) -> Session {
         Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
@@ -5443,6 +5452,8 @@ mod tests {
         let now = Utc::now();
         let mut row = Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
             chat_id: "chat".into(),
             device_id: "host".into(),
@@ -5475,6 +5486,8 @@ mod tests {
         let now = Utc::now();
         state.sessions = vec![Session {
             last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
             chat_id: "chat".into(),
             device_id: "host".into(),
@@ -5985,12 +5998,9 @@ mod tests {
             display_status(&c, Some(&idle), now),
             ChatIndicator::Completed
         );
-        // Stale working session falls back to the seen check.
+        // A lost host is not a successful completion, even with unread text.
         let stale = session("c", SessionStatus::Working, 300, now);
-        assert_eq!(
-            display_status(&c, Some(&stale), now),
-            ChatIndicator::Completed
-        );
+        assert_eq!(display_status(&c, Some(&stale), now), ChatIndicator::Idle);
         // Seen after the last message = Idle.
         c.last_seen_at = c.last_message_at.map(|t| t + TimeDelta::minutes(1));
         assert_eq!(display_status(&c, Some(&idle), now), ChatIndicator::Idle);
@@ -6005,6 +6015,43 @@ mod tests {
         // No messages at all: nothing to see — Idle.
         let fresh = chat("f", 0, None);
         assert_eq!(display_status(&fresh, None, now), ChatIndicator::Idle);
+    }
+
+    #[gpui::test]
+    fn terminal_result_is_seen_without_an_assistant_message(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let now = Utc::now() - TimeDelta::seconds(1);
+            state.chats = vec![chat("c", 0, None)];
+            let mut row = session("c", SessionStatus::Idle, 0, now);
+            row.terminal_activity = Some(zeron_proto::TerminalActivity {
+                terminal_id: "pty".into(),
+                updated_at: now,
+                report: zeron_proto::ProgramStatus {
+                    id: String::new(),
+                    state: zeron_proto::ProgramState::Done,
+                    app: None,
+                    kind: None,
+                    progress: None,
+                    title: None,
+                    message: None,
+                },
+            });
+            state.apply_sessions(vec![row]);
+            assert!(
+                !state.chats[0].unseen(),
+                "there is no new assistant message"
+            );
+            assert_eq!(
+                state.display_status_for(&state.chats[0], now),
+                ChatIndicator::Completed
+            );
+            state.mark_chat_seen("c", cx);
+            assert_eq!(
+                state.display_status_for(&state.chats[0], Utc::now()),
+                ChatIndicator::Idle
+            );
+        });
     }
 
     #[test]

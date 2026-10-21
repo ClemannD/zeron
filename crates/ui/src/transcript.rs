@@ -13787,6 +13787,8 @@ mod tests {
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
                             last_completed_turn: None,
+                            last_turn_outcome: None,
+                            terminal_activity: None,
                             running_subagents: 0,
                             chat_id: "chat".into(),
                             device_id: "test".into(),

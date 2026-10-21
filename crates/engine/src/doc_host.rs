@@ -5945,6 +5945,9 @@ impl DocHost {
                 setup_error: None,
             },
         };
+        if let Some(run) = &outcome.setup_action {
+            let _ = terminals.associate_chat(&run.terminal.id, chat_id);
+        }
         project_actions.complete_setup_handoff(command_id, chat_id, outcome);
     }
 

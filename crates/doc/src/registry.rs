@@ -1526,6 +1526,11 @@ impl RegistryDoc {
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
             ("lastCompletedTurn", json!(session.last_completed_turn)),
+            ("lastTurnOutcome", json!(session.last_turn_outcome)),
+            (
+                "terminalActivity",
+                serde_json::to_value(&session.terminal_activity)?,
+            ),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
             ("runningSubagents", json!(session.running_subagents)),
@@ -1705,6 +1710,11 @@ impl RegistryDoc {
                     ("deviceId", json!(session.device_id)),
                     ("status", serde_json::to_value(session.status)?),
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
+                    ("lastTurnOutcome", json!(session.last_turn_outcome)),
+                    (
+                        "terminalActivity",
+                        serde_json::to_value(&session.terminal_activity)?,
+                    ),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                     ("runningSubagents", json!(session.running_subagents)),

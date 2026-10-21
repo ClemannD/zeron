@@ -126,6 +126,14 @@ and opens either in the right pane.
 
 ## Tools
 
+Chat status uses the same shared derivation as the sidebar, including OSC 7501
+reports from chat-owned terminals. `status` is `working`, `awaitingInput`,
+`completed` (an unseen result), `errored`, or `idle`; `sessionStatus` retains the
+native execution state. `statusStale` distinguishes expired live reports, and
+`terminalActivity` identifies a terminal's input reason or result. Native waits
+can return `interrupted`; a lost host is never interpreted as successful
+completion. See [agent and terminal status](program-status.md).
+
 Chats are referenced by full id, a unique id prefix, or an exact title.
 Projects by id, path, display name, or unique path suffix. Devices by id or
 name (default: the local engine's device).

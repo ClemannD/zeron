@@ -285,6 +285,7 @@ impl EngineCore {
                 .map(std::path::PathBuf::from),
         );
         let terminals = Terminals::new();
+        sessions.track_terminal_activity(terminals.clone(), workspace.clone());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -579,6 +580,7 @@ impl EngineCore {
         self.doc_host.pause_all_queues();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
+        self.sessions.stop_activity_projection().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a

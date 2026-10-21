@@ -39,6 +39,10 @@ name = "appshots-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "program-status-fixture"
+required-features = ["appshots-fixture", "resource-profile"]
+
+[[example]]
 name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
 
