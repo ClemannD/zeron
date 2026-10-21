@@ -450,18 +450,35 @@ impl Shell {
         // that portion is closed), and it carries the CSD window's right
         // corners in place of the surface column (see `render_right_pane`).
         let corner = Self::window_corner_radius(window);
+        let seam_top = self.pane_seam_top(cx);
         let inner = div()
             .w(px(content_width))
             .h_full()
             .pt(px(self.workspace_titlebar_height(cx)))
             .occlude()
             .border_l_1()
-            .border_color(theme.border)
+            // Under project tabs the hairline starts below the bar.
+            .border_color(if seam_top.is_some() {
+                gpui::transparent_black()
+            } else {
+                theme.border
+            })
             .bg(theme.panel_bg())
             .when(corner > 0.0, |el| {
                 el.rounded_tr(px(corner)).rounded_br(px(corner))
             })
             .overflow_hidden()
+            .when_some(seam_top, |el, top| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(top))
+                        .bottom_0()
+                        .w(px(1.0))
+                        .bg(theme.border),
+                )
+            })
             .children(content);
         div()
             .id("files-panel")

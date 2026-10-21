@@ -12025,6 +12025,7 @@ impl Shell {
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
         let panel_bg = theme.panel_bg();
+        let seam_top = self.pane_seam_top(cx);
         let panel = div()
             .id("right-pane-focus")
             .debug_selector(|| "right-pane".into())
@@ -12039,8 +12040,18 @@ impl Shell {
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
             // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
-                el.border_l_1().border_color(theme.border)
+            .when(!self.right_pane_expanded, |el| match seam_top {
+                // Keep the 1px of layout; draw the line from below the tabs.
+                Some(top) => el.border_l_1().border_color(gpui::transparent_black()).child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(top))
+                        .bottom_0()
+                        .w(px(1.0))
+                        .bg(theme.border),
+                ),
+                None => el.border_l_1().border_color(theme.border),
             })
             // With the explorer undocked the panel's right edge IS the
             // window's right edge: it carries the CSD window's rounded corners
@@ -12060,7 +12071,7 @@ impl Shell {
             // row; the panel's own chrome starts below it.
             .when(
                 !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
-                |el| el.pt(px(self.workspace_titlebar_height(cx))),
+                |el| el.pt(px(self.right_pane_titlebar_height(cx))),
             )
             .child(content);
         let target = self.right_target(cx);

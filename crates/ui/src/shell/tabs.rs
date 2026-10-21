@@ -61,6 +61,9 @@ pub(super) struct TitlebarTrailing {
 /// (28px each) with the same 4px gap the surface strip keeps between its
 /// controls, so the two never render as one fused block.
 const PANEL_TOGGLE_GAP: f32 = 4.0;
+/// The right pane's header row under a full-width project-tab bar: the
+/// titlebar's height less its top gutter, so controls keep their centering.
+pub(super) const PANE_HEADER_ROW_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD;
 const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
 
 fn panel_titlebar_widths(
@@ -92,6 +95,34 @@ impl Shell {
         } else {
             Theme::TITLEBAR_HEIGHT
         }
+    }
+
+    /// With project tabs the bar spans the whole window, so the right pane's
+    /// own header (surface tabs, expand) drops into a row beneath it, over
+    /// the pane only. Everything under that row pads down by this much more.
+    pub(super) fn project_tab_pane_row_height(&self, cx: &App) -> f32 {
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
+        if matches!(self.route, Route::Chat) && self.settings.project_tabs.enabled {
+            let layout = self.titlebar_trailing_layout(on_canvas, cx);
+            if layout.right_pane_visible && !layout.takeover {
+                return PANE_HEADER_ROW_HEIGHT;
+            }
+        }
+        0.0
+    }
+
+    /// Where a pane's left hairline starts: below the project-tab bar, which
+    /// spans the window, so the line never runs up through the tabs. `None`
+    /// when the titlebar is the plain one and the line may run full height.
+    pub(super) fn pane_seam_top(&self, cx: &App) -> Option<f32> {
+        let height = self.workspace_titlebar_height(cx);
+        (height > Theme::TITLEBAR_HEIGHT).then_some(height)
+    }
+
+    /// Top clearance of the right pane's body: the titlebar plus, under
+    /// project tabs, the pane's header row.
+    pub(super) fn right_pane_titlebar_height(&self, cx: &App) -> f32 {
+        self.workspace_titlebar_height(cx) + self.project_tab_pane_row_height(cx)
     }
 
     /// The same binding navigates the focused pane. Keep the persisted action
@@ -467,6 +498,10 @@ impl Shell {
                 state.running_subagents_for(chat, now) + side_chats
             })
         };
+        // Project tabs span the window, so the pane's header leaves the tab
+        // row for a row of its own beneath (`pane_row`).
+        let tabs_mode = self.settings.project_tabs.enabled && !takeover;
+        let mut pane_row: Option<gpui::AnyElement> = None;
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -486,62 +521,73 @@ impl Shell {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
-                let show_pane_controls =
-                    widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
                 // The toggle is the fixed right-edge anchor, like the left
                 // sidebar control. Only the tabs + expand section reveals to
                 // its left; including the toggle in this animated width
                 // compressed both icons into the same clipped box at open.
-                controls = controls.child(
-                    div()
-                        .w(px(widths.surface_reveal))
-                        .h_full()
-                        .flex_none()
-                        .relative()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .debug_selector(|| "right-titlebar-content".into())
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .w(px(content_width))
-                                .h_full()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .overflow_hidden()
-                                // 8 + the trigger's own 8px pad = the pane's 16px
-                                // text gutter. The 4px right padding is the stable
-                                // gap before the fixed toggle.
-                                .when(show_pane_controls, |el| {
-                                    el.pl(px(8.0))
-                                        .pr(px(4.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .h_full()
-                                                .overflow_hidden()
-                                                .child(self.render_right_tab_strip(cx)),
-                                        )
-                                        .child(header_icon_button(
-                                            "expand-changes",
-                                            right_pane_expand_icon(self.right_pane_expanded),
-                                            if self.right_pane_expanded {
-                                                "Collapse panel"
-                                            } else {
-                                                "Expand panel"
-                                            },
-                                            &theme,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.toggle_right_pane_expand(cx)
-                                            }),
-                                        ))
-                                }),
-                        ),
-                );
+                let (reveal, inner_width) = if tabs_mode {
+                    let visible = self.right_visible_width(cx);
+                    (
+                        visible,
+                        self.right_content_width(self.right_target(cx)).max(visible),
+                    )
+                } else {
+                    (widths.surface_reveal, content_width)
+                };
+                let show_pane_controls = reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
+                let surface = div()
+                    .w(px(reveal))
+                    .h_full()
+                    .flex_none()
+                    .relative()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .debug_selector(|| "right-titlebar-content".into())
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .w(px(inner_width))
+                            .h_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .overflow_hidden()
+                            // 8 + the trigger's own 8px pad = the pane's 16px
+                            // text gutter. The 4px right padding is the stable
+                            // gap before the fixed toggle.
+                            .when(show_pane_controls, |el| {
+                                el.pl(px(8.0))
+                                    .pr(px(4.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .overflow_hidden()
+                                            .child(self.render_right_tab_strip(cx)),
+                                    )
+                                    .child(header_icon_button(
+                                        "expand-changes",
+                                        right_pane_expand_icon(self.right_pane_expanded),
+                                        if self.right_pane_expanded {
+                                            "Collapse panel"
+                                        } else {
+                                            "Expand panel"
+                                        },
+                                        &theme,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.toggle_right_pane_expand(cx)
+                                        }),
+                                    ))
+                            }),
+                    );
+                if tabs_mode {
+                    pane_row = Some(surface.into_any_element());
+                } else {
+                    controls = controls.child(surface);
+                }
             }
             let files_panel_label = if self.files_panel_open(cx) && fit.files {
                 "Hide files panel"
@@ -557,7 +603,12 @@ impl Shell {
                 controls
                     .child(
                         div()
-                            .w(px(widths.files_controls))
+                            // The tab bar owns the width beside the toggles.
+                            .w(px(if tabs_mode {
+                                PANEL_TOGGLE_SLOTS
+                            } else {
+                                widths.files_controls
+                            }))
                             .h_full()
                             .flex_none()
                             .flex()
@@ -646,16 +697,10 @@ impl Shell {
             Some(bar) => (Some(bar.strip), Some(bar.band)),
             None => (None, None),
         };
-        // The band spans the conversation column: from the sidebar seam to
-        // the side pane (or the window edge).
+        // The band spans the window: from the sidebar seam to the right edge,
+        // over the side pane and explorer too.
         let band_left = self.sidebar_now();
-        let band_right = self.viewport_width
-            - if right_pane_visible {
-                self.right_visible_width(cx)
-            } else {
-                0.0
-            }
-            - self.files_visible_width(cx);
+        let band_right = self.viewport_width;
         let inner = div()
             .size_full()
             .flex()
@@ -731,7 +776,24 @@ impl Shell {
                 )
             })
             .child(inner);
-        self.titlebar_drag_region("chat-titlebar", bar, cx)
+        let bar = self.titlebar_drag_region("chat-titlebar", bar, cx);
+        let Some(pane_row) = pane_row else {
+            return bar.into_any_element();
+        };
+        // The pane's header sits just under the tab bar, over the pane only.
+        // It lives outside the drag region so the bar's bounds stay the
+        // draggable band.
+        div()
+            .child(bar)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT))
+                    .right(px(self.files_visible_width(cx)))
+                    .h(px(PANE_HEADER_ROW_HEIGHT))
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(pane_row),
+            )
             .into_any_element()
     }
 }
