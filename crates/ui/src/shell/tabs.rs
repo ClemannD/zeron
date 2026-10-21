@@ -202,10 +202,16 @@ impl Shell {
             if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
                 return;
             }
-            state
-                .overview_chats(Utc::now())
-                .first()
-                .map(|(_, c)| c.id.clone())
+            if self.settings.project_tabs.enabled {
+                // Land inside the restored project tab, not wherever the
+                // newest session overall happens to live.
+                self.project_tab_landing_in(state, self.settings.space_filter.as_deref())
+            } else {
+                state
+                    .overview_chats(Utc::now())
+                    .first()
+                    .map(|(_, c)| c.id.clone())
+            }
         };
         if let Some(first) = first {
             self.focus_composer(cx);
@@ -258,6 +264,10 @@ impl Shell {
             }
         }
         self.nav.push(NavEntry::Chat(String::new()));
+        // The "No project" tab's canvas mints project-less sessions.
+        let no_project_tab = project.is_none()
+            && self.settings.project_tabs.enabled
+            && self.settings.space_filter.as_deref() == Some(crate::state::NO_PROJECT_TAB);
         let target = {
             let state = self.state.read(cx);
             project
@@ -272,6 +282,8 @@ impl Shell {
             s.select_chat(None, cx);
             if target.is_some() {
                 s.select_space(target, cx);
+            } else if no_project_tab {
+                s.select_space(None, cx);
             } else if !restores && defaults.no_project {
                 // No canvas target was set aside (e.g. after a runtime swap):
                 // fall back to the saved new-session opt-out.
@@ -612,6 +624,25 @@ impl Shell {
                 crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
             })
         });
+        // Project tabs take the title's place (the sidebar highlights the
+        // open session); they hide with it during panel takeover.
+        let project_bar =
+            (self.settings.project_tabs.enabled && !takeover).then(|| self.render_project_tab_bar(cx));
+        let tabs_shown = project_bar.is_some();
+        let (project_strip, project_band) = match project_bar {
+            Some(bar) => (Some(bar.strip), Some(bar.band)),
+            None => (None, None),
+        };
+        // The band spans the conversation column: from the sidebar seam to
+        // the side pane (or the window edge).
+        let band_left = self.sidebar_now();
+        let band_right = self.viewport_width
+            - if right_pane_visible {
+                self.right_visible_width(cx)
+            } else {
+                0.0
+            }
+            - self.files_visible_width(cx);
         let inner = div()
             .size_full()
             .flex()
@@ -623,7 +654,7 @@ impl Shell {
             // In panel takeover the header strip spans the whole band — the
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.
-            .when(!takeover, |el| {
+            .when(!takeover && !tabs_shown, |el| {
                 el.child(
                     div()
                         .min_w_0()
@@ -658,14 +689,30 @@ impl Shell {
                         ),
                 )
             })
-            .child(div().flex_1())
+            .children(project_strip)
+            .when(!tabs_shown, |el| el.child(div().flex_1()))
             .children(session_info_toggle)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
         // the inset card. No bottom border — the card's own hairline is the
         // separation; the glass gutter shows between.
-        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        let bar = div()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .flex_none()
+            .relative()
+            .when_some(project_band, |bar, band| {
+                bar.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(band_left))
+                        .w(px((band_right - band_left).max(0.0)))
+                        .h_full()
+                        .child(band),
+                )
+            })
+            .child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
     }

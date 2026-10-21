@@ -342,6 +342,46 @@ impl ChangeRequestClientState {
     ) -> Option<&'a ChangeRequestSummary> {
         change_request_for_chat(chat, spaces, self.snapshots.values())
     }
+
+    /// The pull request of a folder's checked-out branch, from its own watch
+    /// ([`space_watch_targets`]), rechecked against the snapshot's branch.
+    pub fn change_request_for_space<'a>(
+        &'a self,
+        space: &Space,
+        branch: &str,
+    ) -> Option<&'a ChangeRequestSummary> {
+        let key = space_watch_key(space, branch);
+        self.snapshots
+            .get(&key)
+            .filter(|snapshot| snapshot.branch == branch && snapshot.device_id == space.device_id)
+            .and_then(|snapshot| snapshot.change_request.as_ref())
+    }
+}
+
+fn space_watch_key(space: &Space, branch: &str) -> ChangeRequestWatchKey {
+    ChangeRequestWatchKey {
+        device_id: space.device_id.clone(),
+        cwd: space.path.clone(),
+        branch: branch.to_owned(),
+        checkout_id: space.checkout_id.clone(),
+    }
+}
+
+/// Watches for each folder's checked-out branch (project tabs), so a tab can
+/// show its branch's pull request even before any session works there.
+pub(crate) fn space_watch_targets(
+    spaces: &[Space],
+    branches: &HashMap<String, String>,
+    is_unsupported: impl Fn(&str) -> bool,
+) -> HashSet<ChangeRequestWatchKey> {
+    spaces
+        .iter()
+        .filter(|space| space.git_detected && !is_unsupported(&space.device_id))
+        .filter_map(|space| {
+            let branch = branches.get(&space.id)?.trim();
+            (!branch.is_empty()).then(|| space_watch_key(space, branch))
+        })
+        .collect()
 }
 
 /// Active, fully identified checkouts that need host-side PR resolution.

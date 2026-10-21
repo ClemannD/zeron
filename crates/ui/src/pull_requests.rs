@@ -3347,7 +3347,8 @@ fn context_project(state: &AppState, space_filter: Option<&str>) -> ContextProje
                 device: space.device_id.clone(),
             })
     };
-    if let Some(id) = space_filter {
+    // The "No project" tab names no repository: same as no filter.
+    if let Some(id) = space_filter.filter(|id| *id != crate::state::NO_PROJECT_TAB) {
         let Some(space) = state.spaces.iter().find(|space| space.id == id) else {
             return ContextProject::Waiting;
         };

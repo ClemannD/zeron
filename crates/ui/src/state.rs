@@ -745,6 +745,10 @@ pub(crate) struct CanvasTarget {
     device: Option<String>,
 }
 
+/// The project-tab key and sidebar filter value for sessions outside any
+/// project. Never a space id (those are UUIDs).
+pub const NO_PROJECT_TAB: &str = "~no-project";
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -792,6 +796,13 @@ pub struct AppState {
     /// [`Self::selected_space_row`] reads as `None` — healing must NOT
     /// re-select a project underneath it.
     pub no_project: bool,
+    /// Project tabs are on: the sidebar filter names exactly one space, so
+    /// clones and worktree-holding copies of one repository stay apart
+    /// (see [`Self::project_filter`]). Mirrored from the shell's settings.
+    pub exact_space_filter: bool,
+    /// Each folder's checked-out branch, read by project tabs; also watched
+    /// for its pull request ([`crate::change_requests::space_watch_targets`]).
+    pub space_branches: HashMap<String, String>,
     /// The composer's device pick — where project-less sessions run, and the
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
@@ -943,6 +954,8 @@ impl AppState {
             session_presentation: None,
             selected_space: None,
             no_project: false,
+            exact_space_filter: false,
+            space_branches: HashMap::new(),
             selected_device: None,
             canvas_target: None,
             selected_chat: None,
@@ -2152,17 +2165,28 @@ impl AppState {
     /// checkout's space id, and a chat in ANY checkout of that repository
     /// (clones and worktrees on every device, [`zeron_proto::view::project_key`])
     /// matches. A filter naming a space not synced here matches its own id.
+    ///
+    /// Under project tabs ([`Self::exact_space_filter`]) only the named space
+    /// matches — a worktree session keeps its origin space's id, so it still
+    /// lands under that folder's tab — and [`NO_PROJECT_TAB`] matches the
+    /// project-less sessions.
     pub fn project_filter<'a>(&'a self, filter: Option<&str>) -> impl Fn(&Chat) -> bool + 'a {
+        let exact = self.exact_space_filter;
         let filter = filter.map(|id| {
             (
                 id.to_owned(),
-                self.space_row(id).map(zeron_proto::view::project_key),
+                self.space_row(id)
+                    .filter(|_| !exact)
+                    .map(zeron_proto::view::project_key),
             )
         });
         move |chat| {
             let Some((id, key)) = &filter else {
                 return true;
             };
+            if id == NO_PROJECT_TAB {
+                return chat.space_id.is_none();
+            }
             match chat.space_id.as_deref() {
                 Some(space_id) if space_id == id => true,
                 Some(space_id) => key.as_ref().is_some_and(|key| {
@@ -2664,9 +2688,14 @@ impl AppState {
             return;
         };
         let targets = if self.change_requests_visible {
-            desired_watch_targets(&self.chats, &self.spaces, |device| {
-                !self.change_requests.is_supported(device)
-            })
+            let unsupported = |device: &str| !self.change_requests.is_supported(device);
+            let mut targets = desired_watch_targets(&self.chats, &self.spaces, unsupported);
+            targets.extend(crate::change_requests::space_watch_targets(
+                &self.spaces,
+                &self.space_branches,
+                unsupported,
+            ));
+            targets
         } else {
             HashSet::new()
         };
@@ -2688,6 +2717,26 @@ impl AppState {
             );
             self.change_request_tasks.insert(target, task);
         }
+    }
+
+    /// Record folders' checked-out branches (project tabs); a change re-aims
+    /// the folders' pull request watches.
+    pub fn set_space_branches(
+        &mut self,
+        branches: HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.space_branches != branches {
+            self.space_branches = branches;
+            self.reconcile_change_request_watches(cx);
+            cx.notify();
+        }
+    }
+
+    /// The pull request of a folder's checked-out branch, when known.
+    pub fn change_request_for_space(&self, space: &Space) -> Option<&ChangeRequestSummary> {
+        let branch = self.space_branches.get(&space.id)?;
+        self.change_requests.change_request_for_space(space, branch)
     }
 
     pub fn set_change_requests_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -4978,6 +5027,36 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(overview, ["old", "new", "dangling"]);
+    }
+
+    #[test]
+    fn exact_project_filter_keeps_clones_of_one_repository_apart() {
+        let mut state = AppState::new();
+        let mut one = space("one", "laptop", "/code/a/zeron", 1);
+        one.repository_id = Some("commit:abc".into());
+        let mut two = space("two", "laptop", "/code/b/zeron", 2);
+        two.repository_id = Some("commit:abc".into());
+        state.apply_spaces(vec![one, two]);
+        let in_space = |id: &str, space: Option<&str>| {
+            let mut chat = chat(id, 0, None);
+            chat.space_id = space.map(Into::into);
+            chat
+        };
+        let (in_one, in_two, homeless) = (
+            in_space("c1", Some("one")),
+            in_space("c2", Some("two")),
+            in_space("c3", None),
+        );
+        // Repository grouping (project tabs off) folds the clones together.
+        assert!(state.project_filter(Some("one"))(&in_two));
+        state.exact_space_filter = true;
+        let filter = state.project_filter(Some("one"));
+        assert!(filter(&in_one));
+        assert!(!filter(&in_two));
+        assert!(!filter(&homeless));
+        let filter = state.project_filter(Some(NO_PROJECT_TAB));
+        assert!(filter(&homeless));
+        assert!(!filter(&in_one));
     }
 
     #[test]

@@ -866,6 +866,61 @@ pub enum SidebarOrganization {
     InOneList,
 }
 
+/// Project tabs across the titlebar: one tab per space (device + folder —
+/// clones of one repository are separate tabs, never grouped), each scoping
+/// the sidebar to that space's sessions. Device-local, like the sidebar
+/// filter it drives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectTabsSettings {
+    pub enabled: bool,
+    /// Visible tabs in strip order: space ids, or
+    /// [`crate::state::NO_PROJECT_TAB`]. Spaces in neither this list nor
+    /// [`Self::hidden`] are new and join the end of the strip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    /// Tabs the user closed; listed in the strip's menu to bring back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<String>,
+    /// The session last viewed under each tab, reopened on switching back.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub last_chat: HashMap<String, String>,
+    /// What the line under each tab's name shows.
+    pub meta: ProjectTabMeta,
+}
+
+/// The details line under a project tab's name; each item shows only when it
+/// has something to say (a git branch, a known pull request, a remote host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectTabMeta {
+    /// The folder's checked-out branch.
+    pub branch: bool,
+    /// The pull request open for that branch, with its state.
+    pub pull_request: bool,
+    /// The host device, for folders on another machine.
+    pub device: bool,
+    /// How many sessions the tab holds, and how many are working.
+    pub sessions: bool,
+}
+
+impl Default for ProjectTabMeta {
+    fn default() -> Self {
+        Self {
+            branch: true,
+            pull_request: true,
+            device: true,
+            sessions: false,
+        }
+    }
+}
+
+impl ProjectTabMeta {
+    pub fn any(self) -> bool {
+        self.branch || self.pull_request || self.device || self.sessions
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
@@ -1041,6 +1096,8 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// Project tabs across the titlebar (see [`ProjectTabsSettings`]).
+    pub project_tabs: ProjectTabsSettings,
     /// Custom sidebar organization, isolated between account profiles on this device.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
@@ -1223,6 +1280,7 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
+            project_tabs: ProjectTabsSettings::default(),
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -1342,11 +1400,13 @@ pub enum ShortcutId {
     NextSession,
     PrevSession,
     ArchiveSession,
+    NextProjectTab,
+    PrevProjectTab,
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 17 + JUMP_SLOTS] = [
         ShortcutId::ToggleDictation,
         ShortcutId::CaptureAppshot,
         ShortcutId::RandomWallpaper,
@@ -1362,6 +1422,8 @@ impl ShortcutId {
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
+        ShortcutId::NextProjectTab,
+        ShortcutId::PrevProjectTab,
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1395,6 +1457,8 @@ impl ShortcutId {
             ShortcutId::NextSession => "Next session or right pane tab",
             ShortcutId::PrevSession => "Previous session or right pane tab",
             ShortcutId::ArchiveSession => "Archive session",
+            ShortcutId::NextProjectTab => "Next project tab",
+            ShortcutId::PrevProjectTab => "Previous project tab",
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1439,6 +1503,9 @@ impl ShortcutId {
             // Mod+A is the composer's Select all, so archiving takes the
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
+            // Chrome's tab navigation. Ctrl+Tab already cycles sessions.
+            ShortcutId::NextProjectTab => "mod-alt-right",
+            ShortcutId::PrevProjectTab => "mod-alt-left",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1473,6 +1540,8 @@ pub struct KeymapConfig {
     pub next_session: String,
     pub prev_session: String,
     pub archive_session: String,
+    pub next_project_tab: String,
+    pub prev_project_tab: String,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1539,6 +1608,8 @@ impl Default for KeymapConfig {
             next_session: ShortcutId::NextSession.default_combo().into(),
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
+            next_project_tab: ShortcutId::NextProjectTab.default_combo().into(),
+            prev_project_tab: ShortcutId::PrevProjectTab.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1562,6 +1633,8 @@ impl KeymapConfig {
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
+            ShortcutId::NextProjectTab => &self.next_project_tab,
+            ShortcutId::PrevProjectTab => &self.prev_project_tab,
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1587,6 +1660,8 @@ impl KeymapConfig {
             ShortcutId::NextSession => self.next_session = combo,
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
+            ShortcutId::NextProjectTab => self.next_project_tab = combo,
+            ShortcutId::PrevProjectTab => self.prev_project_tab = combo,
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1879,6 +1954,7 @@ impl UiSettings {
             last_project_action_by_space_id,
             open_tabs,
             space_filter,
+            project_tabs,
             sidebar_sections_by_profile,
             sidebar_pinned_session_ids_by_profile,
             tab_order,
@@ -2923,6 +2999,17 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            project_tabs: ProjectTabsSettings {
+                enabled: true,
+                order: vec!["space-2".into(), "space-1".into()],
+                hidden: vec!["space-3".into()],
+                last_chat: HashMap::from([("space-1".to_string(), "chat-1".to_string())]),
+                meta: ProjectTabMeta {
+                    branch: false,
+                    sessions: true,
+                    ..ProjectTabMeta::default()
+                },
+            },
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (

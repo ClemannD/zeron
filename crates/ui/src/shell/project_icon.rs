@@ -3,25 +3,137 @@ use super::*;
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
 
+/// Where projects typically keep their icon, best candidates first: large or
+/// vector artwork, then framework conventions (Next.js `app/` and `src/app/`,
+/// SvelteKit/Hugo `static/`, Angular `src/`, Expo, Electron, Tauri, Flutter),
+/// then repository logos and plain favicons. Paths are relative to the
+/// checkout root. Remote projects try exactly this list.
 pub(super) const ICON_PATHS: &[&str] = &[
     "public/apple-touch-icon.png",
     "apple-touch-icon.png",
     "public/favicon.svg",
     "favicon.svg",
-    "public/favicon.png",
-    "public/icon.png",
-    "public/logo.png",
-    "favicon.png",
+    "public/icon.svg",
+    "public/logo.svg",
+    "app/icon.svg",
+    "src/app/icon.svg",
+    "app/apple-icon.png",
+    "src/app/apple-icon.png",
     "app/icon.png",
     "src/app/icon.png",
-    "public/favicon.ico",
-    "favicon.ico",
-    "app/favicon.ico",
-    "static/favicon.ico",
-    "src-tauri/icons/icon.png",
-    "assets/icon.png",
+    "public/android-chrome-512x512.png",
+    "public/android-chrome-192x192.png",
+    "public/icon-512.png",
+    "public/icon-192.png",
+    "public/favicon.png",
+    "public/favicon-96x96.png",
+    "public/favicon-32x32.png",
+    "public/icon.png",
+    "public/logo.png",
+    "static/favicon.svg",
+    "static/favicon.png",
+    "static/logo.svg",
+    "static/logo.png",
+    "src/favicon.svg",
+    "src/assets/icon.svg",
     "src/assets/icon.png",
+    "src/assets/logo.svg",
+    "src/assets/logo.png",
+    "assets/icon.svg",
+    "assets/icon.png",
+    "assets/images/icon.png",
+    "assets/logo.svg",
+    "assets/logo.png",
+    "resources/icon.png",
+    "build/icon.png",
+    "src-tauri/icons/icon.png",
+    "src-tauri/icons/128x128@2x.png",
+    "web/icons/Icon-512.png",
+    "web/favicon.png",
+    "icon.svg",
+    "icon.png",
+    "logo.svg",
+    "logo.png",
+    ".github/logo.svg",
+    ".github/logo.png",
+    "docs/logo.svg",
+    "docs/logo.png",
+    "favicon.png",
+    "public/favicon.ico",
+    "app/favicon.ico",
+    "src/app/favicon.ico",
+    "static/favicon.ico",
+    "src/favicon.ico",
+    "favicon.ico",
 ];
+
+/// Monorepo package folders searched (locally) with [`ICON_PATHS`] when the
+/// root has no icon: `apps/web/public/favicon.svg` and the like.
+const MONOREPO_DIRS: &[&str] = &["apps", "packages", "sites"];
+
+/// The first candidate that exists under `dir`.
+fn first_icon_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    ICON_PATHS
+        .iter()
+        .map(|path| dir.join(path))
+        .find(|path| path.is_file())
+}
+
+/// Read and decode one icon file.
+fn load_icon_file(path: &std::path::Path) -> Option<MediaImage> {
+    let bytes = std::fs::File::open(path).ok().and_then(|file| {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take(zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(bytes)
+    })?;
+    let mime = if path.extension().is_some_and(|e| e == "svg") {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    };
+    decode_project_icon(mime, bytes).ok()
+}
+
+/// Sorted subdirectories of `dir` (hidden ones skipped). Bounded: a huge
+/// folder must not stall the icon search.
+fn subdirectories(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .take(200)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The largest PNG of an Xcode app icon set within two levels of `root`
+/// (`MyApp/Assets.xcassets/AppIcon.appiconset/*.png`).
+fn xcode_app_icon(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut parents = vec![root.to_path_buf()];
+    parents.extend(subdirectories(root));
+    let level_two: Vec<_> = parents.iter().skip(1).flat_map(|dir| subdirectories(dir)).collect();
+    parents.extend(level_two);
+    parents.into_iter().find_map(|dir| {
+        let set = dir.join("Assets.xcassets/AppIcon.appiconset");
+        std::fs::read_dir(&set)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "png"))
+            .filter_map(|path| Some((path.metadata().ok()?.len(), path)))
+            .filter(|(len, _)| *len <= zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64)
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, path)| path)
+    })
+}
 
 fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
     // A project can point at a subdirectory; match the remote workspace RPC's
@@ -31,27 +143,17 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
         .ancestors()
         .find(|path| path.join(".git").exists())
         .unwrap_or(&canonical);
-    for path in ICON_PATHS {
-        let path = root.join(path);
-        if !path.is_file() {
-            continue;
-        }
-        let bytes = std::fs::File::open(&path).ok().and_then(|file| {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            file.take(zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            Some(bytes)
-        })?;
-        let mime = if path.extension().is_some_and(|e| e == "svg") {
-            "image/svg+xml"
-        } else {
-            "image/png"
-        };
-        return decode_project_icon(mime, bytes).ok();
-    }
-    None
+    // The first match wins even when it fails to decode: a corrupt icon shows
+    // the default rather than unrelated lower-priority art.
+    let path = first_icon_path(root)
+        .or_else(|| {
+            MONOREPO_DIRS
+                .iter()
+                .flat_map(|dir| subdirectories(&root.join(dir)))
+                .find_map(|package| first_icon_path(&package))
+        })
+        .or_else(|| xcode_app_icon(root))?;
+    load_icon_file(&path)
 }
 
 // Curated badge tones: (dark appearance, light appearance). Keep the ordering
@@ -359,8 +461,39 @@ impl ProjectIcons {
         selected: bool,
         cx: &mut Context<V>,
     ) -> AnyElement {
+        self.render_scoped(state, space, false, profile, selected, cx)
+    }
+
+    /// [`Self::render`] for exactly this folder: its own name, color and
+    /// artwork, never a sibling clone's (project tabs keep clones apart).
+    pub(crate) fn render_exact<V: 'static>(
+        &self,
+        state: &Entity<AppState>,
+        space: &zeron_proto::Space,
+        profile: Option<String>,
+        selected: bool,
+        cx: &mut Context<V>,
+    ) -> AnyElement {
+        self.render_scoped(state, Some(space), true, profile, selected, cx)
+    }
+
+    fn render_scoped<V: 'static>(
+        &self,
+        state: &Entity<AppState>,
+        space: Option<&zeron_proto::Space>,
+        exact: bool,
+        profile: Option<String>,
+        selected: bool,
+        cx: &mut Context<V>,
+    ) -> AnyElement {
         let state = state.read(cx);
-        let representative = space.map(|space| state.representative_space(space));
+        let representative = space.map(|space| {
+            if exact {
+                space
+            } else {
+                state.representative_space(space)
+            }
+        });
         let name = representative
             .map(|space| space.display_name().to_string())
             .unwrap_or_else(|| "Home".into());
@@ -368,6 +501,9 @@ impl ProjectIcons {
             .map(|space| space.path.clone())
             .unwrap_or_else(|| "home".into());
         let artwork = space.map(|space| {
+            if exact {
+                return space;
+            }
             state
                 .project_members(space)
                 .into_iter()
@@ -454,5 +590,27 @@ mod tests {
             .save(temp.path().join("favicon.ico"))
             .unwrap();
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
+    }
+    #[test]
+    fn project_icons_cover_next_src_app_monorepos_and_xcode() {
+        // Next.js with a src/ folder.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src/app")).unwrap();
+        image::RgbaImage::new(16, 16)
+            .save(temp.path().join("src/app/favicon.ico"))
+            .unwrap();
+        assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
+        // A monorepo package's public folder, when the root has none.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("apps/landing/public")).unwrap();
+        png(&temp.path().join("apps/landing/public/favicon.png"), 5);
+        assert_eq!(load_local_icon(temp.path()).unwrap().width, 5.0);
+        // The largest image of an Xcode app icon set.
+        let temp = tempfile::tempdir().unwrap();
+        let set = temp.path().join("ios/App/Assets.xcassets/AppIcon.appiconset");
+        std::fs::create_dir_all(&set).unwrap();
+        png(&set.join("small.png"), 2);
+        png(&set.join("large.png"), 512);
+        assert!(load_local_icon(temp.path()).unwrap().width > 2.0);
     }
 }

@@ -706,7 +706,9 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal => "Panels",
-        ShortcutId::NewProject => "Projects",
+        ShortcutId::NewProject | ShortcutId::NextProjectTab | ShortcutId::PrevProjectTab => {
+            "Projects"
+        }
         ShortcutId::ToggleDictation => "Voice",
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
