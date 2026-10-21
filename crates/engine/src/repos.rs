@@ -666,13 +666,7 @@ impl Repos {
 
     async fn clone_repo_into(&self, url: &str, repos_dir: &Path) -> Result<Repo, EngineError> {
         let trimmed = url.trim().trim_end_matches('/');
-        let name = trimmed
-            .trim_end_matches(".git")
-            .rsplit(['/', ':'])
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("repo")
-            .to_string();
+        let name = clone_folder_name(trimmed);
         let target = repos_dir.join(&name);
         if target.exists() {
             // `.git` must be the destination's own: `git remote` inside a
@@ -2174,6 +2168,20 @@ fn compact_history_commits(
 /// Whether two remote URLs name the same repository: `https://`, `ssh://` and
 /// scp-style spellings, a `.git` suffix, a trailing slash, embedded
 /// credentials, and host/owner/name case are all ignored.
+/// The folder a clone of `url` lands in: its last path segment minus
+/// `.git`. Local paths split on `\\` too (a Windows path must not become an
+/// absolute "name" that replaces the destination), and a segment that would
+/// step out of the destination (`.`, `..`) falls back to `repo`.
+fn clone_folder_name(url: &str) -> String {
+    url.trim_end_matches(['/', '\\'])
+        .trim_end_matches(".git")
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .unwrap_or("repo")
+        .to_string()
+}
+
 pub(crate) fn same_remote(a: &str, b: &str) -> bool {
     fn key(url: &str) -> String {
         if let Some(remote) = crate::source_control::parse_git_remote(url) {
@@ -2964,6 +2972,25 @@ mod tests {
         assert!(err.to_string().contains("No such folder"), "{err}");
     }
 
+    #[test]
+    fn clone_folder_name_is_the_last_segment_and_stays_inside() {
+        for (url, name) in [
+            ("https://github.com/acme/app.git", "app"),
+            ("https://github.com/acme/app/", "app"),
+            ("git@github.com:acme/app.git", "app"),
+            ("git@github.com:app.git", "app"),
+            ("/srv/git/app.git", "app"),
+            (r"C:\Users\me\code\app.git", "app"),
+            (r"C:\Users\me\code\app\", "app"),
+            ("https://example.com/acme/..", "repo"),
+            ("https://example.com/acme/.", "repo"),
+            (r"C:\..", "repo"),
+            ("", "repo"),
+        ] {
+            assert_eq!(clone_folder_name(url), name, "{url}");
+        }
+    }
+
     #[tokio::test]
     async fn clone_repo_is_idempotent_for_the_same_origin_only() {
         let root = tempfile::tempdir().unwrap();
@@ -3008,7 +3035,7 @@ mod tests {
             .clone_repo(upstreams[0].to_str().unwrap())
             .await
             .unwrap();
-        assert_eq!(first.path, data.join("repos/src").to_string_lossy());
+        assert_eq!(first.path, data.join("repos").join("src").to_string_lossy());
         // Same repository again (different spelling): the same success reply.
         let again = repos
             .clone_repo(&format!("file://{}/", upstreams[0].display()))
