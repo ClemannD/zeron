@@ -82,6 +82,7 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
+mod project_tabs;
 mod pull_request_pane;
 mod session_hover_card;
 mod session_info;
@@ -128,7 +129,9 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        NextProjectTab,
+        PrevProjectTab
     ]
 );
 
@@ -487,6 +490,22 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.archive_session, "mod-shift-a"),
             ArchiveSession,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.next_project_tab,
+                ShortcutId::NextProjectTab.default_combo(),
+            ),
+            NextProjectTab,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.prev_project_tab,
+                ShortcutId::PrevProjectTab.default_combo(),
+            ),
+            PrevProjectTab,
             None,
         ),
         KeyBinding::new(
@@ -2031,6 +2050,15 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    /// Project tabs: the strip's scroller, live drag-reorder state, and the
+    /// all-projects menu at its end ([`project_tabs`]).
+    project_tab_scroll: gpui::ScrollHandle,
+    project_tab_drag: Option<RightTabDragState>,
+    project_tabs_menu: popover::Popup<()>,
+    /// The in-flight read of tab folders' checked-out branches, and when the
+    /// last one started (polled while tabs show branch or PR details).
+    project_tab_branch_task: Option<gpui::Task<()>>,
+    project_tab_branch_checked: Option<std::time::Instant>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -2474,7 +2502,14 @@ impl Shell {
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
+            state.exact_space_filter = settings.project_tabs.enabled;
+            // Project tabs can show pull requests with the sidebar's off.
+            let tabs_show_prs =
+                settings.project_tabs.enabled && settings.project_tabs.meta.pull_request;
+            state.set_change_requests_visible(
+                settings.sidebar_show_pull_request || tabs_show_prs,
+                cx,
+            )
         });
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
@@ -2576,6 +2611,11 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            project_tab_scroll: gpui::ScrollHandle::new(),
+            project_tab_drag: None,
+            project_tabs_menu: popover::Popup::default(),
+            project_tab_branch_task: None,
+            project_tab_branch_checked: None,
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -3110,11 +3150,13 @@ impl Shell {
         }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
-        if state.read(cx).no_project
-            && state.read(cx).selected_chat.is_none()
-            && self.settings.space_filter.take().is_some()
-        {
-            self.schedule_save(cx);
+        // Under project tabs that is the "No project" tab.
+        if state.read(cx).no_project && state.read(cx).selected_chat.is_none() {
+            if self.settings.project_tabs.enabled {
+                self.show_no_project_tab(cx);
+            } else if self.settings.space_filter.take().is_some() {
+                self.schedule_save(cx);
+            }
         }
         // Boot: restore the last selected space once the first spaces frame
         // lands (a still-existing row wins over the auto-selected first one;
@@ -3160,11 +3202,14 @@ impl Shell {
         // fall back to "All" rather than filtering everything out.
         if state.read(cx).spaces_synced
             && let Some(filter) = self.settings.space_filter.clone()
+            && filter != crate::state::NO_PROJECT_TAB
             && state.read(cx).space_row(&filter).is_none()
         {
             self.settings.space_filter = None;
             self.schedule_save(cx);
         }
+        // Project tabs follow the open session and keep one tab active.
+        self.sync_project_tab(cx);
         self.reconcile_sidebar_pins(cx);
         if !self.pinned_session_drag_is_valid(cx) {
             self.cancel_pinned_session_drag(cx);
@@ -10640,6 +10685,10 @@ impl Shell {
             return true;
         }
 
+        if self.project_tabs_menu.is_open() {
+            self.close_project_tabs_menu(cx);
+            return true;
+        }
         if self.right_plus.is_open() {
             self.close_right_plus(cx);
             return true;
@@ -13805,7 +13854,21 @@ impl Render for Shell {
                     .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
                 let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
                 if !handled && !this.overlay_owns_keyboard(cx) {
-                    this.jump_to_session(jump.0, cx)
+                    if this.settings.project_tabs.enabled {
+                        this.jump_to_project_tab(jump.0, cx)
+                    } else {
+                        this.jump_to_session(jump.0, cx)
+                    }
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextProjectTab, _, cx| {
+                if !this.overlay_owns_keyboard(cx) {
+                    this.cycle_project_tab(true, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevProjectTab, _, cx| {
+                if !this.overlay_owns_keyboard(cx) {
+                    this.cycle_project_tab(false, cx)
                 }
             }))
             .on_modifiers_changed(

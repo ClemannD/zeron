@@ -2148,6 +2148,7 @@ enum SidebarViewRow {
     ShowHarness,
     ShowProjectFilter,
     ShowArchived,
+    ProjectTabs,
 }
 
 impl SidebarViewRow {
@@ -2162,9 +2163,9 @@ impl SidebarViewRow {
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..12)];
+    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..13)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 13] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
@@ -2177,6 +2178,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowProjectFilter,
     SidebarViewRow::ShowArchived,
+    SidebarViewRow::ProjectTabs,
 ];
 
 // list items stay tightly related at 2px, while section boundaries use 12px
@@ -2793,8 +2795,9 @@ impl Shell {
         if let Some(space_id) = filter
             && self.state.read(cx).selected_chat.is_none()
         {
-            self.state
-                .update(cx, |s, cx| s.select_space(Some(space_id), cx));
+            // The "No project" tab's canvas mints project-less sessions.
+            let target = (space_id != crate::state::NO_PROJECT_TAB).then_some(space_id);
+            self.state.update(cx, |s, cx| s.select_space(target, cx));
         }
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
@@ -3851,10 +3854,7 @@ impl Shell {
             }
             SidebarViewRow::ShowPullRequest => {
                 self.settings.sidebar_show_pull_request = !self.settings.sidebar_show_pull_request;
-                let visible = self.settings.sidebar_show_pull_request;
-                self.state.update(cx, |state, cx| {
-                    state.set_change_requests_visible(visible, cx)
-                });
+                self.sync_change_request_visibility(cx);
             }
             SidebarViewRow::ShowHarness => {
                 self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
@@ -3866,9 +3866,15 @@ impl Shell {
                 self.settings.sidebar_show_project_filter =
                     !self.settings.sidebar_show_project_filter;
                 // A hidden filter must not keep narrowing the list unseen.
-                if !self.settings.sidebar_show_project_filter {
+                // Project tabs own the filter while on, and show it.
+                let tabs_own_filter = self.settings.project_tabs.enabled;
+                if !self.settings.sidebar_show_project_filter && !tabs_own_filter {
                     self.set_space_filter(None, cx);
                 }
+            }
+            SidebarViewRow::ProjectTabs => {
+                let enabled = !self.settings.project_tabs.enabled;
+                self.set_project_tabs_enabled(enabled, cx);
             }
         }
         self.schedule_save(cx);
@@ -4041,6 +4047,7 @@ impl Shell {
             "Location",
             "Project filter",
             "Archived",
+            "Project tabs",
         ];
         let icons = [
             icons::LAPTOP,
@@ -4056,6 +4063,7 @@ impl Shell {
             icons::REMOTE_SERVER,
             icons::FOLDER,
             icons::ARCHIVE_MINIMALISTIC,
+            icons::FOLDER_WITH_FILES,
         ];
         let selected = [
             organization == SidebarOrganization::ByDevice,
@@ -4070,6 +4078,7 @@ impl Shell {
             self.settings.sidebar_show_project_label,
             self.settings.sidebar_show_project_filter,
             self.settings.sidebar_show_archived,
+            self.settings.project_tabs.enabled,
         ];
         let values = [
             labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
@@ -4373,7 +4382,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Hidden from View → Show: keep the row's top breathing room only.
-        if !self.settings.sidebar_show_project_filter {
+        // Project tabs replace the dropdown while they are on.
+        if !self.settings.sidebar_show_project_filter || self.settings.project_tabs.enabled {
             return div().flex_none().h(px(4.0)).into_any_element();
         }
         let filter = self.settings.space_filter.clone();
@@ -5331,7 +5341,10 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
-        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
+        // Under project tabs the jump shortcuts switch tabs, not rows.
+        let jump_hints = self.jump_hints
+            && !self.overlay_owns_keyboard(cx)
+            && !self.settings.project_tabs.enabled;
         let keymap = self.settings.keymap.clone();
         // Flat top-to-bottom slot across groups: the same order
         // `sidebar_visible_order` hands the jump shortcuts and cycling, so a
