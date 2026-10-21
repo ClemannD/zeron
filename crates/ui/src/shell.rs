@@ -2055,10 +2055,15 @@ pub struct Shell {
     project_tab_scroll: gpui::ScrollHandle,
     project_tab_drag: Option<RightTabDragState>,
     project_tabs_menu: popover::Popup<()>,
-    /// The in-flight read of tab folders' checked-out branches, and when the
-    /// last one started (polled while tabs show branch or PR details).
+    /// The in-flight read of tab folders' branch and working-tree state, and
+    /// when the last one started.
     project_tab_branch_task: Option<gpui::Task<()>>,
     project_tab_branch_checked: Option<std::time::Instant>,
+    /// Latest local working-tree totals shown at the right edge of each tab.
+    project_tab_changes: std::collections::HashMap<String, (u32, u32)>,
+    /// Remote checkout diff streams and their latest frames, keyed by device.
+    project_tab_remote_diff_tasks: std::collections::HashMap<String, gpui::Task<()>>,
+    project_tab_remote_diffs: std::collections::HashMap<String, Vec<zeron_proto::CheckoutDiff>>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -2616,6 +2621,9 @@ impl Shell {
             project_tabs_menu: popover::Popup::default(),
             project_tab_branch_task: None,
             project_tab_branch_checked: None,
+            project_tab_changes: std::collections::HashMap::new(),
+            project_tab_remote_diff_tasks: std::collections::HashMap::new(),
+            project_tab_remote_diffs: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -7777,7 +7785,7 @@ impl Shell {
         out
     }
 
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -7798,7 +7806,12 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
-            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .child(
+                div()
+                    .h_full()
+                    .pt(px(self.workspace_titlebar_height(cx)))
+                    .child(inner),
+            )
             .into_any_element()
     }
 
@@ -11102,7 +11115,7 @@ impl Shell {
         div()
             .id(id)
             .absolute()
-            .top(px(PANE_RESIZE_HITBOX_TOP))
+            .top(px(self.workspace_titlebar_height(cx).max(PANE_RESIZE_HITBOX_TOP)))
             .bottom_0()
             .w(px(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0))
             .flex_none()
@@ -11200,6 +11213,7 @@ impl Shell {
         }
 
         let _ = (text, border);
+        let header_height = self.workspace_titlebar_height(cx);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
         let has_appshots = !self.composer.read(cx).staged_appshots().is_empty();
@@ -11275,7 +11289,7 @@ impl Shell {
                 self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
                 self.settings.terminal_height,
                 (self.viewport_height * TERMINAL_MAX_VH).min(
-                    (self.viewport_height - Theme::TITLEBAR_HEIGHT - Theme::STATUS_STRIP_HEIGHT)
+                    (self.viewport_height - header_height - Theme::STATUS_STRIP_HEIGHT)
                         .max(0.0),
                 ),
             )));
@@ -11418,7 +11432,7 @@ impl Shell {
             session_docked,
             session_reveal,
             self.viewport_height
-                - Theme::TITLEBAR_HEIGHT
+                - header_height
                 - self.bottom_stack.get()
                 - 24.0,
             cx,
@@ -11469,6 +11483,7 @@ impl Shell {
                     div()
                         .absolute()
                         .inset_0()
+                        .top(px(header_height - Theme::TITLEBAR_HEIGHT))
                         .child(crate::terminal::dock::above_terminal(
                             crate::edge_fade::edge_faded(
                                 Theme::TRANSCRIPT_FADE_BAND,
@@ -12045,7 +12060,7 @@ impl Shell {
             // row; the panel's own chrome starts below it.
             .when(
                 !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
-                |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
+                |el| el.pt(px(self.workspace_titlebar_height(cx))),
             )
             .child(content);
         let target = self.right_target(cx);
@@ -16624,6 +16639,67 @@ mod exit_regressions {
             );
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn project_tabs_keep_all_three_rows_inside_the_header(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = pull_request_shell(cx);
+        cx.update(|_, cx| motion::set_reduced_motion(cx, true));
+        shell.update(cx, |shell, cx| {
+            shell.settings.project_tabs.enabled = true;
+            shell.settings.project_tabs.order = vec!["layout-project".into()];
+            shell.settings.project_tabs.hidden = vec![crate::state::NO_PROJECT_TAB.into()];
+            shell.settings.space_filter = Some("layout-project".into());
+            shell.project_tab_branch_checked = Some(std::time::Instant::now());
+            shell.project_tab_changes.insert("layout-project".into(), (288, 126));
+            shell.state.update(cx, |state, _| {
+                state.local_device_id = Some("layout-device".into());
+                state.spaces = vec![zeron_proto::Space {
+                    id: "layout-project".into(),
+                    device_id: "layout-device".into(),
+                    path: dir.path().to_string_lossy().into_owned(),
+                    name: Some("Zeron".into()),
+                    git_detected: true,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    repository_id: None,
+                    created_at: Utc::now(),
+                }];
+                state.space_branches.insert("layout-project".into(), "main".into());
+            });
+            cx.notify();
+        });
+        for width in [800.0, 1400.0] {
+            cx.simulate_resize(gpui::size(px(width), px(800.0)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+            let header = cx.debug_bounds("session-titlebar").unwrap();
+            let tab = cx.debug_bounds("project-tab-0").unwrap();
+            assert_eq!(header.size.height, px(50.0));
+            assert_eq!(tab.size.height, px(46.0));
+            assert!(tab.top() >= header.top() + px(Theme::TITLEBAR_TOP_PAD));
+            assert!(tab.bottom() <= header.bottom());
+            let title = cx.debug_bounds("project-tab-title-0").unwrap();
+            let branch = cx.debug_bounds("project-tab-branch-0").unwrap();
+            let status = cx.debug_bounds("project-tab-status-0").unwrap();
+            assert!(title.top() >= tab.top());
+            assert!(title.bottom() <= branch.top());
+            assert!(branch.bottom() <= status.top());
+            assert!(status.bottom() <= tab.bottom());
+            let close = cx.debug_bounds("project-tab-close-0").unwrap();
+            assert!(title.right() <= close.left());
+            assert!(close.bottom() <= status.top());
+        }
+        shell.update(cx, |shell, cx| {
+            shell.settings.project_tabs.enabled = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(
+            cx.debug_bounds("session-titlebar").unwrap().size.height,
+            px(Theme::TITLEBAR_HEIGHT),
+        );
     }
 
     #[gpui::test]

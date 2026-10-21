@@ -18,6 +18,7 @@
 //! ⌘9 to the last one (Chrome's rule); Next/Previous project tab cycle them.
 
 use std::collections::HashMap;
+use std::process::Command;
 
 use super::*;
 use crate::settings::ProjectTabMeta;
@@ -25,11 +26,12 @@ use crate::state::NO_PROJECT_TAB;
 
 /// Fixed project-tab width. Uniform, as drag reordering assumes; tabs sit
 /// edge to edge (separators are drawn inside), so a slot is one tab.
-const PROJECT_TAB_WIDTH: f32 = 188.0;
+const PROJECT_TAB_WIDTH: f32 = 240.0;
 const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
-/// Tabs fill the titlebar band below its top pad and sit on its bottom edge,
-/// where the active one opens into the work area.
-const PROJECT_TAB_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD;
+/// The header must reserve the tab height plus the top gutter. Growing only
+/// the tab would clip its first row inside the scrolling strip.
+const PROJECT_TAB_HEIGHT: f32 = 46.0;
+pub(super) const PROJECT_TAB_HEADER_HEIGHT: f32 = PROJECT_TAB_HEIGHT + Theme::TITLEBAR_TOP_PAD;
 /// The active tab's top corner radius and the concave "feet" joining it to
 /// the band's bottom edge (Chrome's tab silhouette).
 const PROJECT_TAB_RADIUS: f32 = 8.0;
@@ -163,6 +165,60 @@ fn read_git_branch(path: &std::path::Path) -> Option<String> {
     parse_git_head(&std::fs::read_to_string(git_dir(path)?.join("HEAD")).ok()?)
 }
 
+fn add_numstat_line(line: &[u8], additions: &mut u32, deletions: &mut u32) {
+    let mut fields = line.splitn(3, |byte| *byte == b'\t');
+    let adds = fields.next().and_then(|value| std::str::from_utf8(value).ok());
+    let dels = fields.next().and_then(|value| std::str::from_utf8(value).ok());
+    if let (Some(adds), Some(dels)) = (adds, dels) {
+        *additions = (*additions).saturating_add(adds.parse().unwrap_or(0));
+        *deletions = (*deletions).saturating_add(dels.parse().unwrap_or(0));
+    }
+}
+
+/// The checkout's working-tree line totals against HEAD, including untracked
+/// text files. Called from the background executor alongside the branch read.
+fn read_git_change_totals(path: &std::path::Path) -> Option<(u32, u32)> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["diff", "--numstat", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut additions = 0u32;
+    let mut deletions = 0u32;
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        add_numstat_line(line, &mut additions, &mut deletions);
+    }
+
+    // `git diff` omits untracked files. Count their text lines as additions.
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .ok()?;
+    if !untracked.status.success() {
+        return None;
+    }
+    for relative in untracked
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let relative = std::str::from_utf8(relative).ok()?;
+        let contents = std::fs::read(path.join(relative)).ok()?;
+        if let Ok(contents) = std::str::from_utf8(&contents) {
+            additions = additions.saturating_add(
+                contents.lines().count().min(u32::MAX as usize) as u32,
+            );
+        }
+    }
+    Some((additions, deletions))
+}
+
 /// For a folder this device cannot read: the branch of its newest session
 /// working in the folder itself (not a worktree). Pure.
 fn latest_session_branch(chats: &[zeron_proto::Chat], space: &zeron_proto::Space) -> Option<String> {
@@ -184,11 +240,9 @@ fn latest_session_branch(chats: &[zeron_proto::Chat], space: &zeron_proto::Space
         .filter(|branch| !branch.trim().is_empty())
 }
 
-/// What a tab's sessions are doing: how many there are, how many work, and
-/// the most urgent finished/waiting state (input > failure > unseen finish).
+/// Whether a tab has working sessions or an urgent finished/waiting state.
 #[derive(Default)]
 struct ProjectTabActivity {
-    sessions: usize,
     working: usize,
     attention: Option<zeron_proto::ChatIndicator>,
 }
@@ -203,8 +257,7 @@ fn attention_rank(status: zeron_proto::ChatIndicator) -> u8 {
     }
 }
 
-/// One tab as drawn: key, the space it names (`None` = "No project"),
-/// title, the tooltip detail, and its details line.
+/// One tab as drawn: key, project name, branch, PR summary, and local change totals.
 struct ProjectTabRow {
     key: String,
     space: Option<zeron_proto::Space>,
@@ -212,7 +265,7 @@ struct ProjectTabRow {
     detail: SharedString,
     branch: Option<SharedString>,
     pull_request: Option<zeron_proto::ChangeRequestSummary>,
-    device: Option<SharedString>,
+    changes: Option<(u32, u32)>,
 }
 
 /// The project-tab bar's two layers: the strip of tabs, and the band painted
@@ -497,13 +550,11 @@ impl Shell {
     fn project_tab_rows(&self, keys: &[String], cx: &App) -> Vec<ProjectTabRow> {
         let state = self.state.read(cx);
         let meta = self.settings.project_tabs.meta;
-        let local = state.local_device_id.as_deref();
         let now = Utc::now();
         keys.iter()
             .map(|key| match state.space_row(key) {
                 Some(space) => {
                     let (device_tag, _) = state.space_device_tag(space, now);
-                    let remote = local != Some(space.device_id.as_str());
                     ProjectTabRow {
                         key: key.clone(),
                         space: Some(space.clone()),
@@ -518,13 +569,7 @@ impl Shell {
                             .pull_request
                             .then(|| state.change_request_for_space(space).cloned())
                             .flatten(),
-                        device: (meta.device && remote).then(|| {
-                            state
-                                .device_name(&space.device_id)
-                                .unwrap_or("Unknown device")
-                                .to_string()
-                                .into()
-                        }),
+                        changes: self.project_tab_changes.get(&space.id).copied(),
                     }
                 }
                 None => ProjectTabRow {
@@ -534,7 +579,7 @@ impl Shell {
                     detail: "Sessions outside any project".into(),
                     branch: None,
                     pull_request: None,
-                    device: None,
+                    changes: None,
                 },
             })
             .collect()
@@ -545,7 +590,6 @@ impl Shell {
         let mut activity: HashMap<String, ProjectTabActivity> = HashMap::new();
         for (status, chat) in self.state.read(cx).overview_chats(Utc::now()) {
             let tab = activity.entry(Self::chat_project_tab(chat)).or_default();
-            tab.sessions += 1;
             if status == zeron_proto::ChatIndicator::Working {
                 tab.working += 1;
             } else if attention_rank(status) > tab.attention.map_or(0, attention_rank) {
@@ -568,13 +612,11 @@ impl Shell {
             .update(cx, |state, cx| state.set_change_requests_visible(visible, cx));
     }
 
-    /// Re-read the visible tabs' checked-out branches, at most every
-    /// [`PROJECT_TAB_BRANCH_POLL`]: local folders from their `HEAD` off the
-    /// render thread, others from their newest session.
+    /// Re-read visible tabs' checked-out branches and local changes at most
+    /// every [`PROJECT_TAB_BRANCH_POLL`]: filesystem work runs off the render
+    /// thread, and remote branches come from the newest session in that space.
     fn refresh_project_tab_branches(&mut self, keys: &[String], cx: &mut Context<Self>) {
-        let meta = self.settings.project_tabs.meta;
-        if !(meta.branch || meta.pull_request)
-            || self.project_tab_branch_task.is_some()
+        if self.project_tab_branch_task.is_some()
             || self
                 .project_tab_branch_checked
                 .is_some_and(|checked| checked.elapsed() < PROJECT_TAB_BRANCH_POLL)
@@ -596,25 +638,140 @@ impl Shell {
             (local, branches)
         };
         self.project_tab_branch_task = Some(cx.spawn(async move |this, cx| {
-            let read = cx
+            let local_ids = local.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            let (read, changes) = cx
                 .background_executor()
                 .spawn(async move {
-                    local
-                        .into_iter()
-                        .filter_map(|(id, path)| {
-                            Some((id, read_git_branch(std::path::Path::new(&path))?))
-                        })
-                        .collect::<Vec<_>>()
+                    let mut branches = Vec::new();
+                    let mut changes = HashMap::new();
+                    for (id, path) in local {
+                        let path = std::path::Path::new(&path);
+                        if let Some(branch) = read_git_branch(path) {
+                            branches.push((id.clone(), branch));
+                        }
+                        if let Some(totals) = read_git_change_totals(path) {
+                            changes.insert(id, totals);
+                        }
+                    }
+                    (branches, changes)
                 })
                 .await;
             branches.extend(read);
             this.update(cx, |this, cx| {
                 this.project_tab_branch_task = None;
+                this.project_tab_changes
+                    .retain(|space, _| !local_ids.contains(space));
+                this.project_tab_changes.extend(changes);
                 this.state
                     .update(cx, |state, cx| state.set_space_branches(branches, cx));
             })
             .ok();
         }));
+    }
+
+    /// Keep checkout diff snapshots for remote devices represented by visible
+    /// project tabs, so their third-row totals reflect the host workspace too.
+    fn refresh_project_tab_remote_diff_watches(&mut self, keys: &[String], cx: &mut Context<Self>) {
+        let (engine, devices) = {
+            let state = self.state.read(cx);
+            let devices = keys
+                .iter()
+                .filter_map(|key| state.space_row(key))
+                .filter(|space| state.local_device_id.as_deref() != Some(space.device_id.as_str()))
+                .map(|space| space.device_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            (state.engine().cloned(), devices)
+        };
+        self.project_tab_remote_diff_tasks
+            .retain(|device, _| devices.contains(device));
+        self.project_tab_remote_diffs
+            .retain(|device, _| devices.contains(device));
+        let Some(engine) = engine else {
+            return;
+        };
+
+        for device in devices {
+            if self.project_tab_remote_diff_tasks.contains_key(&device) {
+                continue;
+            }
+            let engine = engine.clone();
+            let target = device.clone();
+            let task = cx.spawn(async move |this, cx| loop {
+                let params = serde_json::json!({ "targetDeviceId": target.clone() });
+                if let Ok(mut rx) = engine
+                    .client()
+                    .subscribe(methods::WATCH_CHECKOUT_DIFFS, params)
+                    .await
+                {
+                    while let Some(value) = rx.recv().await {
+                        let target = target.clone();
+                        let alive = this.update(cx, |this, cx| {
+                            let changed = crate::changes::apply_diff_frame(
+                                this.project_tab_remote_diffs.entry(target.clone()).or_default(),
+                                value,
+                            );
+                            if changed {
+                                this.update_project_tab_remote_change_totals(&target, cx);
+                            }
+                        });
+                        if alive.is_err() {
+                            return;
+                        }
+                    }
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            });
+            self.project_tab_remote_diff_tasks
+                .insert(device, task);
+        }
+    }
+
+    fn update_project_tab_remote_change_totals(&mut self, device: &str, cx: &mut Context<Self>) {
+        let diffs = self
+            .project_tab_remote_diffs
+            .get(device)
+            .cloned()
+            .unwrap_or_default();
+        let updates = {
+            let state = self.state.read(cx);
+            state
+                .spaces
+                .iter()
+                .filter(|space| space.device_id == device)
+                .map(|space| {
+                    let totals = state
+                        .chats
+                        .iter()
+                        .filter(|chat| {
+                            !chat.archived
+                                && chat.device_id == device
+                                && chat.space_id.as_deref() == Some(space.id.as_str())
+                        })
+                        .filter_map(|chat| {
+                            let diff = crate::changes::resolve_diff(&diffs, chat)?;
+                            Some((
+                                chat.last_message_at.unwrap_or(chat.created_at),
+                                (diff.additions, diff.deletions),
+                            ))
+                        })
+                        .max_by_key(|(at, _)| *at)
+                        .map(|(_, totals)| totals);
+                    (space.id.clone(), totals)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut changed = false;
+        for (space, totals) in updates {
+            match totals {
+                Some(totals) => {
+                    changed |= self.project_tab_changes.insert(space, totals) != Some(totals);
+                }
+                None => changed |= self.project_tab_changes.remove(&space).is_some(),
+            }
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The tab strip (plus, at its end, the all-projects menu button) and the
@@ -630,9 +787,9 @@ impl Shell {
         }
         let keys = self.project_tab_keys(cx);
         self.refresh_project_tab_branches(&keys, cx);
+        self.refresh_project_tab_remote_diff_watches(&keys, cx);
         let rows = self.project_tab_rows(&keys, cx);
         let activity = self.project_tab_activity(cx);
-        let show_sessions = self.settings.project_tabs.meta.sessions;
         let count = rows.len();
         let active = self.settings.space_filter.clone();
         let active_ix = rows
@@ -692,11 +849,7 @@ impl Shell {
                 &theme,
                 cx,
             );
-            let sessions = show_sessions.then(|| {
-                let activity = tab_activity.map_or((0, 0), |a| (a.sessions, a.working));
-                activity
-            });
-            let tab = self.render_project_tab(ix, row, leading, sessions, is_active, separator, &theme, cx);
+            let tab = self.render_project_tab(ix, row, leading, is_active, separator, &theme, cx);
 
             // Siblings slide aside while one drags; the dragged tab leaves a
             // spacer (the ghost carries it).
@@ -902,7 +1055,7 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One project tab: icon, name, the details line, and a close button
+    /// One project tab: name, branch, PR and changes, and a close button
     /// that shows on hover (always on the active tab). Inactive tabs wash on
     /// hover; the active tab draws nothing of its own — the band's cutout
     /// makes it.
@@ -912,7 +1065,6 @@ impl Shell {
         ix: usize,
         row: ProjectTabRow,
         leading: AnyElement,
-        sessions: Option<(usize, usize)>,
         active: bool,
         separator: bool,
         theme: &Theme,
@@ -924,74 +1076,76 @@ impl Shell {
             detail,
             branch,
             pull_request,
-            device,
+            changes,
             ..
         } = row;
         let group: SharedString = format!("project-tab-{ix}").into();
         let muted = theme.text_muted;
-        let meta_text = |text: SharedString| {
+        let branch_row = |branch: Option<SharedString>| {
             div()
+                .debug_selector(move || format!("project-tab-branch-{ix}"))
+                .h(px(12.0))
+                .flex_none()
                 .min_w_0()
-                .truncate()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(muted)
-                .child(text)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    icon(icons::GIT_BRANCH)
+                        .size(px(10.0))
+                        .flex_none()
+                        .text_color(muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .line_height(px(12.0))
+                        .text_color(muted)
+                        .children(branch),
+                )
         };
-        let mut meta: Vec<AnyElement> = Vec::new();
-        if let Some(branch) = branch {
-            meta.push(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(3.0))
-                    .child(icon(icons::GIT_BRANCH).size(px(10.0)).flex_none().text_color(muted))
-                    .child(meta_text(branch))
-                    .into_any_element(),
-            );
-        }
-        if let Some(summary) = &pull_request {
+        let pull_request_row = pull_request.as_ref().map(|summary| {
             let model = crate::change_requests::ChangeRequestBadgeModel::from_summary(summary);
             let tone = model.tone.color(theme);
-            meta.push(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(3.0))
-                    .child(icon(icons::PULL_REQUEST).size(px(10.0)).text_color(tone))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(tone)
-                            .child(SharedString::from(format!("#{}", model.number))),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if let Some(device) = device {
-            meta.push(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(3.0))
-                    .child(icon(icons::REMOTE_SERVER).size(px(10.0)).flex_none().text_color(muted))
-                    .child(meta_text(device))
-                    .into_any_element(),
-            );
-        }
-        if let Some((total, working)) = sessions {
-            let label = match (total, working) {
-                (1, 0) => "1 session".to_string(),
-                (total, 0) => format!("{total} sessions"),
-                (total, working) => format!("{working} of {total} working"),
-            };
-            meta.push(meta_text(label.into()).flex_none().into_any_element());
-        }
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(3.0))
+                .text_size(crate::typography::ui_rems(10.5))
+                .line_height(px(12.0))
+                .text_color(tone)
+                .child(icon(icons::PULL_REQUEST).size(px(10.0)).text_color(tone))
+                .child(SharedString::from(format!(
+                    "#{} · {}",
+                    model.number, model.state_label
+                )))
+        });
+        let change_totals = changes.map(|(adds, dels)| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(crate::typography::ui_rems(10.0))
+                .line_height(px(12.0))
+                .child(
+                    div()
+                        .text_color(crate::changes::add_color(theme))
+                        .child(format!("+{adds}")),
+                )
+                .child(
+                    div()
+                        .text_color(crate::changes::del_color(theme))
+                        .child(format!("−{dels}")),
+                )
+        });
         let tooltip_detail = match &pull_request {
             Some(summary) => SharedString::from(format!(
                 "{detail}\nPR #{} · {}",
@@ -1014,7 +1168,7 @@ impl Shell {
             .h(px(PROJECT_TAB_HEIGHT))
             .flex_none()
             .pl(px(12.0))
-            .pr(px(8.0))
+            .pr(px(12.0))
             .flex()
             .flex_row()
             .items_center()
@@ -1049,43 +1203,63 @@ impl Shell {
                         .bg(theme.border),
                 )
             })
-            .child(div().flex_none().child(leading))
             .child(
                 div()
                     .flex_1()
+                    .h_full()
                     .min_w_0()
+                    .py(px(2.0))
                     .flex()
                     .flex_col()
                     .justify_center()
                     .gap(px(1.0))
                     .child(
                         div()
+                            .debug_selector(move || format!("project-tab-title-{ix}"))
+                            .h(px(16.0))
+                            .flex_none()
+                            .mr(px(22.0))
                             .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(if active { theme.text } else { theme.text_muted })
-                            .child(title.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .child(div().flex_none().child(leading))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .line_height(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(if active { theme.text } else { theme.text_muted })
+                                    .child(title.clone()),
+                            ),
                     )
-                    .when(!meta.is_empty(), |column| {
-                        column.child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .children(meta),
-                        )
-                    }),
+                    .child(branch_row(branch))
+                    .child(
+                        div()
+                            .debug_selector(move || format!("project-tab-status-{ix}"))
+                            .h(px(12.0))
+                            .flex_none()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .children(pull_request_row)
+                            .child(div().flex_1())
+                            .children(change_totals),
+                    ),
             )
             .child(
                 div()
                     .id(("project-tab-close", ix))
                     .debug_selector(move || format!("project-tab-close-{ix}"))
+                    .absolute()
+                    .top(px(2.0))
+                    .right(px(8.0))
                     .flex_none()
-                    .size(px(18.0))
+                    .size(px(16.0))
                     .rounded(px(5.0))
                     .flex()
                     .items_center()
@@ -1241,7 +1415,7 @@ impl Shell {
         }
 
         let meta = self.settings.project_tabs.meta;
-        let detail_rows: [(&'static str, &'static str, bool, fn(&mut ProjectTabMeta)); 4] = [
+        let detail_rows: [(&'static str, &'static str, bool, fn(&mut ProjectTabMeta)); 2] = [
             ("project-tabs-meta-branch", "Branch", meta.branch, |m| m.branch = !m.branch),
             (
                 "project-tabs-meta-pr",
@@ -1249,10 +1423,6 @@ impl Shell {
                 meta.pull_request,
                 |m| m.pull_request = !m.pull_request,
             ),
-            ("project-tabs-meta-device", "Host device", meta.device, |m| m.device = !m.device),
-            ("project-tabs-meta-sessions", "Session count", meta.sessions, |m| {
-                m.sessions = !m.sessions
-            }),
         ];
         let mut details = div().flex().flex_col().gap(px(2.0));
         for (id, label, on, toggle) in detail_rows {

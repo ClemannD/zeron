@@ -81,6 +81,19 @@ fn panel_titlebar_widths(
 }
 
 impl Shell {
+    /// Match content clearance to the header actually drawn above it.
+    pub(super) fn workspace_titlebar_height(&self, cx: &App) -> f32 {
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
+        if matches!(self.route, Route::Chat)
+            && self.settings.project_tabs.enabled
+            && !self.titlebar_trailing_layout(on_canvas, cx).takeover
+        {
+            super::project_tabs::PROJECT_TAB_HEADER_HEIGHT
+        } else {
+            Theme::TITLEBAR_HEIGHT
+        }
+    }
+
     /// The same binding navigates the focused pane. Keep the persisted action
     /// IDs so existing user keymaps and the native browser bridge still work.
     pub(super) fn cycle_navigation(
@@ -698,7 +711,12 @@ impl Shell {
         // the inset card. No bottom border — the card's own hairline is the
         // separation; the glass gutter shows between.
         let bar = div()
-            .h(px(Theme::TITLEBAR_HEIGHT))
+            .debug_selector(|| "session-titlebar".into())
+            .h(px(if tabs_shown {
+                super::project_tabs::PROJECT_TAB_HEADER_HEIGHT
+            } else {
+                Theme::TITLEBAR_HEIGHT
+            }))
             .flex_none()
             .relative()
             .when_some(project_band, |bar, band| {

@@ -344,6 +344,7 @@ impl Shell {
         });
         self.chat_dropzone(("side-chat-dropzone", id), composer.clone(), cx)
             .size_full()
+            .pt(px(self.workspace_titlebar_height(cx) - Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
             .child(

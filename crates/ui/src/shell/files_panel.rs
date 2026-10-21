@@ -453,7 +453,7 @@ impl Shell {
         let inner = div()
             .w(px(content_width))
             .h_full()
-            .pt(px(Theme::TITLEBAR_HEIGHT))
+            .pt(px(self.workspace_titlebar_height(cx)))
             .occlude()
             .border_l_1()
             .border_color(theme.border)

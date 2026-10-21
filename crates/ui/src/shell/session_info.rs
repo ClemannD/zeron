@@ -404,7 +404,7 @@ impl Shell {
                 .id("session-info")
                 .debug_selector(|| "session-info".into())
                 .absolute()
-                .top(px(Theme::TITLEBAR_HEIGHT + 12.0 + dy))
+                .top(px(self.workspace_titlebar_height(cx) + 12.0 + dy))
                 .right(px(SESSION_CARD_INSET - dx))
                 // The lanes card scrolls inside what the session card leaves
                 // it below the titlebar.
