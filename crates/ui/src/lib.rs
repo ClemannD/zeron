@@ -67,6 +67,7 @@ mod roll_text;
 pub mod running_pill;
 pub mod settings;
 pub mod shell;
+mod sidebar_usage;
 pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;
