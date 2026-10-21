@@ -937,11 +937,12 @@ pub enum ChangeRequestState {
 }
 
 /// Whether a change request can be merged without resolving conflicts first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeRequestMergeability {
     Mergeable,
     Conflicting,
+    #[default]
     Unknown,
 }
 
@@ -967,6 +968,23 @@ pub struct ChangeRequestSummary {
     pub state: ChangeRequestState,
     pub base_ref: String,
     pub head_ref: String,
+    /// Draft, CI, and queue status. Defaults (unknown) when the host predates
+    /// it or the provider's extra lookup failed.
+    #[serde(default)]
+    pub live: ChangeRequestLiveStatus,
+}
+
+/// What a checkout surface needs to say whether a change request is waiting
+/// on CI, blocked, queued, or ready. Missing data stays at its unknown default
+/// and never implies a pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestLiveStatus {
+    pub is_draft: bool,
+    pub in_merge_queue: bool,
+    pub ci: crate::change_request_assessment::ChangeRequestCi,
+    pub mergeability: ChangeRequestMergeability,
+    pub review_decision: ChangeRequestReviewDecision,
 }
 
 /// Relationship filter for one repository; never widens repository scope.
@@ -1569,6 +1587,7 @@ mod tests {
                     state,
                     base_ref: "main".into(),
                     head_ref: "feature/change".into(),
+                    live: Default::default(),
                 }),
                 updated_at: Utc.with_ymd_and_hms(2026, 8, 15, 12, 30, 0).unwrap(),
             };

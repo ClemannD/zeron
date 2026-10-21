@@ -30,7 +30,7 @@ const PROJECT_TAB_WIDTH: f32 = 240.0;
 const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
 /// The header must reserve the tab height plus the top gutter. Growing only
 /// the tab would clip its first row inside the scrolling strip.
-const PROJECT_TAB_HEIGHT: f32 = 46.0;
+const PROJECT_TAB_HEIGHT: f32 = 52.0;
 pub(super) const PROJECT_TAB_HEADER_HEIGHT: f32 = PROJECT_TAB_HEIGHT + Theme::TITLEBAR_TOP_PAD;
 /// The active tab's top corner radius and the concave "feet" joining it to
 /// the band's bottom edge (Chrome's tab silhouette).
@@ -538,6 +538,52 @@ impl Shell {
         let to = self.project_tab_drag.take().map_or(from, |drag| drag.over);
         self.reorder_project_tabs(from, to, cx);
         cx.notify();
+    }
+
+    fn open_project_tab_menu(
+        &mut self,
+        key: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_project_tabs_menu(cx);
+        self.project_tab_menu.open((key, position));
+        cx.notify();
+    }
+
+    pub(super) fn close_project_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.project_tab_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.project_tab_menu);
+            cx.notify();
+        }
+    }
+
+    /// The tab's right-click menu, appended to the shell's overlay list.
+    pub(super) fn render_project_tab_overlays(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some((key, position)) = self.project_tab_menu.get().cloned() else {
+            return Vec::new();
+        };
+        let theme = Theme::of(cx).for_popup();
+        let closing = self.project_tab_menu.closing_since();
+        let menu = popover::popover_card(&theme)
+            .w(px(170.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_tab_menu(cx)))
+            .flex()
+            .flex_col()
+            .child(
+                popover::menu_row(&theme, false, "project-tab-menu-close")
+                    .id("project-tab-menu-close")
+                    .debug_selector(|| "project-tab-menu-close".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_project_tab_menu(cx);
+                        this.close_project_tab(key.clone(), cx);
+                    }))
+                    .child(icon(icons::CLOSE).size(px(14.0)).text_color(theme.text_muted))
+                    .child(SharedString::from("Close tab")),
+            )
+            .into_any_element();
+        vec![popover::menu_at("project-tab-context-menu", position, menu, closing)]
     }
 
     pub(super) fn close_project_tabs_menu(&mut self, cx: &mut Context<Self>) {
@@ -1081,53 +1127,55 @@ impl Shell {
         } = row;
         let group: SharedString = format!("project-tab-{ix}").into();
         let muted = theme.text_muted;
-        let branch_row = |branch: Option<SharedString>| {
+        let status = pull_request
+            .as_ref()
+            .map(|summary| crate::change_requests::ChangeRequestTabState::from_summary(summary));
+        let status_color = status.map(|status| status.color(theme));
+        // The open tab is the brighter one; the others stay compact and dim
+        // (the project name keeps its full strength either way).
+        let branch_icon_color = if active { muted } else { muted.opacity(0.7) };
+        let branch_text_color = if active { muted } else { muted.opacity(0.78) };
+        let branch_size = if active { 10.5 } else { 10.0 };
+        let branch_row = div()
+            .debug_selector(move || format!("project-tab-branch-{ix}"))
+            .h(px(12.0))
+            .flex_none()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                icon(icons::GIT_BRANCH)
+                    .size(px(if active { 10.0 } else { 9.0 }))
+                    .flex_none()
+                    .text_color(branch_icon_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(branch_size))
+                    .line_height(px(12.0))
+                    .text_color(branch_text_color)
+                    .children(branch),
+            )
+            // The pull request is one glyph at the row's end.
+            .children(status.zip(status_color).map(|(status, color)| {
+                div()
+                    .debug_selector(move || format!("project-tab-pr-state-{ix}"))
+                    .flex_none()
+                    .ml(px(6.0))
+                    .child(icon(status.icon()).size(px(12.0)).text_color(color))
+            }));
+        // Working-tree changes sit at the end of the name's row, on the open
+        // tab only.
+        let change_totals = changes.filter(|_| active).map(|(adds, dels)| {
             div()
-                .debug_selector(move || format!("project-tab-branch-{ix}"))
-                .h(px(12.0))
+                .debug_selector(move || format!("project-tab-changes-{ix}"))
                 .flex_none()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    icon(icons::GIT_BRANCH)
-                        .size(px(10.0))
-                        .flex_none()
-                        .text_color(muted),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .line_height(px(12.0))
-                        .text_color(muted)
-                        .children(branch),
-                )
-        };
-        let pull_request_row = pull_request.as_ref().map(|summary| {
-            let model = crate::change_requests::ChangeRequestBadgeModel::from_summary(summary);
-            let tone = model.tone.color(theme);
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(3.0))
-                .text_size(crate::typography::ui_rems(10.5))
-                .line_height(px(12.0))
-                .text_color(tone)
-                .child(icon(icons::PULL_REQUEST).size(px(10.0)).text_color(tone))
-                .child(SharedString::from(format!(
-                    "#{} · {}",
-                    model.number, model.state_label
-                )))
-        });
-        let change_totals = changes.map(|(adds, dels)| {
-            div()
-                .flex_none()
+                .ml(px(8.0))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1146,19 +1194,19 @@ impl Shell {
                         .child(format!("−{dels}")),
                 )
         });
-        let tooltip_detail = match &pull_request {
-            Some(summary) => SharedString::from(format!(
-                "{detail}\nPR #{} · {}",
+        let tooltip_detail = match (&pull_request, status) {
+            (Some(summary), Some(status)) => SharedString::from(format!(
+                "{detail}\nPR #{} · {}\n{}",
                 summary.number,
+                status.label(summary),
                 summary.title.replace(['\r', '\n'], " ")
             )),
-            None => detail,
+            _ => detail,
         };
 
-        let close_key = key.clone();
+        let menu_key = key.clone();
         let middle_key = key.clone();
         let click_key = key.clone();
-        let close_group = group.clone();
         div()
             .id(("project-tab", ix))
             .debug_selector(move || format!("project-tab-{ix}"))
@@ -1167,8 +1215,8 @@ impl Shell {
             .w(px(PROJECT_TAB_WIDTH))
             .h(px(PROJECT_TAB_HEIGHT))
             .flex_none()
-            .pl(px(12.0))
-            .pr(px(12.0))
+            .pl(px(14.0))
+            .pr(px(14.0))
             .flex()
             .flex_row()
             .items_center()
@@ -1184,11 +1232,11 @@ impl Shell {
                 tab.child(
                     div()
                         .absolute()
-                        .top(px(4.0))
-                        .bottom(px(3.0))
-                        .left(px(3.0))
-                        .right(px(3.0))
-                        .rounded(px(7.0))
+                        .top(px(5.0))
+                        .bottom(px(5.0))
+                        .left(px(4.0))
+                        .right(px(4.0))
+                        .rounded(px(8.0))
                         .group_hover(group.clone(), |style| style.bg(crate::theme::wash(0.07))),
                 )
             })
@@ -1197,8 +1245,8 @@ impl Shell {
                     div()
                         .absolute()
                         .right_0()
-                        .top(px(10.0))
-                        .bottom(px(9.0))
+                        .top(px(14.0))
+                        .bottom(px(13.0))
                         .w(px(1.0))
                         .bg(theme.border),
                 )
@@ -1208,17 +1256,15 @@ impl Shell {
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .py(px(2.0))
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .gap(px(1.0))
+                    .gap(px(3.0))
                     .child(
                         div()
                             .debug_selector(move || format!("project-tab-title-{ix}"))
                             .h(px(16.0))
                             .flex_none()
-                            .mr(px(22.0))
                             .min_w_0()
                             .flex()
                             .flex_row()
@@ -1227,63 +1273,18 @@ impl Shell {
                             .child(div().flex_none().child(leading))
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .line_height(px(14.0))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(if active { theme.text } else { theme.text_muted })
+                                    .text_color(theme.text)
                                     .child(title.clone()),
-                            ),
-                    )
-                    .child(branch_row(branch))
-                    .child(
-                        div()
-                            .debug_selector(move || format!("project-tab-status-{ix}"))
-                            .h(px(12.0))
-                            .flex_none()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .children(pull_request_row)
-                            .child(div().flex_1())
+                            )
                             .children(change_totals),
-                    ),
-            )
-            .child(
-                div()
-                    .id(("project-tab-close", ix))
-                    .debug_selector(move || format!("project-tab-close-{ix}"))
-                    .absolute()
-                    .top(px(2.0))
-                    .right(px(8.0))
-                    .flex_none()
-                    .size(px(16.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .role(gpui::Role::Button)
-                    .aria_label("Close tab")
-                    .tooltip(crate::settings::widgets::text_tooltip("Close tab"))
-                    .hover(|style| style.bg(crate::theme::wash(0.12)))
-                    .when(!active, |close| {
-                        close
-                            .opacity(0.0)
-                            .group_hover(close_group, |style| style.opacity(1.0))
-                    })
-                    // The tab owns a drag payload: claim the press first or a
-                    // drag starts instead of the close click.
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.close_project_tab(close_key.clone(), cx);
-                    }))
-                    .child(icon(icons::CLOSE).size(px(11.0)).text_color(theme.text_muted)),
+                    )
+                    .child(branch_row),
             )
             .tooltip(move |_, cx| {
                 cx.new(|_| SurfaceTabTooltip {
@@ -1296,6 +1297,15 @@ impl Shell {
                 cx.stop_propagation();
                 this.activate_project_tab(click_key.clone(), cx);
             }))
+            // Right-click opens the tab's menu.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_project_tab_menu(menu_key.clone(), event.position, cx);
+                }),
+            )
             // Middle-click closes, like every tab strip.
             .on_mouse_down(
                 MouseButton::Middle,

@@ -104,6 +104,10 @@ icon_assets![
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (PULL_REQUEST_DRAFT, "pull-request-draft"),
+    (PULL_REQUEST_MERGED, "pull-request-merged"),
+    (PULL_REQUEST_CLOSED, "pull-request-closed"),
+    (PULL_REQUEST_QUEUED, "pull-request-queued"),
+    (CHECK_CIRCLE, "check-circle"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),

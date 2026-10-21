@@ -59,6 +59,105 @@ impl ChangeRequestBadgeModel {
     }
 }
 
+/// What a project tab says about its branch's pull request: one glyph in one
+/// color. The first state that applies wins, from "done" through "blocked" to
+/// "waiting"; unknown CI or mergeability never reads as ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeRequestTabState {
+    Draft,
+    /// Checks still running.
+    Building,
+    /// Failing checks, merge conflicts or requested changes.
+    Broken,
+    /// Waiting in the merge queue, or set to merge itself once ready.
+    Queued,
+    Merged,
+    Closed,
+    /// Green, mergeable and not waiting on a review.
+    Ready,
+    /// Open, but something (a review, CI data) is not settled yet.
+    Open,
+}
+
+impl ChangeRequestTabState {
+    pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
+        use zeron_proto::change_request_assessment::CiState;
+        use zeron_proto::{ChangeRequestMergeability, ChangeRequestReviewDecision};
+        match summary.state {
+            ChangeRequestState::Merged => return Self::Merged,
+            ChangeRequestState::Closed => return Self::Closed,
+            ChangeRequestState::Open => {}
+        }
+        let live = &summary.live;
+        if live.is_draft {
+            Self::Draft
+        } else if live.in_merge_queue {
+            Self::Queued
+        } else if live.ci.state == CiState::Failed
+            || live.mergeability == ChangeRequestMergeability::Conflicting
+            || live.review_decision == ChangeRequestReviewDecision::ChangesRequested
+        {
+            Self::Broken
+        } else if live.ci.state == CiState::Pending {
+            Self::Building
+        } else if matches!(
+            live.ci.state,
+            CiState::Passed | CiState::Skipped | CiState::NoChecks
+        ) && live.mergeability == ChangeRequestMergeability::Mergeable
+            && live.review_decision != ChangeRequestReviewDecision::ReviewRequired
+        {
+            Self::Ready
+        } else {
+            Self::Open
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        use crate::icons;
+        match self {
+            Self::Draft => icons::PULL_REQUEST_DRAFT,
+            Self::Building => icons::CLOCK_CIRCLE,
+            Self::Broken => icons::CLOSE_CIRCLE,
+            Self::Queued => icons::PULL_REQUEST_QUEUED,
+            Self::Merged => icons::PULL_REQUEST_MERGED,
+            Self::Closed => icons::PULL_REQUEST_CLOSED,
+            Self::Ready => icons::CHECK_CIRCLE,
+            Self::Open => icons::PULL_REQUEST,
+        }
+    }
+
+    pub fn color(self, theme: &Theme) -> gpui::Hsla {
+        match self {
+            Self::Draft | Self::Open => theme.text_muted,
+            Self::Building => theme.warning,
+            Self::Broken | Self::Closed => theme.danger,
+            Self::Queued => theme.accent,
+            Self::Merged => theme.code_text,
+            Self::Ready => theme.success,
+        }
+    }
+
+    pub fn label(self, summary: &ChangeRequestSummary) -> &'static str {
+        use zeron_proto::change_request_assessment::CiState;
+        match self {
+            Self::Draft => "Draft",
+            Self::Building => "Checks running",
+            Self::Broken if summary.live.ci.state == CiState::Failed => "Checks failing",
+            Self::Broken
+                if summary.live.mergeability == zeron_proto::ChangeRequestMergeability::Conflicting =>
+            {
+                "Merge conflicts"
+            }
+            Self::Broken => "Changes requested",
+            Self::Queued => "In merge queue",
+            Self::Merged => "Merged",
+            Self::Closed => "Closed",
+            Self::Ready => "Ready to merge",
+            Self::Open => "Open",
+        }
+    }
+}
+
 pub(crate) struct ChangeRequestTooltip {
     model: ChangeRequestBadgeModel,
 }
@@ -535,6 +634,7 @@ mod tests {
                 state: ChangeRequestState::Open,
                 base_ref: "main".into(),
                 head_ref: "feature/pr".into(),
+                live: Default::default(),
             }),
             updated_at: Utc.timestamp_opt(1, 0).unwrap(),
         }
@@ -550,6 +650,77 @@ mod tests {
             observed_at: Utc.timestamp_opt(2, 0).unwrap(),
         });
         chat
+    }
+
+    fn tab_state(
+        state: ChangeRequestState,
+        edit: impl FnOnce(&mut zeron_proto::ChangeRequestLiveStatus),
+    ) -> ChangeRequestTabState {
+        use zeron_proto::change_request_assessment::{ChangeRequestCi, CiState};
+        let mut summary = snapshot("local", "/repo", "checkout")
+            .change_request
+            .unwrap();
+        summary.state = state;
+        summary.live = zeron_proto::ChangeRequestLiveStatus {
+            ci: ChangeRequestCi {
+                state: CiState::Passed,
+                total_count: 3,
+            },
+            mergeability: zeron_proto::ChangeRequestMergeability::Mergeable,
+            ..Default::default()
+        };
+        edit(&mut summary.live);
+        ChangeRequestTabState::from_summary(&summary)
+    }
+
+    #[test]
+    fn tab_state_reads_the_most_decisive_fact_first() {
+        use ChangeRequestTabState::*;
+        use zeron_proto::ChangeRequestReviewDecision as Review;
+        use zeron_proto::change_request_assessment::CiState;
+        let open = ChangeRequestState::Open;
+        assert_eq!(tab_state(open, |_| {}), Ready);
+        assert_eq!(tab_state(ChangeRequestState::Merged, |l| l.is_draft = true), Merged);
+        assert_eq!(tab_state(ChangeRequestState::Closed, |_| {}), Closed);
+        assert_eq!(tab_state(open, |l| l.is_draft = true), Draft);
+        // A queued request is past its checks, whatever they last said.
+        assert_eq!(
+            tab_state(open, |l| {
+                l.in_merge_queue = true;
+                l.ci.state = CiState::Failed;
+            }),
+            Queued
+        );
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Failed), Broken);
+        assert_eq!(
+            tab_state(open, |l| l.mergeability =
+                zeron_proto::ChangeRequestMergeability::Conflicting),
+            Broken
+        );
+        assert_eq!(
+            tab_state(open, |l| l.review_decision = Review::ChangesRequested),
+            Broken
+        );
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Pending), Building);
+    }
+
+    #[test]
+    fn unknown_or_unreviewed_never_reads_as_ready() {
+        use ChangeRequestTabState::*;
+        use zeron_proto::ChangeRequestReviewDecision as Review;
+        use zeron_proto::change_request_assessment::CiState;
+        let open = ChangeRequestState::Open;
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Unknown), Open);
+        assert_eq!(
+            tab_state(open, |l| l.mergeability =
+                zeron_proto::ChangeRequestMergeability::Unknown),
+            Open
+        );
+        assert_eq!(
+            tab_state(open, |l| l.review_decision = Review::ReviewRequired),
+            Open
+        );
+        assert_eq!(tab_state(open, |l| l.review_decision = Review::Approved), Ready);
     }
 
     #[test]

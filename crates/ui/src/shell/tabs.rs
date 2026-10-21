@@ -171,6 +171,7 @@ impl Shell {
             || self.chat_menu.get().is_some()
             || self.pull_request_pane.menu.get().is_some()
             || self.space_menu.get().is_some()
+            || self.project_tab_menu.get().is_some()
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
             || self.right_plus.get().is_some()

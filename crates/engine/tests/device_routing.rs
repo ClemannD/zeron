@@ -300,6 +300,7 @@ fn change_request_lookup(root: &std::path::Path) -> Arc<StaticChangeRequestLooku
             state: ChangeRequestState::Open,
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
+            live: Default::default(),
         },
         resolves: AtomicUsize::new(0),
     })

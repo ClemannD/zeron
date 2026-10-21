@@ -2055,6 +2055,8 @@ pub struct Shell {
     project_tab_scroll: gpui::ScrollHandle,
     project_tab_drag: Option<RightTabDragState>,
     project_tabs_menu: popover::Popup<()>,
+    /// A tab's right-click menu: the tab's key and where it opened.
+    project_tab_menu: popover::Popup<(String, Point<Pixels>)>,
     /// The in-flight read of tab folders' branch and working-tree state, and
     /// when the last one started.
     project_tab_branch_task: Option<gpui::Task<()>>,
@@ -2619,6 +2621,7 @@ impl Shell {
             project_tab_scroll: gpui::ScrollHandle::new(),
             project_tab_drag: None,
             project_tabs_menu: popover::Popup::default(),
+            project_tab_menu: popover::Popup::default(),
             project_tab_branch_task: None,
             project_tab_branch_checked: None,
             project_tab_changes: std::collections::HashMap::new(),
@@ -10702,6 +10705,10 @@ impl Shell {
             self.close_project_tabs_menu(cx);
             return true;
         }
+        if self.project_tab_menu.is_open() {
+            self.close_project_tab_menu(cx);
+            return true;
+        }
         if self.right_plus.is_open() {
             self.close_right_plus(cx);
             return true;
@@ -10954,6 +10961,7 @@ impl Shell {
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
+        overlays.extend(self.render_project_tab_overlays(cx));
         overlays.extend(self.render_section_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
@@ -16658,25 +16666,29 @@ mod exit_regressions {
         cx.update(|_, cx| motion::set_reduced_motion(cx, true));
         shell.update(cx, |shell, cx| {
             shell.settings.project_tabs.enabled = true;
-            shell.settings.project_tabs.order = vec!["layout-project".into()];
+            shell.settings.project_tabs.order =
+                vec!["layout-project".into(), "other-project".into()];
             shell.settings.project_tabs.hidden = vec![crate::state::NO_PROJECT_TAB.into()];
             shell.settings.space_filter = Some("layout-project".into());
             shell.project_tab_branch_checked = Some(std::time::Instant::now());
             shell.project_tab_changes.insert("layout-project".into(), (288, 126));
+            shell.project_tab_changes.insert("other-project".into(), (4, 2));
             shell.state.update(cx, |state, _| {
                 state.local_device_id = Some("layout-device".into());
-                state.spaces = vec![zeron_proto::Space {
-                    id: "layout-project".into(),
+                let space = |id: &str, name: &str| zeron_proto::Space {
+                    id: id.into(),
                     device_id: "layout-device".into(),
                     path: dir.path().to_string_lossy().into_owned(),
-                    name: Some("Zeron".into()),
+                    name: Some(name.into()),
                     git_detected: true,
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
                     created_at: Utc::now(),
-                }];
+                };
+                state.spaces = vec![space("layout-project", "Zeron"), space("other-project", "Other")];
                 state.space_branches.insert("layout-project".into(), "main".into());
+                state.space_branches.insert("other-project".into(), "main".into());
             });
             cx.notify();
         });
@@ -16686,21 +16698,55 @@ mod exit_regressions {
             cx.update(|window, cx| window.draw(cx).clear());
             let header = cx.debug_bounds("session-titlebar").unwrap();
             let tab = cx.debug_bounds("project-tab-0").unwrap();
-            assert_eq!(header.size.height, px(50.0));
-            assert_eq!(tab.size.height, px(46.0));
+            assert_eq!(
+                header.size.height,
+                px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT)
+            );
+            assert_eq!(header.size.height, px(Theme::TITLEBAR_TOP_PAD) + tab.size.height);
             assert!(tab.top() >= header.top() + px(Theme::TITLEBAR_TOP_PAD));
             assert!(tab.bottom() <= header.bottom());
             let title = cx.debug_bounds("project-tab-title-0").unwrap();
             let branch = cx.debug_bounds("project-tab-branch-0").unwrap();
-            let status = cx.debug_bounds("project-tab-status-0").unwrap();
             assert!(title.top() >= tab.top());
             assert!(title.bottom() <= branch.top());
-            assert!(branch.bottom() <= status.top());
-            assert!(status.bottom() <= tab.bottom());
-            let close = cx.debug_bounds("project-tab-close-0").unwrap();
-            assert!(title.right() <= close.left());
-            assert!(close.bottom() <= status.top());
+            assert!(branch.bottom() <= tab.bottom());
+            // No close button; the open tab's changes end the name's row and
+            // its pull request glyph is not in a third row.
+            assert!(cx.debug_bounds("project-tab-close-0").is_none());
+            let changes = cx.debug_bounds("project-tab-changes-0").unwrap();
+            assert!(changes.top() >= title.top() && changes.bottom() <= title.bottom());
+            assert!(changes.right() <= title.right());
+            // Inactive tabs are compact: name and branch only; the changes
+            // stay with the open tab.
+            let other = cx.debug_bounds("project-tab-1").unwrap();
+            assert_eq!(other.size.height, tab.size.height);
+            assert!(cx.debug_bounds("project-tab-changes-1").is_none());
+            let title = cx.debug_bounds("project-tab-title-1").unwrap();
+            let branch = cx.debug_bounds("project-tab-branch-1").unwrap();
+            assert!(title.top() >= other.top());
+            assert!(title.bottom() <= branch.top());
+            assert!(branch.bottom() <= other.bottom());
         }
+        // Right-click opens the tab's menu; "Close tab" hides that tab.
+        let other = cx.debug_bounds("project-tab-1").unwrap();
+        cx.simulate_mouse_down(
+            other.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            other.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let close = cx.debug_bounds("project-tab-menu-close").unwrap();
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("project-tab-1").is_none());
+        assert!(cx.debug_bounds("project-tab-0").is_some());
         shell.update(cx, |shell, cx| {
             shell.settings.project_tabs.enabled = false;
             cx.notify();

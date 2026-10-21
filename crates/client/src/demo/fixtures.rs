@@ -467,6 +467,7 @@ pub(crate) fn seed(
                     state,
                     base_ref: "main".into(),
                     head_ref: source.branch.clone(),
+                    live: Default::default(),
                 }),
                 updated_at: Utc::now(),
             });
