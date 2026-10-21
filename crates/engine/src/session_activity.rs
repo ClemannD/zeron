@@ -69,13 +69,21 @@ impl SessionsEngine {
                 }
                 // This task owns registry publication once installed, avoiding
                 // a native row racing a terminal projection and erasing it.
+                // A row whose chat hasn't reached this workspace yet is held
+                // back, and stays unpublished so it is written once the chat
+                // arrives (the chats watch wakes this loop) — not at the
+                // chat's next transition.
+                let mut unpublished = std::collections::HashSet::new();
                 for row in &current {
                     if previous_by_id
                         .get(row.chat_id.as_str())
                         .is_none_or(|old| *old != row)
-                        && workspace.chat(&row.chat_id).ok().flatten().is_some()
                     {
-                        workspace.record_session(row);
+                        if workspace.chat(&row.chat_id).ok().flatten().is_some() {
+                            workspace.record_session(row);
+                        } else {
+                            unpublished.insert(row.chat_id.clone());
+                        }
                     }
                 }
                 let current_ids: std::collections::HashSet<_> =
@@ -99,7 +107,10 @@ impl SessionsEngine {
                         true
                     }
                 });
-                previous = current;
+                previous = current
+                    .into_iter()
+                    .filter(|row| !unpublished.contains(&row.chat_id))
+                    .collect();
                 drop(inner);
                 tokio::select! {
                     changed = native.changed() => if changed.is_err() { break },
@@ -183,6 +194,49 @@ fn project(
 mod tests {
     use super::*;
     use zeron_proto::{ProgramInputKind, ProgramState, ProgramStatus};
+
+    /// A run can start before its chat's row reaches this workspace (it is
+    /// created on another device, or the row is still syncing). Its status
+    /// must land in the registry when the row does, not at the next change.
+    #[tokio::test]
+    async fn status_for_a_chat_whose_row_arrives_later_is_published_then() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let published = |core: &crate::EngineCore| {
+            core.workspace
+                .watch_session_rows()
+                .borrow()
+                .iter()
+                .find(|row| row.chat_id == "late")
+                .map(|row| row.status)
+        };
+        core.sessions.set_status("late", SessionStatus::Working, true);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(published(&core), None, "no chat row yet");
+
+        core.workspace
+            .create_chat(
+                "late",
+                None,
+                Some(&core.device_id),
+                None,
+                Some(dir.path().display().to_string()),
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while published(&core) != Some(SessionStatus::Working) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the held status is published once the chat row exists");
+    }
 
     #[test]
     fn terminal_projection_preserves_native_receipts_and_control_state() {
