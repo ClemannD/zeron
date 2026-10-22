@@ -1018,11 +1018,32 @@ impl Shell {
             .into_any_element();
 
         let scroll = self.project_tab_scroll.clone();
-        let tint = if theme.appearance.is_dark() {
-            gpui::hsla(0.0, 0.0, 0.0, 0.26)
-        } else {
-            gpui::hsla(0.0, 0.0, 0.0, 0.05)
+        // The new-session canvas shows the wallpaper straight through the
+        // band. Where the band blurs it (frosted themes) a light tint is
+        // enough and the image stays visible; otherwise it needs heavy
+        // coverage for the tab text to stay readable.
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
+        let frost = on_canvas && theme.is_frost();
+        let dark = theme.appearance.is_dark();
+        let tint_alpha = match (on_canvas, frost, dark) {
+            (false, _, true) => 0.26,
+            (false, _, false) => 0.05,
+            (true, true, true) => 0.24,
+            (true, true, false) => 0.1,
+            (true, false, true) => 0.72,
+            (true, false, false) => 0.3,
         };
+        let tint = gpui::hsla(0.0, 0.0, 0.0, tint_alpha);
+        // In a chat the active tab is cut out of the band and opens onto the
+        // page below. The canvas has no page for it to open onto, so there the
+        // band runs unbroken and the active tab is a closed chip within it,
+        // in the hover chip's shape.
+        let chip = on_canvas.then(|| ProjectTabChip {
+            fill: theme.wash(if dark { 0.1 } else { 0.08 }),
+            border: theme.wash(if dark { 0.14 } else { 0.1 }),
+        });
+        // On the canvas the band's own tint fades out below it.
+        let shade = on_canvas.then(|| gpui::hsla(0.0, 0.0, 0.0, tint_alpha * 0.5));
         let line = theme.border;
         let band = gpui::canvas(
             |_, _, _| {},
@@ -1034,7 +1055,25 @@ impl Shell {
                     // Scrolled out of view: the band runs unbroken.
                     (x1 > region.left() && x0 < region.right()).then_some((x0, x1))
                 });
-                paint_project_tab_band(bounds, cutout, tint, line, window);
+                // One layer, so the blur snapshots the wallpaper beneath it and
+                // the band's tint then paints over the result.
+                window.paint_layer(bounds, |window| {
+                    if frost {
+                        paint_project_tab_blur(bounds, window);
+                    }
+                    if let Some(shade) = shade {
+                        paint_project_tab_shade(bounds, shade, window);
+                    }
+                    match chip {
+                        Some(chip) => {
+                            paint_project_tab_band(bounds, None, tint, line, window);
+                            if let Some((x0, x1)) = cutout {
+                                paint_project_tab_chip(bounds, x0, x1, chip, window);
+                            }
+                        }
+                        None => paint_project_tab_band(bounds, cutout, tint, line, window),
+                    }
+                });
             },
         )
         .size_full()
@@ -1171,29 +1210,31 @@ impl Shell {
             }));
         // Working-tree changes sit at the end of the name's row, on the open
         // tab only.
-        let change_totals = changes.filter(|_| active).map(|(adds, dels)| {
-            div()
-                .debug_selector(move || format!("project-tab-changes-{ix}"))
-                .flex_none()
-                .ml(px(8.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(5.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(10.0))
-                .line_height(px(12.0))
-                .child(
-                    div()
-                        .text_color(crate::changes::add_color(theme))
-                        .child(format!("+{adds}")),
-                )
-                .child(
-                    div()
-                        .text_color(crate::changes::del_color(theme))
-                        .child(format!("−{dels}")),
-                )
-        });
+        let change_totals = changes
+            .filter(|&(adds, dels)| active && adds + dels > 0)
+            .map(|(adds, dels)| {
+                div()
+                    .debug_selector(move || format!("project-tab-changes-{ix}"))
+                    .flex_none()
+                    .ml(px(8.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .line_height(px(12.0))
+                    .child(
+                        div()
+                            .text_color(crate::changes::add_color(theme))
+                            .child(format!("+{adds}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(crate::changes::del_color(theme))
+                            .child(format!("−{dels}")),
+                    )
+            });
         let tooltip_detail = match (&pull_request, status) {
             (Some(summary), Some(status)) => SharedString::from(format!(
                 "{detail}\nPR #{} · {}\n{}",
@@ -1484,6 +1525,63 @@ impl Shell {
             .child(details)
             .into_any_element()
     }
+}
+
+/// Backdrop blur behind the tab band, stopping crisply at its bottom edge.
+/// (The renderer's blur has no gradient mask; stepping the radius down in
+/// strips below the bar reads as a smear, so the softening below is a
+/// tinted shade instead — see [`paint_project_tab_shade`].)
+fn paint_project_tab_blur(bounds: gpui::Bounds<Pixels>, window: &mut Window) {
+    window.paint_backdrop_blur(bounds, gpui::Corners::all(px(0.0)), px(16.0));
+}
+
+/// A soft shade falling off below the band so it sits on the wallpaper
+/// rather than ending in a hard cut.
+fn paint_project_tab_shade(bounds: gpui::Bounds<Pixels>, shade: gpui::Hsla, window: &mut Window) {
+    const DEPTH: f32 = 28.0;
+    let below = gpui::Bounds::new(
+        gpui::point(bounds.left(), bounds.bottom()),
+        gpui::size(bounds.size.width, px(DEPTH)),
+    );
+    window.paint_quad(gpui::fill(
+        below,
+        gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(shade, 0.0),
+            gpui::linear_color_stop(shade.opacity(0.0), 1.0),
+        ),
+    ));
+}
+
+/// The active tab's chip on the new-session canvas.
+#[derive(Clone, Copy)]
+struct ProjectTabChip {
+    fill: gpui::Hsla,
+    border: gpui::Hsla,
+}
+
+/// Paint the active tab's chip, spanning `x0..x1` within the band `bounds`,
+/// inset like the inactive tabs' hover chip.
+fn paint_project_tab_chip(
+    bounds: gpui::Bounds<Pixels>,
+    x0: Pixels,
+    x1: Pixels,
+    chip: ProjectTabChip,
+    window: &mut Window,
+) {
+    let top = bounds.top() + px(Theme::TITLEBAR_TOP_PAD + 5.0);
+    let rect = gpui::Bounds::from_corners(
+        gpui::point(x0 + px(4.0), top),
+        gpui::point(x1 - px(4.0), bounds.bottom() - px(5.0)),
+    );
+    window.paint_quad(gpui::quad(
+        rect,
+        px(PROJECT_TAB_RADIUS),
+        chip.fill,
+        px(1.0),
+        chip.border,
+        gpui::BorderStyle::default(),
+    ));
 }
 
 /// Paint the tab bar's band into `bounds`: a tinted strip with the active
