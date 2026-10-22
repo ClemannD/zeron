@@ -505,15 +505,18 @@ impl Repos {
         }
 
         let branch = if let Some(remote) = remote.as_deref() {
-            emit(ResetProgress::starting("Fetching latest changes"));
-            self.git(&["fetch", "--prune", remote], Some(repo_path))
-                .await?;
-            emit(ResetProgress::completed("Fetched latest changes"));
             emit(ResetProgress::starting("Finding the default branch"));
             let branch = self.remote_default_branch(repo_path, remote).await?;
             emit(ResetProgress::completed(format!(
                 "Using {branch} as the default branch"
             )));
+            // Fetch only the default branch: fetching every branch takes
+            // minutes in repositories with tens of thousands of them.
+            emit(ResetProgress::starting(format!("Fetching {branch}")));
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+            self.git(&["fetch", remote, &refspec], Some(repo_path))
+                .await?;
+            emit(ResetProgress::completed(format!("Fetched {branch}")));
             branch
         } else {
             let branch = self.local_default_branch(repo_path, &current).await?;
@@ -562,8 +565,8 @@ impl Repos {
             emit(ResetProgress::starting(format!(
                 "Rebasing {branch} on the latest remote changes"
             )));
-            self.git(&["pull", "--rebase", remote, &branch], Some(repo_path))
-                .await?;
+            let upstream = format!("{remote}/{branch}");
+            self.git(&["rebase", &upstream], Some(repo_path)).await?;
             emit(ResetProgress::completed(format!("Rebased {branch}")));
         }
         Ok(ResetToDefaultBranch {

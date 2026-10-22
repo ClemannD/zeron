@@ -631,7 +631,7 @@ async fn reset_to_default_branch_stashes_changes_and_uses_remote_head() {
     assert_eq!(result.branch, "trunk");
     assert!(result.stashed);
     assert!(progress.iter().any(|step| step.message == "Stashed changes" && step.complete));
-    assert!(progress.iter().any(|step| step.message == "Fetched latest changes" && step.complete));
+    assert!(progress.iter().any(|step| step.message == "Fetched trunk" && step.complete));
     assert!(progress.iter().any(|step| step.message == "Rebased trunk" && step.complete));
     assert_eq!(git_stdout(&repo_dir, &["branch", "--show-current"]).await, "trunk");
     assert_eq!(
