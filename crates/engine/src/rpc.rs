@@ -1460,9 +1460,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
     use std::time::Duration;
     match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
+        methods::CLONE_REPO
+        | methods::FETCH_ALL
+        | methods::RESET_REPO_TO_BASE
+        | methods::APPLY_UPDATE => Duration::from_secs(15 * 60),
         methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
@@ -1527,6 +1528,7 @@ fn forwardable(method: &str) -> bool {
             | methods::RESOLVE_GIT_AVATARS
             | methods::FETCH_ALL
             | methods::SWITCH_REF
+            | methods::RESET_REPO_TO_BASE
             | methods::LIST_FOLDERS
             | methods::GET_WORKTREE_SETTINGS
             | methods::SET_WORKTREE_SETTINGS
@@ -3231,6 +3233,21 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
             }
+            methods::RESET_REPO_TO_BASE => {
+                let p: RepoPathParams = parse_params(params)?;
+                let result = self
+                    .repos
+                    .reset_to_default_branch(std::path::Path::new(&p.repo_path))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // A branch change alters every checkout snapshot. Publish it
+                // immediately instead of waiting for the filesystem watcher.
+                self.diff_sync.sync_all();
+                RpcReply::value(&serde_json::json!({
+                    "branch": result.branch,
+                    "stashed": result.stashed,
+                }))
+            }
             methods::GET_WORKTREE_SETTINGS => RpcReply::value(&self.repos.worktree_settings()),
             methods::SET_WORKTREE_SETTINGS => {
                 let settings: zeron_proto::WorktreeSettings = parse_params(params)?;
@@ -4353,6 +4370,7 @@ mod tests {
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
+        assert!(forwardable(methods::RESET_REPO_TO_BASE));
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));

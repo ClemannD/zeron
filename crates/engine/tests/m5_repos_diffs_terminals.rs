@@ -572,6 +572,83 @@ async fn fetch_all_updates_only_remote_tracking_refs() {
     );
 }
 
+#[tokio::test]
+async fn reset_to_default_branch_stashes_changes_and_uses_remote_head() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("reset-repo");
+    let remote_dir = tmp.path().join("remote.git");
+    init_repo(&repo_dir).await;
+    // Deliberately avoid `main`: the remote HEAD is the source of truth.
+    git(&repo_dir, &["branch", "-M", "trunk"]).await;
+    git(
+        tmp.path(),
+        &["init", "--bare", remote_dir.to_str().unwrap()],
+    )
+    .await;
+    git(
+        &repo_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    )
+    .await;
+    git(&repo_dir, &["push", "-u", "origin", "trunk"]).await;
+    git(
+        tmp.path(),
+        &[
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/trunk",
+        ],
+    )
+    .await;
+
+    let peer_dir = tmp.path().join("peer");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            remote_dir.to_str().unwrap(),
+            peer_dir.to_str().unwrap(),
+        ],
+    )
+    .await;
+    std::fs::write(peer_dir.join("remote.txt"), "remote update\n").expect("remote file");
+    git(&peer_dir, &["add", "."]).await;
+    git(&peer_dir, &["commit", "-m", "remote update"]).await;
+    git(&peer_dir, &["push", "origin", "trunk"]).await;
+
+    git(&repo_dir, &["checkout", "-b", "feature/reset"]).await;
+    std::fs::write(repo_dir.join("a.txt"), "locally changed\n").expect("tracked edit");
+    std::fs::write(repo_dir.join("untracked.txt"), "keep me\n").expect("untracked edit");
+
+    let result = test_repos(&tmp.path().join("data"))
+        .reset_to_default_branch(&repo_dir)
+        .await
+        .expect("return to default branch");
+
+    assert_eq!(result.branch, "trunk");
+    assert!(result.stashed);
+    assert_eq!(git_stdout(&repo_dir, &["branch", "--show-current"]).await, "trunk");
+    assert_eq!(
+        git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await,
+        git_stdout(&repo_dir, &["rev-parse", "origin/trunk"]).await
+    );
+    assert!(git_stdout(&repo_dir, &["status", "--porcelain=v1"]).await.is_empty());
+    assert!(
+        git_stdout(&repo_dir, &["stash", "list"])
+            .await
+            .contains("Zeron: before returning to the default branch")
+    );
+    let stashed_files = git_stdout(
+        &repo_dir,
+        &["stash", "show", "--include-untracked", "--name-only", "stash@{0}"],
+    )
+    .await;
+    assert!(stashed_files.contains("a.txt"));
+    assert!(stashed_files.contains("untracked.txt"));
+}
+
 // ---------------------------------------------------------------------------
 // Folder lister
 // ---------------------------------------------------------------------------

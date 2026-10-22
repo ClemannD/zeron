@@ -74,6 +74,13 @@ pub struct CheckoutIdentity {
     pub git_dir: PathBuf,
 }
 
+/// The outcome of returning a checkout to its repository's default branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetToDefaultBranch {
+    pub branch: String,
+    pub stashed: bool,
+}
+
 /// Best-effort home directory (the `ListFolders` default and worktree root base).
 pub(crate) fn home_dir() -> PathBuf {
     let variables = if cfg!(windows) {
@@ -394,6 +401,159 @@ impl Repos {
         self.git(&["fetch", "--all", "--quiet"], Some(repo_path))
             .await
             .map(drop)
+    }
+
+    /// Save any working-tree changes, switch this checkout to the repository's
+    /// default branch, and rebase that branch onto its current remote tip.
+    ///
+    /// The remote's symbolic `HEAD` is authoritative (and supports `trunk`,
+    /// `develop`, or any other default name). For local-only repositories we
+    /// use an existing `main`/`master`, then the current branch as the only
+    /// non-network fallback.
+    pub async fn reset_to_default_branch(
+        &self,
+        repo_path: &Path,
+    ) -> Result<ResetToDefaultBranch, EngineError> {
+        let current = self.current_branch(repo_path).await?;
+        let remotes: Vec<String> = self
+            .git(&["remote"], Some(repo_path))
+            .await?
+            .lines()
+            .map(str::trim)
+            .filter(|remote| !remote.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        // `origin` is conventional; otherwise a repository with one remote
+        // is unambiguous. Do not guess between multiple non-origin remotes.
+        let remote = remotes
+            .iter()
+            .find(|remote| remote.as_str() == "origin")
+            .cloned()
+            .or_else(|| (remotes.len() == 1).then(|| remotes[0].clone()));
+        if !remotes.is_empty() && remote.is_none() {
+            return Err(EngineError::Other(
+                "Could not choose a default remote; name it origin or leave only one remote configured"
+                    .into(),
+            ));
+        }
+
+        let branch = if let Some(remote) = remote.as_deref() {
+            self.git(&["fetch", "--prune", remote], Some(repo_path))
+                .await?;
+            self.remote_default_branch(repo_path, remote).await?
+        } else {
+            self.local_default_branch(repo_path, &current).await?
+        };
+
+        let dirty = !self
+            .git(&["status", "--porcelain=v1"], Some(repo_path))
+            .await?
+            .is_empty();
+        if dirty {
+            self.git(
+                &[
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "--message",
+                    "Zeron: before returning to the default branch",
+                ],
+                Some(repo_path),
+            )
+            .await?;
+        }
+
+        let local_ref = format!("refs/heads/{branch}");
+        let has_local = self
+            .git_probe(
+                &["show-ref", "--verify", "--quiet", &local_ref],
+                Some(repo_path),
+            )
+            .await?
+            .is_some();
+        if has_local {
+            self.git(&["checkout", &branch], Some(repo_path)).await?;
+        } else if let Some(remote) = remote.as_deref() {
+            let remote_ref = format!("refs/remotes/{remote}/{branch}");
+            let has_remote = self
+                .git_probe(
+                    &["show-ref", "--verify", "--quiet", &remote_ref],
+                    Some(repo_path),
+                )
+                .await?
+                .is_some();
+            if !has_remote {
+                return Err(EngineError::Other(format!(
+                    "The default branch {branch} is not available from {remote}"
+                )));
+            }
+            let tracking = format!("{remote}/{branch}");
+            self.git(&["checkout", "--track", &tracking], Some(repo_path))
+                .await?;
+        } else {
+            return Err(EngineError::Other(format!(
+                "The default branch {branch} is not available locally"
+            )));
+        }
+
+        if let Some(remote) = remote.as_deref() {
+            self.git(&["pull", "--rebase", remote, &branch], Some(repo_path))
+                .await?;
+        }
+        Ok(ResetToDefaultBranch {
+            branch,
+            stashed: dirty,
+        })
+    }
+
+    async fn remote_default_branch(
+        &self,
+        repo_path: &Path,
+        remote: &str,
+    ) -> Result<String, EngineError> {
+        // `ls-remote --symref` asks the remote directly, avoiding reliance on
+        // a stale or absent refs/remotes/<remote>/HEAD symbolic ref.
+        let output = self
+            .git(&["ls-remote", "--symref", remote, "HEAD"], Some(repo_path))
+            .await?;
+        let branch = output.lines().find_map(|line| {
+            let (reference, head) = line.split_once('\t')?;
+            (head == "HEAD")
+                .then(|| reference.strip_prefix("ref: refs/heads/"))
+                .flatten()
+                .map(ToOwned::to_owned)
+        });
+        branch.ok_or_else(|| {
+            EngineError::Other(format!(
+                "Could not determine the default branch for remote {remote}"
+            ))
+        })
+    }
+
+    async fn local_default_branch(
+        &self,
+        repo_path: &Path,
+        current: &str,
+    ) -> Result<String, EngineError> {
+        for branch in ["main", "master"] {
+            let reference = format!("refs/heads/{branch}");
+            if self
+                .git_probe(
+                    &["show-ref", "--verify", "--quiet", &reference],
+                    Some(repo_path),
+                )
+                .await?
+                .is_some()
+            {
+                return Ok(branch.to_string());
+            }
+        }
+        if current != "HEAD" {
+            return Ok(current.to_string());
+        }
+        Err(EngineError::Other(
+            "Could not determine a default branch for this repository".into(),
+        ))
     }
 
     /// The absolute Git `HEAD` file for event-driven external branch reconciliation.

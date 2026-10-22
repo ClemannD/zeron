@@ -32,10 +32,11 @@ const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
 /// the tab would clip its first row inside the scrolling strip.
 const PROJECT_TAB_HEIGHT: f32 = 52.0;
 pub(super) const PROJECT_TAB_HEADER_HEIGHT: f32 = PROJECT_TAB_HEIGHT + Theme::TITLEBAR_TOP_PAD;
-/// The active tab's top corner radius and the concave "feet" joining it to
-/// the band's bottom edge (Chrome's tab silhouette).
+/// The tab chips' corner radius.
 const PROJECT_TAB_RADIUS: f32 = 8.0;
-const PROJECT_TAB_FLARE: f32 = 6.0;
+/// Air above and below the tab chips within the band. The tab itself sits
+/// under the top gutter, so its contents and hover chip are offset to match.
+const PROJECT_TAB_CHIP_INSET: f32 = 5.0;
 /// How often tab folders' checked-out branches are re-read.
 const PROJECT_TAB_BRANCH_POLL: Duration = Duration::from_secs(5);
 
@@ -269,7 +270,7 @@ struct ProjectTabRow {
 }
 
 /// The project-tab bar's two layers: the strip of tabs, and the band painted
-/// behind the titlebar with the active tab cut out of it.
+/// behind the titlebar with the active tab's chip.
 pub(super) struct ProjectTabBar {
     pub strip: AnyElement,
     pub band: AnyElement,
@@ -558,6 +559,75 @@ impl Shell {
         }
     }
 
+    /// Return this space's checkout to the repository's default branch. The
+    /// engine resolves the remote default (rather than assuming `main`),
+    /// stashes uncommitted and untracked files, then fetches and rebases.
+    fn reset_project_tab_to_default_branch(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.project_tab_reset_task.is_some() {
+            return;
+        }
+        let (space, engine, target) = {
+            let state = self.state.read(cx);
+            let Some(space) = state.space_row(&key).cloned() else {
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    "This tab has no workspace",
+                    cx,
+                );
+                return;
+            };
+            let Some(engine) = state.engine().cloned() else {
+                self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+                return;
+            };
+            let target = (state.local_device_id.as_deref() != Some(space.device_id.as_str()))
+                .then(|| space.device_id.clone());
+            (space, engine, target)
+        };
+        let mut params = serde_json::Map::new();
+        params.insert("repoPath".into(), serde_json::Value::String(space.path));
+        if let Some(target) = target {
+            params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+        }
+        self.project_tab_reset_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::RESET_REPO_TO_BASE, serde_json::Value::Object(params))
+                .await;
+            this.update(cx, |this, cx| {
+                this.project_tab_reset_task = None;
+                match result {
+                    Ok(value) => {
+                        let branch = value
+                            .get("branch")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("default branch");
+                        let stashed = value
+                            .get("stashed")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let message = if stashed {
+                            format!("Returned to {branch}; uncommitted changes were stashed")
+                        } else {
+                            format!("Returned to {branch} and updated it")
+                        };
+                        this.show_notice(crate::toast::ToastKind::Success, message, cx);
+                        // Do not wait for the normal five-second poll to show
+                        // the branch and clean working tree in the tab.
+                        this.project_tab_branch_checked = None;
+                    }
+                    Err(error) => this.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Could not return this workspace to its default branch: {error}"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// The tab's right-click menu, appended to the shell's overlay list.
     pub(super) fn render_project_tab_overlays(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some((key, position)) = self.project_tab_menu.get().cloned() else {
@@ -566,10 +636,25 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let closing = self.project_tab_menu.closing_since();
         let menu = popover::popover_card(&theme)
-            .w(px(170.0))
+            .w(px(250.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_tab_menu(cx)))
             .flex()
             .flex_col()
+            .when(key != NO_PROJECT_TAB, |menu| {
+                let reset_key = key.clone();
+                menu.child(
+                    popover::menu_row(&theme, false, "project-tab-menu-reset-default")
+                        .id("project-tab-menu-reset-default")
+                        .debug_selector(|| "project-tab-menu-reset-default".into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_project_tab_menu(cx);
+                            this.reset_project_tab_to_default_branch(reset_key.clone(), cx);
+                        }))
+                        .child(icon(icons::GIT_BRANCH).size(px(14.0)).text_color(theme.text_muted))
+                        .child(SharedString::from("Return to default branch")),
+                )
+            })
             .child(
                 popover::menu_row(&theme, false, "project-tab-menu-close")
                     .id("project-tab-menu-close")
@@ -821,10 +906,8 @@ impl Shell {
     }
 
     /// The tab strip (plus, at its end, the all-projects menu button) and the
-    /// band behind it. The band is one painted shape: a darker strip with the
-    /// active tab's silhouette cut out, so that tab reads as part of the work
-    /// area below, and a hairline that runs along the band's bottom edge and
-    /// around the active tab.
+    /// band behind it: a tinted strip with a hairline along its bottom edge and
+    /// the active tab's chip.
     pub(super) fn render_project_tab_bar(&mut self, cx: &mut Context<Self>) -> ProjectTabBar {
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
@@ -885,7 +968,7 @@ impl Shell {
         for (ix, row) in rows.into_iter().enumerate() {
             let is_active = active_ix == Some(ix);
             let tab_activity = activity.get(&row.key);
-            // Chrome hides the separators that touch the active tab.
+            // Separators hide where they touch the active tab's chip.
             let separator = ix + 1 < count && !is_active && active_ix != Some(ix + 1);
             let leading = self.render_project_tab_icon(
                 &row,
@@ -981,7 +1064,7 @@ impl Shell {
         }
 
         // The strip's on-screen bounds, measured at prepaint for the band's
-        // cutout (painted later in the same frame).
+        // chip (painted later in the same frame).
         let region = std::rc::Rc::new(std::cell::Cell::new(None::<gpui::Bounds<Pixels>>));
         let measure = region.clone();
         let strip = div()
@@ -1034,25 +1117,23 @@ impl Shell {
             (true, false, false) => 0.3,
         };
         let tint = gpui::hsla(0.0, 0.0, 0.0, tint_alpha);
-        // In a chat the active tab is cut out of the band and opens onto the
-        // page below. The canvas has no page for it to open onto, so there the
-        // band runs unbroken and the active tab is a closed chip within it,
-        // in the hover chip's shape.
-        let chip = on_canvas.then(|| ProjectTabChip {
+        // The band runs unbroken, in a chat as on the canvas, and the active
+        // tab is a closed chip within it, in the hover chip's shape.
+        let chip = ProjectTabChip {
             fill: theme.wash(if dark { 0.1 } else { 0.08 }),
             border: theme.wash(if dark { 0.14 } else { 0.1 }),
-        });
+        };
         // On the canvas the band's own tint fades out below it.
         let shade = on_canvas.then(|| gpui::hsla(0.0, 0.0, 0.0, tint_alpha * 0.5));
         let line = theme.border;
         let band = gpui::canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
-                let cutout = active_slot.and_then(|slot| {
+                let chip_span = active_slot.and_then(|slot| {
                     let region = region.get()?;
                     let x0 = region.left() + px(slot as f32 * PROJECT_TAB_SLOT) + scroll.offset().x;
                     let x1 = x0 + px(PROJECT_TAB_WIDTH);
-                    // Scrolled out of view: the band runs unbroken.
+                    // Scrolled out of view: no chip.
                     (x1 > region.left() && x0 < region.right()).then_some((x0, x1))
                 });
                 // One layer, so the blur snapshots the wallpaper beneath it and
@@ -1064,14 +1145,9 @@ impl Shell {
                     if let Some(shade) = shade {
                         paint_project_tab_shade(bounds, shade, window);
                     }
-                    match chip {
-                        Some(chip) => {
-                            paint_project_tab_band(bounds, None, tint, line, window);
-                            if let Some((x0, x1)) = cutout {
-                                paint_project_tab_chip(bounds, x0, x1, chip, window);
-                            }
-                        }
-                        None => paint_project_tab_band(bounds, cutout, tint, line, window),
+                    paint_project_tab_band(bounds, tint, line, window);
+                    if let Some((x0, x1)) = chip_span {
+                        paint_project_tab_chip(bounds, x0, x1, chip, window);
                     }
                 });
             },
@@ -1142,8 +1218,8 @@ impl Shell {
 
     /// One project tab: name, branch, PR and changes, and a close button
     /// that shows on hover (always on the active tab). Inactive tabs wash on
-    /// hover; the active tab draws nothing of its own — the band's cutout
-    /// makes it.
+    /// hover; the active tab draws nothing of its own — the band paints its
+    /// chip.
     #[allow(clippy::too_many_arguments)]
     fn render_project_tab(
         &self,
@@ -1258,6 +1334,9 @@ impl Shell {
             .flex_none()
             .pl(px(14.0))
             .pr(px(14.0))
+            // The tab sits under the top gutter; this centres its contents
+            // in the band rather than in the tab.
+            .pb(px(Theme::TITLEBAR_TOP_PAD))
             .flex()
             .flex_row()
             .items_center()
@@ -1273,8 +1352,8 @@ impl Shell {
                 tab.child(
                     div()
                         .absolute()
-                        .top(px(5.0))
-                        .bottom(px(5.0))
+                        .top(px(PROJECT_TAB_CHIP_INSET - Theme::TITLEBAR_TOP_PAD))
+                        .bottom(px(PROJECT_TAB_CHIP_INSET))
                         .left(px(4.0))
                         .right(px(4.0))
                         .rounded(px(8.0))
@@ -1286,8 +1365,8 @@ impl Shell {
                     div()
                         .absolute()
                         .right_0()
-                        .top(px(14.0))
-                        .bottom(px(13.0))
+                        .top(px(11.0))
+                        .bottom(px(15.0))
                         .w(px(1.0))
                         .bg(theme.border),
                 )
@@ -1561,7 +1640,7 @@ struct ProjectTabChip {
 }
 
 /// Paint the active tab's chip, spanning `x0..x1` within the band `bounds`,
-/// inset like the inactive tabs' hover chip.
+/// inset like the inactive tabs' hover chip and centred vertically in it.
 fn paint_project_tab_chip(
     bounds: gpui::Bounds<Pixels>,
     x0: Pixels,
@@ -1569,10 +1648,9 @@ fn paint_project_tab_chip(
     chip: ProjectTabChip,
     window: &mut Window,
 ) {
-    let top = bounds.top() + px(Theme::TITLEBAR_TOP_PAD + 5.0);
     let rect = gpui::Bounds::from_corners(
-        gpui::point(x0 + px(4.0), top),
-        gpui::point(x1 - px(4.0), bounds.bottom() - px(5.0)),
+        gpui::point(x0 + px(4.0), bounds.top() + px(PROJECT_TAB_CHIP_INSET)),
+        gpui::point(x1 - px(4.0), bounds.bottom() - px(PROJECT_TAB_CHIP_INSET)),
     );
     window.paint_quad(gpui::quad(
         rect,
@@ -1584,61 +1662,18 @@ fn paint_project_tab_chip(
     ));
 }
 
-/// Paint the tab bar's band into `bounds`: a tinted strip with the active
-/// tab's silhouette (`cutout`, its left and right edges) removed, then the
-/// hairline along the bottom edge that rises around that silhouette.
+/// Paint the tab bar's band into `bounds`: a tinted strip with a hairline
+/// along its bottom edge.
 fn paint_project_tab_band(
     bounds: gpui::Bounds<Pixels>,
-    cutout: Option<(Pixels, Pixels)>,
     tint: gpui::Hsla,
     line: gpui::Hsla,
     window: &mut Window,
 ) {
-    let top = bounds.top() + px(Theme::TITLEBAR_TOP_PAD);
-    let bottom = bounds.bottom();
-    let (radius, flare) = (px(PROJECT_TAB_RADIUS), px(PROJECT_TAB_FLARE));
-    // The silhouette, left foot to right foot. `edge` is the bottom line's y.
-    let silhouette = |path: &mut gpui::PathBuilder, x0: Pixels, x1: Pixels, edge: Pixels| {
-        path.line_to(gpui::point(x0 - flare, edge));
-        path.curve_to(gpui::point(x0, edge - flare), gpui::point(x0, edge));
-        path.line_to(gpui::point(x0, top + radius));
-        path.curve_to(gpui::point(x0 + radius, top), gpui::point(x0, top));
-        path.line_to(gpui::point(x1 - radius, top));
-        path.curve_to(gpui::point(x1, top + radius), gpui::point(x1, top));
-        path.line_to(gpui::point(x1, edge - flare));
-        path.curve_to(gpui::point(x1 + flare, edge), gpui::point(x1, edge));
-    };
-
-    let mut fill = gpui::PathBuilder::fill();
-    fill.move_to(bounds.origin);
-    fill.line_to(gpui::point(bounds.right(), bounds.top()));
-    fill.line_to(gpui::point(bounds.right(), bottom));
-    match cutout {
-        Some((x0, x1)) => {
-            fill.line_to(gpui::point(x1 + flare, bottom));
-            // Walk the silhouette right to left so the fill wraps around it.
-            fill.curve_to(gpui::point(x1, bottom - flare), gpui::point(x1, bottom));
-            fill.line_to(gpui::point(x1, top + radius));
-            fill.curve_to(gpui::point(x1 - radius, top), gpui::point(x1, top));
-            fill.line_to(gpui::point(x0 + radius, top));
-            fill.curve_to(gpui::point(x0, top + radius), gpui::point(x0, top));
-            fill.line_to(gpui::point(x0, bottom - flare));
-            fill.curve_to(gpui::point(x0 - flare, bottom), gpui::point(x0, bottom));
-            fill.line_to(gpui::point(bounds.left(), bottom));
-        }
-        None => fill.line_to(gpui::point(bounds.left(), bottom)),
-    }
-    fill.close();
-    if let Ok(path) = fill.build() {
-        window.paint_path(path, tint);
-    }
-
-    let edge = bottom - px(0.5);
+    window.paint_quad(gpui::fill(bounds, tint));
+    let edge = bounds.bottom() - px(0.5);
     let mut stroke = gpui::PathBuilder::stroke(px(1.0));
     stroke.move_to(gpui::point(bounds.left(), edge));
-    if let Some((x0, x1)) = cutout {
-        silhouette(&mut stroke, x0 + px(0.5), x1 - px(0.5), edge);
-    }
     stroke.line_to(gpui::point(bounds.right(), edge));
     if let Ok(path) = stroke.build() {
         window.paint_path(path, line);

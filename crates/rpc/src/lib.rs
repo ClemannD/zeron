@@ -160,6 +160,9 @@ pub mod methods {
     /// Update remote-tracking refs without changing HEAD, the index, or files.
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
+    /// Stash local changes, then move a checkout to its remote's default branch
+    /// and rebase it onto the latest remote tip.
+    pub const RESET_REPO_TO_BASE: &str = "ResetRepoToBase";
     pub const LIST_FOLDERS: &str = "ListFolders";
     pub const GET_WORKTREE_SETTINGS: &str = "GetWorktreeSettings";
     pub const SET_WORKTREE_SETTINGS: &str = "SetWorktreeSettings";

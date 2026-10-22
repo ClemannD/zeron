@@ -2060,6 +2060,8 @@ pub struct Shell {
     /// The in-flight read of tab folders' branch and working-tree state, and
     /// when the last one started.
     project_tab_branch_task: Option<gpui::Task<()>>,
+    /// A project-tab request to return its workspace to the default branch.
+    project_tab_reset_task: Option<gpui::Task<()>>,
     project_tab_branch_checked: Option<std::time::Instant>,
     /// Latest local working-tree totals shown at the right edge of each tab.
     project_tab_changes: std::collections::HashMap<String, (u32, u32)>,
@@ -2626,6 +2628,7 @@ impl Shell {
             project_tabs_menu: popover::Popup::default(),
             project_tab_menu: popover::Popup::default(),
             project_tab_branch_task: None,
+            project_tab_reset_task: None,
             project_tab_branch_checked: None,
             project_tab_changes: std::collections::HashMap::new(),
             project_tab_remote_diff_tasks: std::collections::HashMap::new(),
@@ -16746,6 +16749,7 @@ mod exit_regressions {
         );
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("project-tab-menu-reset-default").is_some());
         let close = cx.debug_bounds("project-tab-menu-close").unwrap();
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         cx.run_until_parked();
