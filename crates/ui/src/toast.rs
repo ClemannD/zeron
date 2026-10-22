@@ -45,6 +45,10 @@ pub enum ToastKind {
     Info,
 }
 
+/// A live toast that can be updated as a background operation advances.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ToastId(u64);
+
 /// A value easing from one target to the next, restarting from wherever it
 /// is whenever the target moves.
 #[derive(Clone, Copy)]
@@ -102,6 +106,8 @@ struct Toast {
     clip: Option<Glide>,
     swipe: f32,
     swipe_from: Option<f32>,
+    /// Pending toasts stay visible until their owner finishes them.
+    pending: bool,
 }
 
 impl Toast {
@@ -145,13 +151,14 @@ struct ToastStore {
 
 impl Global for ToastStore {}
 
-fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
+fn push(cx: &mut App, kind: ToastKind, message: SharedString) -> Option<ToastId> {
     let message: SharedString = message.trim().to_owned().into();
     if message.is_empty() {
-        return;
+        return None;
     }
     let now = Instant::now();
     let store = cx.default_global::<ToastStore>();
+    let id;
     // A repeat of the live front toast restarts it instead of stacking.
     if let Some(front) = store
         .toasts
@@ -163,9 +170,10 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
     {
         front.remaining = DURATION;
         front.resumed = (!store.hovered).then_some(now);
+        id = front.id;
     } else {
         store.next_id += 1;
-        let id = store.next_id;
+        id = store.next_id;
         let hovered = store.hovered;
         store.toasts.push(Toast {
             id,
@@ -180,14 +188,69 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
             clip: None,
             swipe: 0.0,
             swipe_from: None,
+            pending: false,
         });
     }
     cx.refresh_windows();
+    Some(ToastId(id))
 }
 
 /// A toast of `kind`.
 pub fn show(cx: &mut App, kind: ToastKind, message: impl Into<SharedString>) {
-    push(cx, kind, message.into());
+    let _ = push(cx, kind, message.into());
+}
+
+/// Show a toast that remains on screen until [`finish`] is called.
+pub fn pending(cx: &mut App, message: impl Into<SharedString>) -> ToastId {
+    let id = push(cx, ToastKind::Info, message.into()).expect("non-empty pending toast");
+    if let Some(toast) = cx
+        .global_mut::<ToastStore>()
+        .toasts
+        .iter_mut()
+        .find(|toast| toast.id == id.0)
+    {
+        toast.pending = true;
+        toast.resumed = None;
+    }
+    id
+}
+
+/// Replace a pending toast's message while keeping it visible.
+pub fn update(cx: &mut App, id: ToastId, message: impl Into<SharedString>) {
+    let message: SharedString = message.into().trim().to_owned().into();
+    if message.is_empty() {
+        return;
+    }
+    if let Some(toast) = cx
+        .global_mut::<ToastStore>()
+        .toasts
+        .iter_mut()
+        .find(|toast| toast.id == id.0 && toast.closing.is_none())
+    {
+        toast.message = message;
+        toast.height = 0.0;
+        cx.refresh_windows();
+    }
+}
+
+/// Complete a pending toast, changing its state and starting the normal expiry.
+pub fn finish(cx: &mut App, id: ToastId, kind: ToastKind, message: impl Into<SharedString>) {
+    let message: SharedString = message.into().trim().to_owned().into();
+    let hovered = cx.global::<ToastStore>().hovered;
+    if let Some(toast) = cx
+        .global_mut::<ToastStore>()
+        .toasts
+        .iter_mut()
+        .find(|toast| toast.id == id.0 && toast.closing.is_none())
+    {
+        toast.kind = kind;
+        toast.message = message;
+        toast.pending = false;
+        toast.remaining = DURATION;
+        toast.resumed = (!hovered).then_some(Instant::now());
+        toast.height = 0.0;
+        cx.refresh_windows();
+    }
 }
 
 /// A failure toast.
@@ -252,6 +315,9 @@ fn set_hovered(hovered: bool, cx: &mut App) {
     }
     store.hovered = hovered;
     for toast in &mut store.toasts {
+        if toast.pending {
+            continue;
+        }
         if hovered {
             toast.pause(now);
         } else {
@@ -266,6 +332,9 @@ fn set_hovered(hovered: bool, cx: &mut App) {
 fn tick(store: &mut ToastStore, active: bool, now: Instant) -> bool {
     let paused = store.hovered || !active;
     for toast in &mut store.toasts {
+        if toast.pending {
+            continue;
+        }
         if paused {
             toast.pause(now);
         } else {
@@ -641,6 +710,7 @@ mod tests {
             clip: None,
             swipe: 0.0,
             swipe_from: None,
+            pending: false,
         });
     }
 
@@ -668,6 +738,20 @@ mod tests {
         assert!(store.toasts[0].closing.is_some(), "expires on time");
         tick(&mut store, true, start + Duration::from_millis(64_400));
         assert!(store.toasts.is_empty(), "removed after its exit");
+    }
+
+    #[test]
+    fn pending_toast_does_not_expire_until_finished() {
+        let start = Instant::now();
+        let mut store = ToastStore::default();
+        toast(&mut store, "working", start);
+        store.toasts[0].pending = true;
+        tick(&mut store, true, start + Duration::from_secs(60));
+        assert!(store.toasts[0].closing.is_none());
+        store.toasts[0].pending = false;
+        store.toasts[0].resumed = Some(start + Duration::from_secs(60));
+        tick(&mut store, true, start + Duration::from_secs(65));
+        assert!(store.toasts[0].closing.is_some());
     }
 
     struct Host;

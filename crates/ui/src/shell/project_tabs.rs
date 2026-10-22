@@ -166,6 +166,15 @@ fn read_git_branch(path: &std::path::Path) -> Option<String> {
     parse_git_head(&std::fs::read_to_string(git_dir(path)?.join("HEAD")).ok()?)
 }
 
+fn reset_progress_message(completed: &[String], active: Option<&str>) -> String {
+    let mut lines = vec!["Returning to the default branch".to_string()];
+    lines.extend(completed.iter().map(|step| format!("✓ {step}")));
+    if let Some(step) = active {
+        lines.push(format!("• {step}…"));
+    }
+    lines.join("\n")
+}
+
 fn add_numstat_line(line: &[u8], additions: &mut u32, deletions: &mut u32) {
     let mut fields = line.splitn(3, |byte| *byte == b'\t');
     let adds = fields.next().and_then(|value| std::str::from_utf8(value).ok());
@@ -589,42 +598,105 @@ impl Shell {
         if let Some(target) = target {
             params.insert("targetDeviceId".into(), serde_json::Value::String(target));
         }
+        let toast = crate::toast::pending(
+            cx,
+            reset_progress_message(&[], Some("Starting return to the default branch")),
+        );
         self.project_tab_reset_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call(methods::RESET_REPO_TO_BASE, serde_json::Value::Object(params))
+                .subscribe(methods::RESET_REPO_TO_BASE, serde_json::Value::Object(params))
                 .await;
-            this.update(cx, |this, cx| {
-                this.project_tab_reset_task = None;
-                match result {
-                    Ok(value) => {
-                        let branch = value
+            let Ok(mut progress) = result else {
+                let error = result.err().expect("failed reset subscription");
+                this.update(cx, |this, cx| {
+                    this.project_tab_reset_task = None;
+                    crate::toast::finish(
+                        cx,
+                        toast,
+                        crate::toast::ToastKind::Error,
+                        format!("Could not start return to the default branch: {error}"),
+                    );
+                })
+                .ok();
+                return;
+            };
+            let mut completed = Vec::<String>::new();
+            let mut active: Option<String> = None;
+            let mut finished = false;
+            while let Some(event) = progress.recv().await {
+                let kind = event.get("kind").and_then(serde_json::Value::as_str);
+                match kind {
+                    Some("progress") => {
+                        let message = event
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Working")
+                            .to_string();
+                        if event
+                            .get("complete")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            completed.push(message);
+                            active = None;
+                        } else {
+                            active = Some(message);
+                        }
+                        let message = reset_progress_message(&completed, active.as_deref());
+                        this.update(cx, |_, cx| crate::toast::update(cx, toast, message))
+                            .ok();
+                    }
+                    Some("complete") => {
+                        let branch = event
                             .get("branch")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("default branch");
-                        let stashed = value
-                            .get("stashed")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                        let message = if stashed {
-                            format!("Returned to {branch}; uncommitted changes were stashed")
-                        } else {
-                            format!("Returned to {branch} and updated it")
-                        };
-                        this.show_notice(crate::toast::ToastKind::Success, message, cx);
-                        // Do not wait for the normal five-second poll to show
-                        // the branch and clean working tree in the tab.
-                        this.project_tab_branch_checked = None;
+                        completed.push(format!("Returned to {branch}"));
+                        let message = reset_progress_message(&completed, None);
+                        this.update(cx, |this, cx| {
+                            this.project_tab_reset_task = None;
+                            this.project_tab_branch_checked = None;
+                            crate::toast::finish(cx, toast, crate::toast::ToastKind::Success, message);
+                            cx.notify();
+                        })
+                        .ok();
+                        finished = true;
+                        break;
                     }
-                    Err(error) => this.show_notice(
-                        crate::toast::ToastKind::Error,
-                        format!("Could not return this workspace to its default branch: {error}"),
-                        cx,
-                    ),
+                    Some("error") => {
+                        let error = event
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Unknown error");
+                        let failed = active.as_deref().unwrap_or("Returning to the default branch");
+                        completed.push(format!("✕ {failed}: {error}"));
+                        let message = completed.join("\n");
+                        this.update(cx, |this, cx| {
+                            this.project_tab_reset_task = None;
+                            crate::toast::finish(cx, toast, crate::toast::ToastKind::Error, message);
+                            cx.notify();
+                        })
+                        .ok();
+                        finished = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                cx.notify();
-            })
-            .ok();
+            }
+            if !finished {
+                this.update(cx, |this, cx| {
+                    this.project_tab_reset_task = None;
+                    crate::toast::finish(
+                        cx,
+                        toast,
+                        crate::toast::ToastKind::Error,
+                        "The return-to-default-branch progress stream ended unexpectedly",
+                    );
+                    cx.notify();
+                })
+                .ok();
+            }
         }));
     }
 

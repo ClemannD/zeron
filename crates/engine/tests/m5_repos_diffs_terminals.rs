@@ -622,13 +622,17 @@ async fn reset_to_default_branch_stashes_changes_and_uses_remote_head() {
     std::fs::write(repo_dir.join("a.txt"), "locally changed\n").expect("tracked edit");
     std::fs::write(repo_dir.join("untracked.txt"), "keep me\n").expect("untracked edit");
 
+    let mut progress = Vec::new();
     let result = test_repos(&tmp.path().join("data"))
-        .reset_to_default_branch(&repo_dir)
+        .reset_to_default_branch_with_progress(&repo_dir, |step| progress.push(step))
         .await
         .expect("return to default branch");
 
     assert_eq!(result.branch, "trunk");
     assert!(result.stashed);
+    assert!(progress.iter().any(|step| step.message == "Stashed changes" && step.complete));
+    assert!(progress.iter().any(|step| step.message == "Fetched latest changes" && step.complete));
+    assert!(progress.iter().any(|step| step.message == "Rebased trunk" && step.complete));
     assert_eq!(git_stdout(&repo_dir, &["branch", "--show-current"]).await, "trunk");
     assert_eq!(
         git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await,

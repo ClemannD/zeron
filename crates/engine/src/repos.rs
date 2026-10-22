@@ -81,6 +81,30 @@ pub struct ResetToDefaultBranch {
     pub stashed: bool,
 }
 
+/// One completed or in-flight step while returning a checkout to its default
+/// branch. The UI uses these to keep a live operation toast honest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetProgress {
+    pub message: String,
+    pub complete: bool,
+}
+
+impl ResetProgress {
+    fn starting(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            complete: false,
+        }
+    }
+
+    fn completed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            complete: true,
+        }
+    }
+}
+
 /// Best-effort home directory (the `ListFolders` default and worktree root base).
 pub(crate) fn home_dir() -> PathBuf {
     let variables = if cfg!(windows) {
@@ -414,6 +438,17 @@ impl Repos {
         &self,
         repo_path: &Path,
     ) -> Result<ResetToDefaultBranch, EngineError> {
+        self.reset_to_default_branch_with_progress(repo_path, |_| {})
+            .await
+    }
+
+    /// Like [`Self::reset_to_default_branch`], reporting each real Git step
+    /// before and after it runs.
+    pub async fn reset_to_default_branch_with_progress(
+        &self,
+        repo_path: &Path,
+        mut emit: impl FnMut(ResetProgress),
+    ) -> Result<ResetToDefaultBranch, EngineError> {
         let current = self.current_branch(repo_path).await?;
         let remotes: Vec<String> = self
             .git(&["remote"], Some(repo_path))
@@ -437,19 +472,14 @@ impl Repos {
             ));
         }
 
-        let branch = if let Some(remote) = remote.as_deref() {
-            self.git(&["fetch", "--prune", remote], Some(repo_path))
-                .await?;
-            self.remote_default_branch(repo_path, remote).await?
-        } else {
-            self.local_default_branch(repo_path, &current).await?
-        };
-
+        emit(ResetProgress::starting("Checking for uncommitted changes"));
         let dirty = !self
             .git(&["status", "--porcelain=v1"], Some(repo_path))
             .await?
             .is_empty();
+        emit(ResetProgress::completed("Checked for uncommitted changes"));
         if dirty {
+            emit(ResetProgress::starting("Stashing changes"));
             self.git(
                 &[
                     "stash",
@@ -461,8 +491,29 @@ impl Repos {
                 Some(repo_path),
             )
             .await?;
+            emit(ResetProgress::completed("Stashed changes"));
         }
 
+        let branch = if let Some(remote) = remote.as_deref() {
+            emit(ResetProgress::starting("Fetching latest changes"));
+            self.git(&["fetch", "--prune", remote], Some(repo_path))
+                .await?;
+            emit(ResetProgress::completed("Fetched latest changes"));
+            emit(ResetProgress::starting("Finding the default branch"));
+            let branch = self.remote_default_branch(repo_path, remote).await?;
+            emit(ResetProgress::completed(format!(
+                "Using {branch} as the default branch"
+            )));
+            branch
+        } else {
+            let branch = self.local_default_branch(repo_path, &current).await?;
+            emit(ResetProgress::completed(format!(
+                "Using local branch {branch}"
+            )));
+            branch
+        };
+
+        emit(ResetProgress::starting(format!("Switching to {branch}")));
         let local_ref = format!("refs/heads/{branch}");
         let has_local = self
             .git_probe(
@@ -495,10 +546,15 @@ impl Repos {
                 "The default branch {branch} is not available locally"
             )));
         }
+        emit(ResetProgress::completed(format!("Switched to {branch}")));
 
         if let Some(remote) = remote.as_deref() {
+            emit(ResetProgress::starting(format!(
+                "Rebasing {branch} on the latest remote changes"
+            )));
             self.git(&["pull", "--rebase", remote, &branch], Some(repo_path))
                 .await?;
+            emit(ResetProgress::completed(format!("Rebased {branch}")));
         }
         Ok(ResetToDefaultBranch {
             branch,

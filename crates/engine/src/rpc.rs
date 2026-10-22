@@ -1613,6 +1613,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::RESET_REPO_TO_BASE
     )
 }
 
@@ -3235,18 +3236,41 @@ impl RpcService for EngineRpc {
             }
             methods::RESET_REPO_TO_BASE => {
                 let p: RepoPathParams = parse_params(params)?;
-                let result = self
-                    .repos
-                    .reset_to_default_branch(std::path::Path::new(&p.repo_path))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // A branch change alters every checkout snapshot. Publish it
-                // immediately instead of waiting for the filesystem watcher.
-                self.diff_sync.sync_all();
-                RpcReply::value(&serde_json::json!({
-                    "branch": result.branch,
-                    "stashed": result.stashed,
-                }))
+                let repos = self.repos.clone();
+                let diffs = self.diff_sync.clone();
+                let repo_path = std::path::PathBuf::from(p.repo_path);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+                tokio::spawn(async move {
+                    let result = repos
+                        .reset_to_default_branch_with_progress(&repo_path, |progress| {
+                            let _ = tx.send(serde_json::json!({
+                                "kind": "progress",
+                                "message": progress.message,
+                                "complete": progress.complete,
+                            }));
+                        })
+                        .await;
+                    match result {
+                        Ok(result) => {
+                            // A branch change alters every checkout snapshot.
+                            diffs.sync_all();
+                            let _ = tx.send(serde_json::json!({
+                                "kind": "complete",
+                                "branch": result.branch,
+                                "stashed": result.stashed,
+                            }));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(serde_json::json!({
+                                "kind": "error",
+                                "message": error.to_string(),
+                            }));
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(Box::pin(futures::stream::poll_fn(
+                    move |cx| rx.poll_recv(cx),
+                ))))
             }
             methods::GET_WORKTREE_SETTINGS => RpcReply::value(&self.repos.worktree_settings()),
             methods::SET_WORKTREE_SETTINGS => {
@@ -4371,6 +4395,7 @@ mod tests {
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
         assert!(forwardable(methods::RESET_REPO_TO_BASE));
+        assert!(is_stream_method(methods::RESET_REPO_TO_BASE));
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
