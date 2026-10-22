@@ -105,14 +105,17 @@ impl ChangeRequestTabState {
             Self::Failing
         } else if live.review_decision == ChangeRequestReviewDecision::ChangesRequested {
             Self::ChangesRequested
+        // GitHub can report mergeability before the current CI run finishes.
+        // A green tab in that gap is misleading: running checks remain the
+        // most useful thing to surface until they settle.
+        } else if live.ci.state == CiState::Pending {
+            Self::Building
         } else if live.mergeability == ChangeRequestMergeability::Mergeable {
             if live.review_decision == ChangeRequestReviewDecision::ReviewRequired {
                 Self::ReadyAwaitingApprovals
             } else {
                 Self::Ready
             }
-        } else if live.ci.state == CiState::Pending {
-            Self::Building
         } else {
             Self::Open
         }
@@ -711,9 +714,8 @@ mod tests {
             tab_state(open, |l| l.review_decision = Review::ChangesRequested),
             ChangesRequested
         );
-        // Dev Island treats GitHub's merge-ready state as more useful than a
-        // concurrent pending-check signal.
-        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Pending), Ready);
+        // Mergeability may be cached while a newer CI run is still pending.
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Pending), Building);
     }
 
     #[test]
