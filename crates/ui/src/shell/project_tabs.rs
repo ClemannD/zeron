@@ -26,7 +26,7 @@ use crate::state::NO_PROJECT_TAB;
 
 /// Fixed project-tab width. Uniform, as drag reordering assumes; tabs sit
 /// edge to edge (separators are drawn inside), so a slot is one tab.
-const PROJECT_TAB_WIDTH: f32 = 240.0;
+const PROJECT_TAB_WIDTH: f32 = 312.0;
 const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
 /// The header must reserve the tab height plus the top gutter. Growing only
 /// the tab would clip its first row inside the scrolling strip.

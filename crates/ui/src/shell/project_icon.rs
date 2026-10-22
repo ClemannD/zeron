@@ -303,6 +303,9 @@ impl Render for ProjectIcon {
         match &self.media {
             Some(media) => gpui::img(media.image.clone())
                 .size_full()
+                // App artwork often has square corners; match the subtle rounding
+                // of the monogram fallback.
+                .rounded(px(3.0))
                 .object_fit(gpui::ObjectFit::Contain)
                 .into_any_element(),
             None => monogram(&self.name, &self.seed, false, Theme::of(cx)),
