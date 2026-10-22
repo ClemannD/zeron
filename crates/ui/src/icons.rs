@@ -108,6 +108,18 @@ icon_assets![
     (PULL_REQUEST_MERGED, "pull-request-merged"),
     (PULL_REQUEST_CLOSED, "pull-request-closed"),
     (PULL_REQUEST_QUEUED, "pull-request-queued"),
+    // Project-tab PR-status glyphs mirror Dev Island's SF Symbol vocabulary.
+    // They are bundled SVGs so the desktop app keeps that visual language on
+    // every platform rather than depending on macOS system symbols.
+    (PULL_REQUEST_STATUS_DRAFT, "pull-request-status-draft"),
+    (PULL_REQUEST_STATUS_BUILDING, "pull-request-status-building"),
+    (PULL_REQUEST_STATUS_CONFLICTS, "pull-request-status-conflicts"),
+    (PULL_REQUEST_STATUS_FAILING, "pull-request-status-failing"),
+    (PULL_REQUEST_STATUS_CHANGES_REQUESTED, "pull-request-status-changes-requested"),
+    (PULL_REQUEST_STATUS_QUEUED, "pull-request-status-queued"),
+    (PULL_REQUEST_STATUS_READY_AWAITING_APPROVALS, "pull-request-status-ready-awaiting-approvals"),
+    (PULL_REQUEST_STATUS_READY, "pull-request-status-ready"),
+    (PULL_REQUEST_STATUS_OPEN, "pull-request-status-open"),
     (CHECK_CIRCLE, "check-circle"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),

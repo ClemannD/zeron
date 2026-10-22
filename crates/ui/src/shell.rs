@@ -2079,6 +2079,8 @@ pub struct Shell {
     /// all-projects menu at its end ([`project_tabs`]).
     project_tab_scroll: gpui::ScrollHandle,
     project_tab_drag: Option<RightTabDragState>,
+    /// The titlebar project's delayed, detail-rich hover card.
+    project_tab_hover_card: project_tabs::ProjectTabHoverCard,
     project_tabs_menu: popover::Popup<()>,
     /// A tab's right-click menu: the tab's key and where it opened.
     project_tab_menu: popover::Popup<(String, Point<Pixels>)>,
@@ -2674,6 +2676,7 @@ impl Shell {
             right_plus: popover::Popup::default(),
             project_tab_scroll: gpui::ScrollHandle::new(),
             project_tab_drag: None,
+            project_tab_hover_card: Default::default(),
             project_tabs_menu: popover::Popup::default(),
             project_tab_menu: popover::Popup::default(),
             project_tab_branch_task: None,

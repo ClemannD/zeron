@@ -84,12 +84,28 @@ if [[ "${ZERON_FORK_BUILD_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
-# The headed app (any copy, any path) holds the data directory; swapping the
-# bundle under a running app is not safe. Zeron Dev (target/macos-dev) runs
-# against its own data directory and does not block the install.
-if pgrep -f -x "$INSTALLED/Contents/MacOS/zeron" >/dev/null 2>&1 ||
-  pgrep -f -x "$INSTALLED/Contents/MacOS/zeron .*" >/dev/null 2>&1; then
-  echo "Zeron is running. Quit it (⌘Q) and rerun this script." >&2
+# Only the headed app must be stopped before swapping the bundle. The managed
+# engine intentionally outlives its window so sessions can continue, and it
+# knows how to restart from the installed path after an update. Likewise,
+# `zeron mcp` is a stateless helper launched by Codex.
+#
+# `pgrep -f "$BIN .*"` used to catch both of those long-lived processes and
+# made a local Codex MCP session—or the intentional background engine—look
+# like a running Zeron app after the user quit its window.
+BIN="$INSTALLED/Contents/MacOS/zeron"
+BLOCKERS=()
+while IFS=$'\t' read -r pid command; do
+  case "$command" in
+    "$BIN")
+      BLOCKERS+=("$pid  $command")
+      ;;
+  esac
+done < <(ps -axo pid=,command= | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+(.*)$/\1\t\2/')
+
+if (( ${#BLOCKERS[@]} > 0 )); then
+  echo "Zeron is still running:" >&2
+  printf '  %s\n' "${BLOCKERS[@]}" >&2
+  echo "Quit Zeron (⌘Q) and rerun this script." >&2
   exit 1
 fi
 

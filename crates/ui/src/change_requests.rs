@@ -61,20 +61,23 @@ impl ChangeRequestBadgeModel {
 
 /// What a project tab says about its branch's pull request: one glyph in one
 /// color. The first state that applies wins, from "done" through "blocked" to
-/// "waiting"; unknown CI or mergeability never reads as ready.
+/// "waiting"; a provider's explicit mergeability is the readiness signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChangeRequestTabState {
     Draft,
-    /// Checks still running.
-    Building,
-    /// Failing checks, merge conflicts or requested changes.
-    Broken,
     /// Waiting in the merge queue, or set to merge itself once ready.
     Queued,
+    Conflicts,
+    Failing,
+    ChangesRequested,
     Merged,
     Closed,
-    /// Green, mergeable and not waiting on a review.
+    /// Mergeable, but still waiting for required reviews.
+    ReadyAwaitingApprovals,
+    /// Green, mergeable and fully approved.
     Ready,
+    /// Checks still running.
+    Building,
     /// Open, but something (a review, CI data) is not settled yet.
     Open,
 }
@@ -91,22 +94,25 @@ impl ChangeRequestTabState {
         let live = &summary.live;
         if live.is_draft {
             Self::Draft
+        // This matches Dev Island's status ordering. A PR in the merge queue
+        // is already progressing, while merge conflicts and failures explain
+        // the next action more clearly than a pending check does.
         } else if live.in_merge_queue {
             Self::Queued
-        } else if live.ci.state == CiState::Failed
-            || live.mergeability == ChangeRequestMergeability::Conflicting
-            || live.review_decision == ChangeRequestReviewDecision::ChangesRequested
-        {
-            Self::Broken
+        } else if live.mergeability == ChangeRequestMergeability::Conflicting {
+            Self::Conflicts
+        } else if live.ci.state == CiState::Failed {
+            Self::Failing
+        } else if live.review_decision == ChangeRequestReviewDecision::ChangesRequested {
+            Self::ChangesRequested
+        } else if live.mergeability == ChangeRequestMergeability::Mergeable {
+            if live.review_decision == ChangeRequestReviewDecision::ReviewRequired {
+                Self::ReadyAwaitingApprovals
+            } else {
+                Self::Ready
+            }
         } else if live.ci.state == CiState::Pending {
             Self::Building
-        } else if matches!(
-            live.ci.state,
-            CiState::Passed | CiState::Skipped | CiState::NoChecks
-        ) && live.mergeability == ChangeRequestMergeability::Mergeable
-            && live.review_decision != ChangeRequestReviewDecision::ReviewRequired
-        {
-            Self::Ready
         } else {
             Self::Open
         }
@@ -115,14 +121,19 @@ impl ChangeRequestTabState {
     pub fn icon(self) -> &'static str {
         use crate::icons;
         match self {
-            Self::Draft => icons::PULL_REQUEST_DRAFT,
-            Self::Building => icons::CLOCK_CIRCLE,
-            Self::Broken => icons::CLOSE_CIRCLE,
-            Self::Queued => icons::PULL_REQUEST_QUEUED,
+            // Keep project tabs visually aligned with Dev Island's PR-state
+            // icons. These are local SVG equivalents of its SF Symbols.
+            Self::Draft => icons::PULL_REQUEST_STATUS_DRAFT,
+            Self::Building => icons::PULL_REQUEST_STATUS_BUILDING,
+            Self::Conflicts => icons::PULL_REQUEST_STATUS_CONFLICTS,
+            Self::Failing => icons::PULL_REQUEST_STATUS_FAILING,
+            Self::ChangesRequested => icons::PULL_REQUEST_STATUS_CHANGES_REQUESTED,
+            Self::Queued => icons::PULL_REQUEST_STATUS_QUEUED,
             Self::Merged => icons::PULL_REQUEST_MERGED,
             Self::Closed => icons::PULL_REQUEST_CLOSED,
-            Self::Ready => icons::CHECK_CIRCLE,
-            Self::Open => icons::PULL_REQUEST,
+            Self::ReadyAwaitingApprovals => icons::PULL_REQUEST_STATUS_READY_AWAITING_APPROVALS,
+            Self::Ready => icons::PULL_REQUEST_STATUS_READY,
+            Self::Open => icons::PULL_REQUEST_STATUS_OPEN,
         }
     }
 
@@ -130,28 +141,25 @@ impl ChangeRequestTabState {
         match self {
             Self::Draft | Self::Open => theme.text_muted,
             Self::Building => theme.warning,
-            Self::Broken | Self::Closed => theme.danger,
+            Self::Conflicts | Self::Failing | Self::Closed => theme.danger,
+            Self::ChangesRequested => theme.warning,
             Self::Queued => theme.accent,
             Self::Merged => theme.code_text,
-            Self::Ready => theme.success,
+            Self::ReadyAwaitingApprovals | Self::Ready => theme.success,
         }
     }
 
-    pub fn label(self, summary: &ChangeRequestSummary) -> &'static str {
-        use zeron_proto::change_request_assessment::CiState;
+    pub fn label(self, _summary: &ChangeRequestSummary) -> &'static str {
         match self {
             Self::Draft => "Draft",
             Self::Building => "Checks running",
-            Self::Broken if summary.live.ci.state == CiState::Failed => "Checks failing",
-            Self::Broken
-                if summary.live.mergeability == zeron_proto::ChangeRequestMergeability::Conflicting =>
-            {
-                "Merge conflicts"
-            }
-            Self::Broken => "Changes requested",
+            Self::Conflicts => "Merge conflicts",
+            Self::Failing => "Checks failing",
+            Self::ChangesRequested => "Changes requested",
             Self::Queued => "In merge queue",
             Self::Merged => "Merged",
             Self::Closed => "Closed",
+            Self::ReadyAwaitingApprovals => "Ready to merge — approvals outstanding",
             Self::Ready => "Ready to merge",
             Self::Open => "Open",
         }
@@ -693,21 +701,23 @@ mod tests {
             }),
             Queued
         );
-        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Failed), Broken);
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Failed), Failing);
         assert_eq!(
             tab_state(open, |l| l.mergeability =
                 zeron_proto::ChangeRequestMergeability::Conflicting),
-            Broken
+            Conflicts
         );
         assert_eq!(
             tab_state(open, |l| l.review_decision = Review::ChangesRequested),
-            Broken
+            ChangesRequested
         );
-        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Pending), Building);
+        // Dev Island treats GitHub's merge-ready state as more useful than a
+        // concurrent pending-check signal.
+        assert_eq!(tab_state(open, |l| l.ci.state = CiState::Pending), Ready);
     }
 
     #[test]
-    fn unknown_or_unreviewed_never_reads_as_ready() {
+    fn unknown_mergeability_stays_open_but_required_reviews_get_their_own_state() {
         use ChangeRequestTabState::*;
         use zeron_proto::ChangeRequestReviewDecision as Review;
         use zeron_proto::change_request_assessment::CiState;
@@ -720,7 +730,7 @@ mod tests {
         );
         assert_eq!(
             tab_state(open, |l| l.review_decision = Review::ReviewRequired),
-            Open
+            ReadyAwaitingApprovals
         );
         assert_eq!(tab_state(open, |l| l.review_decision = Review::Approved), Ready);
     }

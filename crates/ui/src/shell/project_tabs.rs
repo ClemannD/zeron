@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::process::Command;
+use std::time::Instant;
 
 use super::*;
 use crate::settings::ProjectTabMeta;
@@ -39,6 +40,71 @@ const PROJECT_TAB_RADIUS: f32 = 8.0;
 const PROJECT_TAB_CHIP_INSET: f32 = 5.0;
 /// How often tab folders' checked-out branches are re-read.
 const PROJECT_TAB_BRANCH_POLL: Duration = Duration::from_secs(5);
+const PROJECT_TAB_HOVER_DWELL: Duration = Duration::from_millis(550);
+const PROJECT_TAB_HOVER_WARM: Duration = Duration::from_millis(400);
+const PROJECT_TAB_HOVER_WIDTH: f32 = 320.0;
+
+/// Dwell state for the project-tab card. It deliberately follows the session
+/// hover-card mechanics: wait while sweeping across tabs, then stay warm when
+/// comparing neighbouring projects.
+#[derive(Default)]
+pub(super) struct ProjectTabHoverCard {
+    shown: Option<String>,
+    pending: Option<(String, Task<()>)>,
+    hidden_at: Option<Instant>,
+}
+
+impl ProjectTabHoverCard {
+    fn shown(&self) -> Option<&str> {
+        self.shown.as_deref()
+    }
+
+    fn enter(&mut self, key: &str, now: Instant) -> bool {
+        if self.shown() == Some(key) {
+            return false;
+        }
+        let warm = self.shown.is_some()
+            || self
+                .hidden_at
+                .is_some_and(|hidden| now.duration_since(hidden) < PROJECT_TAB_HOVER_WARM);
+        if warm {
+            self.pending = None;
+            self.shown = Some(key.to_owned());
+        }
+        warm
+    }
+
+    fn leave(&mut self, key: &str, now: Instant) -> bool {
+        if self.pending.as_ref().is_some_and(|(pending, _)| pending == key) {
+            self.pending = None;
+        }
+        if self.shown() != Some(key) {
+            return false;
+        }
+        self.shown = None;
+        self.hidden_at = Some(now);
+        true
+    }
+
+    fn settle(&mut self, key: &str) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|(pending, _)| pending != key)
+        {
+            return false;
+        }
+        self.pending = None;
+        self.shown = Some(key.to_owned());
+        true
+    }
+
+    pub(super) fn dismiss(&mut self) -> bool {
+        self.pending = None;
+        self.hidden_at = None;
+        self.shown.take().is_some()
+    }
+}
 
 /// Drag payload for reordering project tabs.
 #[derive(Clone)]
@@ -286,6 +352,218 @@ pub(super) struct ProjectTabBar {
 }
 
 impl Shell {
+    fn hover_project_tab_card(&mut self, key: &str, hovered: bool, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if !hovered {
+            if self.project_tab_hover_card.leave(key, now) {
+                cx.notify();
+            }
+            return;
+        }
+        if cx.has_active_drag() || self.project_tab_menu.is_open() {
+            return;
+        }
+        if self.project_tab_hover_card.enter(key, now) {
+            cx.notify();
+            return;
+        }
+        if self.project_tab_hover_card.shown() == Some(key) {
+            return;
+        }
+        let key = key.to_owned();
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                cx.background_executor().timer(PROJECT_TAB_HOVER_DWELL).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.project_tab_hover_card.settle(&key) {
+                        cx.notify();
+                    }
+                });
+            }
+        });
+        self.project_tab_hover_card.pending = Some((key, task));
+        cx.notify();
+    }
+
+    fn dismiss_project_tab_card(&mut self, cx: &mut Context<Self>) {
+        if self.project_tab_hover_card.dismiss() {
+            cx.notify();
+        }
+    }
+
+    /// Detail card for a titlebar project tab. The tab already carries the
+    /// essentials at a glance; this is the quiet place for their names and
+    /// the PR state that the small icon alone cannot explain.
+    #[allow(clippy::too_many_arguments)]
+    fn render_project_tab_hover_card(
+        &self,
+        key: &str,
+        title: SharedString,
+        detail: SharedString,
+        branch: Option<SharedString>,
+        pull_request: Option<zeron_proto::ChangeRequestSummary>,
+        changes: Option<(u32, u32)>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.project_tab_hover_card.shown() != Some(key) {
+            return None;
+        }
+
+        let theme = Theme::of(cx).for_popup();
+        let muted = theme.text_muted;
+        let meta_row = |glyph: AnyElement, label: SharedString| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
+                .min_w_0()
+                .h(px(18.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(glyph),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(label))
+        };
+        let quiet_glyph = |path: &'static str| {
+            icon(path)
+                .size(px(13.0))
+                .text_color(muted.opacity(0.8))
+                .into_any_element()
+        };
+
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .line_clamp(2)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(15.0))
+                    .text_color(muted)
+                    .line_clamp(2)
+                    .child(detail),
+            );
+
+        let pr: AnyElement = pull_request
+            .map(|summary| {
+                let state = crate::change_requests::ChangeRequestTabState::from_summary(&summary);
+                let color = state.color(&theme);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(meta_row(
+                        icon(state.icon())
+                            .size(px(13.0))
+                            .text_color(color)
+                            .into_any_element(),
+                        format!("#{} · {}", summary.number, state.label(&summary)).into(),
+                    ))
+                    .child(
+                        div()
+                            .ml(px(21.0))
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .line_height(px(15.0))
+                            .text_color(muted)
+                            .child(summary.title.replace(['\r', '\n'], " ")),
+                    )
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                meta_row(
+                    quiet_glyph(icons::PULL_REQUEST),
+                    "No pull request for this branch".into(),
+                )
+                .text_color(muted)
+                .into_any_element()
+            });
+        let changes = changes.filter(|(adds, dels)| adds + dels > 0).map(|(adds, dels)| {
+            meta_row(
+                quiet_glyph(icons::FILE_TREE),
+                format!("+{adds}  −{dels}").into(),
+            )
+            .font_family(theme.font_mono.clone())
+            .text_color(muted)
+        });
+        let card = div()
+            .w(px(PROJECT_TAB_HOVER_WIDTH))
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .rounded(px(popover::CARD_RADIUS))
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .bg(popover::surface_bg(&theme))
+            .when(!theme.is_frost(), |card| card.shadow_lg())
+            .child(header)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(muted)
+                    .children(branch.map(|branch| meta_row(quiet_glyph(icons::GIT_BRANCH), branch)))
+                    .child(pr)
+                    .children(changes),
+            );
+        let card = div()
+            .debug_selector({
+                let key = key.to_owned();
+                move || format!("project-tab-hover-card-{key}")
+            })
+            .child(crate::frost::frosted(
+                popover::CARD_RADIUS,
+                crate::frost::MENU_BLUR,
+                card,
+            ));
+        let card = if self.reduced_motion {
+            card.into_any_element()
+        } else {
+            card.with_animation(
+                SharedString::from(format!("project-tab-hover-card-{key}")),
+                motion::MENU_IN.animation(),
+                |el, t| el.relative().opacity(t).top(px(-4.0 * (1.0 - t))),
+            )
+            .into_any_element()
+        };
+        Some(
+            div()
+                .absolute()
+                .top_full()
+                .left_0()
+                .child(
+                    gpui::deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::TopLeft)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(div().mt(px(6.0)).child(card)),
+                    )
+                    .with_priority(1),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The tab key a session lives under.
     pub(super) fn chat_project_tab(chat: &zeron_proto::Chat) -> String {
         chat.space_id
@@ -1346,7 +1624,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(branch_size))
                     .line_height(px(12.0))
                     .text_color(branch_text_color)
-                    .children(branch),
+                    .children(branch.clone()),
             )
             // The pull request is one glyph at the row's end.
             .children(status.zip(status_color).map(|(status, color)| {
@@ -1383,19 +1661,19 @@ impl Shell {
                             .child(format!("−{dels}")),
                     )
             });
-        let tooltip_detail = match (&pull_request, status) {
-            (Some(summary), Some(status)) => SharedString::from(format!(
-                "{detail}\nPR #{} · {}\n{}",
-                summary.number,
-                status.label(summary),
-                summary.title.replace(['\r', '\n'], " ")
-            )),
-            _ => detail,
-        };
-
         let menu_key = key.clone();
         let middle_key = key.clone();
         let click_key = key.clone();
+        let hover_key = key.clone();
+        let hover_card = self.render_project_tab_hover_card(
+            &key,
+            title.clone(),
+            detail,
+            branch.clone(),
+            pull_request.clone(),
+            changes,
+            cx,
+        );
         div()
             .id(("project-tab", ix))
             .debug_selector(move || format!("project-tab-{ix}"))
@@ -1419,7 +1697,16 @@ impl Shell {
             // Keep the titlebar's drag region from claiming the tab, while
             // wheel events still scroll the strip (see `surface_chrome::tab_chip`).
             .block_mouse_except_scroll()
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.hover_project_tab_card(&hover_key, *hovered, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.prevent_default();
+                    this.dismiss_project_tab_card(cx);
+                }),
+            )
             .when(!active, |tab| {
                 tab.child(
                     div()
@@ -1478,15 +1765,10 @@ impl Shell {
                     )
                     .child(branch_row),
             )
-            .tooltip(move |_, cx| {
-                cx.new(|_| SurfaceTabTooltip {
-                    text: tooltip_detail.clone(),
-                })
-                .into()
-            })
-            .tooltip_show_delay(Duration::from_millis(500))
+            .children(hover_card)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
+                this.dismiss_project_tab_card(cx);
                 this.activate_project_tab(click_key.clone(), cx);
             }))
             // Right-click opens the tab's menu.
@@ -1495,6 +1777,7 @@ impl Shell {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
+                    this.dismiss_project_tab_card(cx);
                     this.open_project_tab_menu(menu_key.clone(), event.position, cx);
                 }),
             )
@@ -1502,6 +1785,7 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, _, _, cx| {
+                    this.dismiss_project_tab_card(cx);
                     this.close_project_tab(middle_key.clone(), cx);
                 }),
             )
@@ -1513,6 +1797,8 @@ impl Shell {
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();
                     cx.stop_propagation();
+                    // A drag starts from the tab, so its detail card should
+                    // not remain over the drop targets.
                     cx.new(|_| SurfaceTabGhost { title })
                 },
             )

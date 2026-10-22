@@ -114,13 +114,20 @@ fn subdirectories(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// The largest PNG of an Xcode app icon set within two levels of `root`
-/// (`MyApp/Assets.xcassets/AppIcon.appiconset/*.png`).
+/// The largest PNG of an Xcode app icon set within two levels of `root`, or
+/// within the conventional `apps/<platform>/<app>` monorepo layout.
 fn xcode_app_icon(root: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut parents = vec![root.to_path_buf()];
     parents.extend(subdirectories(root));
     let level_two: Vec<_> = parents.iter().skip(1).flat_map(|dir| subdirectories(dir)).collect();
     parents.extend(level_two);
+    // Keep the search bounded for ordinary repositories, but include iOS (or
+    // other platform) apps living at `apps/<platform>/<app>`.
+    parents.extend(
+        subdirectories(&root.join("apps"))
+            .into_iter()
+            .flat_map(|platform| subdirectories(&platform)),
+    );
     parents.into_iter().find_map(|dir| {
         let set = dir.join("Assets.xcassets/AppIcon.appiconset");
         std::fs::read_dir(&set)
@@ -610,7 +617,9 @@ mod tests {
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 5.0);
         // The largest image of an Xcode app icon set.
         let temp = tempfile::tempdir().unwrap();
-        let set = temp.path().join("ios/App/Assets.xcassets/AppIcon.appiconset");
+        let set = temp
+            .path()
+            .join("apps/ios/App/Assets.xcassets/AppIcon.appiconset");
         std::fs::create_dir_all(&set).unwrap();
         png(&set.join("small.png"), 2);
         png(&set.join("large.png"), 512);
