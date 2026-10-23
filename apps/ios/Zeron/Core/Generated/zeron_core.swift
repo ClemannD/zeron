@@ -13539,6 +13539,14 @@ public enum ColorRole: Equatable, Hashable {
     case diffAddBar
     case diffDelBar
     case diffHunk
+    /**
+     * An error card's fill: a soft red wash.
+     */
+    case dangerWash
+    /**
+     * An error card's text and icon: a lighter red that reads on the wash.
+     */
+    case dangerSoft
 
 
 
@@ -13651,6 +13659,10 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         case 45: return .diffDelBar
         
         case 46: return .diffHunk
+        
+        case 47: return .dangerWash
+        
+        case 48: return .dangerSoft
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -13842,6 +13854,14 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         
         case .diffHunk:
             writeInt(&buf, Int32(46))
+        
+        
+        case .dangerWash:
+            writeInt(&buf, Int32(47))
+        
+        
+        case .dangerSoft:
+            writeInt(&buf, Int32(48))
         
         }
     }
@@ -15515,6 +15535,7 @@ public enum RowKind: Equatable, Hashable {
     case user
     case tools
     case chip
+    case notice
     case image
     case working
     case visual
@@ -15547,11 +15568,13 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case 4: return .chip
         
-        case 5: return .image
+        case 5: return .notice
         
-        case 6: return .working
+        case 6: return .image
         
-        case 7: return .visual
+        case 7: return .working
+        
+        case 8: return .visual
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -15577,16 +15600,20 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
         
         
-        case .image:
+        case .notice:
             writeInt(&buf, Int32(5))
         
         
-        case .working:
+        case .image:
             writeInt(&buf, Int32(6))
         
         
-        case .visual:
+        case .working:
             writeInt(&buf, Int32(7))
+        
+        
+        case .visual:
+            writeInt(&buf, Int32(8))
         
         }
     }
@@ -17131,6 +17158,12 @@ public enum WidgetKind: Equatable, Hashable {
      */
     case visual(id: String
     )
+    /**
+     * A button the app acts on: `action` names what (`sign-in`), `label`
+     * is its title (an error card's "Log in").
+     */
+    case action(action: String, label: String
+    )
 
 
 
@@ -17186,6 +17219,9 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 12: return .shimmer
         
         case 13: return .visual(id: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 14: return .action(action: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -17265,6 +17301,12 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case let .visual(id):
             writeInt(&buf, Int32(13))
             FfiConverterString.write(id, into: &buf)
+            
+        
+        case let .action(action,label):
+            writeInt(&buf, Int32(14))
+            FfiConverterString.write(action, into: &buf)
+            FfiConverterString.write(label, into: &buf)
             
         }
     }
