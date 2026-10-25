@@ -2302,6 +2302,24 @@ pub struct AuthRpc {
     auth: Auth,
 }
 
+/// Incoming relay calls must not expose the local updater's access token.
+/// The outgoing forwarding allowlist does not guard direct peer requests.
+pub(crate) struct PeerRpc {
+    pub inner: std::sync::Arc<dyn RpcService>,
+}
+
+#[async_trait]
+impl RpcService for PeerRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::RELEASE_ACCESS_TOKEN {
+            return Err(RpcError::Failed(
+                "release authentication is available only over local IPC".into(),
+            ));
+        }
+        self.inner.handle(method, params).await
+    }
+}
+
 impl AuthRpc {
     pub fn new(auth: Auth) -> Self {
         Self { auth }
@@ -2311,6 +2329,7 @@ impl AuthRpc {
         matches!(
             method,
             methods::AUTH_STATUS
+                | methods::RELEASE_ACCESS_TOKEN
                 | methods::SIGN_IN
                 | methods::SIGN_IN_HEADLESS
                 | methods::COMPLETE_SIGN_IN
@@ -2327,6 +2346,17 @@ impl RpcService for AuthRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         match method {
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
+            methods::RELEASE_ACCESS_TOKEN => {
+                if !zeron_update::fork::enabled() {
+                    return Err(RpcError::Failed("private updates are not enabled".into()));
+                }
+                let token = self
+                    .auth
+                    .release_access_token(params["refresh"].as_bool().unwrap_or(false))
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&serde_json::json!({"accessToken": token}))
+            }
             methods::SIGN_IN => {
                 let url = self
                     .auth
@@ -5165,6 +5195,7 @@ mod tests {
 
     #[test]
     fn local_device_is_not_forwardable() {
+        assert!(!forwardable(methods::RELEASE_ACCESS_TOKEN));
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
@@ -5213,6 +5244,36 @@ mod tests {
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
+    }
+
+    #[tokio::test]
+    async fn remote_peers_cannot_request_release_credentials() {
+        struct Inner;
+        #[async_trait]
+        impl RpcService for Inner {
+            async fn handle(
+                &self,
+                _method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, RpcError> {
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+        }
+        let service = PeerRpc {
+            inner: std::sync::Arc::new(Inner),
+        };
+        assert!(
+            service
+                .handle(methods::RELEASE_ACCESS_TOKEN, serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+            .handle(methods::AUTH_STATUS, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

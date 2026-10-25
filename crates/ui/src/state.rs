@@ -1931,7 +1931,12 @@ impl AppState {
             .iter()
             .rev()
             .find(|entry| entry.role == user)
-            .or_else(|| self.transcript.iter().rev().find(|entry| entry.role == user))?;
+            .or_else(|| {
+                self.transcript
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.role == user)
+            })?;
         let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
         let setup = self
             .pending_echoes()
@@ -3555,6 +3560,29 @@ impl AppState {
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        if zeron_update::fork::enabled() {
+            let release_engine = handle.clone();
+            zeron_update::fork::set_token_provider(Arc::new(move |refresh| {
+                let engine = release_engine.clone();
+                Box::pin(async move {
+                    let value = engine.client()
+                        .call(
+                            methods::RELEASE_ACCESS_TOKEN,
+                            serde_json::json!({"refresh": refresh}),
+                        )
+                        .await?;
+                    value["accessToken"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Sign in to Zeron to download private updates")
+                        })
+                })
+            }));
+            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                update.update(cx, |update, _| update.credentials_changed());
+            }
+        }
         // The attachment notification precedes the first connectivity frame.
         // Make that bootstrap gap explicit so the shell resets its alert
         // baseline instead of comparing the new runtime with the old one.
@@ -4359,6 +4387,11 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
+                    if changed && method == methods::AUTH_STATUS && zeron_update::fork::enabled() {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, _| update.credentials_changed());
+                        }
+                    }
                     let linked = state.apply_pending_deep_link(cx);
                     if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
@@ -5912,13 +5945,21 @@ mod tests {
         // session row says Working yet.
         s.apply_transcript(vec![
             entry("m1", user, None),
-            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Streaming)),
+            entry(
+                "m1.cloud-setup",
+                assistant,
+                Some(zeron_doc::MessageStatus::Streaming),
+            ),
         ]);
         assert_eq!(s.indicator_for("c", now), Indicator::Working);
         // Finished: the session row speaks for itself again.
         s.apply_transcript(vec![
             entry("m1", user, None),
-            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Complete)),
+            entry(
+                "m1.cloud-setup",
+                assistant,
+                Some(zeron_doc::MessageStatus::Complete),
+            ),
         ]);
         assert_ne!(s.indicator_for("c", now), Indicator::Working);
     }

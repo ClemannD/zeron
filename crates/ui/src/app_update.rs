@@ -173,6 +173,10 @@ impl AppUpdate {
         self.checker.poke();
     }
 
+    pub fn credentials_changed(&self) {
+        self.checker.check_now();
+    }
+
     fn apply_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
         let succeeded = status.error.is_none();
         self.status = Some(status);

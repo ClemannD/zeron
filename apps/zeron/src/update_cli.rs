@@ -9,6 +9,34 @@ use zeron_update::{InstallKind, current_version, version_newer};
 /// `--check` prints the verdict and exits (nonzero when an update is available,
 /// so scripts can gate on it).
 pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
+    if zeron_update::fork::enabled() {
+        let config = super::engine_config_from_env();
+        let token = zeron_rpc::ipc_auth::client_tokens(Some(&config.data_dir))
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Open Zeron and sign in before checking for private updates")
+            })?;
+        let client =
+            zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{}", config.ipc_port), Some(&token))
+                .await?;
+        let client = std::sync::Arc::new(client);
+        zeron_update::fork::set_token_provider(std::sync::Arc::new(move |refresh| {
+            let client = client.clone();
+            Box::pin(async move {
+                let value = client
+                    .call(
+                        zeron_rpc::methods::RELEASE_ACCESS_TOKEN,
+                        serde_json::json!({"refresh": refresh}),
+                    )
+                    .await?;
+                value["accessToken"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("Sign in to Zeron to download private updates"))
+            })
+        }));
+    }
     let manifest = zeron_update::fetch_latest(edge_url).await?;
     let current = current_version();
     if !version_newer(&manifest.version, current) {

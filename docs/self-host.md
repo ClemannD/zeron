@@ -1,5 +1,9 @@
 # Self-hosted control plane (zeron.clemann.app)
 
+Private Mac app releases use a separate authenticated R2 feed. See
+[Mac private updates](macos-private-updates.md) for publishing and bootstrap
+installation; these artifacts never go in the public `zeron-releases` bucket.
+
 This fork runs its own edge and vault on the clemann.app Cloudflare account
 (`27f9550dae9ea2ae400dff7b77cc052f`), with the edge as its own identity
 provider (`AUTH_MODE=self`, `edge/src/self-auth/`): passkey sign-in instead of
@@ -54,8 +58,10 @@ install` captures them).
   `POST /admin/auth/revoke {"userId": "..."}` (access tokens still live up to
   10 minutes).
 
-Mobile apps hardcode `edge.zeron.sh` and WorkOS (`crates/client/src/auth.rs`)
-and still talk to upstream.
+iPhone fork archives use `apps/ios/Fork.clemann.xcconfig` to set this edge,
+the auth API base, and `zeron-self` in the signed bundle. See
+[the TestFlight setup](ios-testflight.md). Normal iOS builds and Android
+still use upstream's defaults (`crates/client/src/auth.rs`).
 
 ## Upstream merges
 

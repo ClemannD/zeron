@@ -14,7 +14,7 @@ use zeron_app::{edge_url_from_env, engine_config_from_env, paths, workos_client_
 #[derive(Parser)]
 #[command(
     name = "zeron",
-    version,
+    version = zeron_update::current_version(),
     about = "Multi-device controller for coding agents"
 )]
 struct Cli {

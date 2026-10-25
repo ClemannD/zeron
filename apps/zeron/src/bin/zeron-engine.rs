@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
             zeron_app::run_mcp()
         }
         Some("--version" | "-V") => {
-            println!("zeron-engine {}", env!("CARGO_PKG_VERSION"));
+            println!("zeron-engine {}", zeron_update::current_version());
             Ok(())
         }
         _ => zeron_app::background::run(),

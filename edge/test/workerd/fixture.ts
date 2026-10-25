@@ -13,6 +13,7 @@ import { deviceParam, forward } from "../../src/forward";
 import { runnerChatGate, runnerDeviceGate } from "../../src/runner-access";
 import { previewRoute } from "../../src/preview-route";
 import { releaseRoute } from "../../src/releases";
+import { privateReleaseRoute } from "../../src/private-releases";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
 export { DeviceRoom } from "../../src/device-room";
@@ -120,6 +121,8 @@ export default {
     if (runner) return runner;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
+    const privateRelease = await privateReleaseRoute(request, env, auth, url);
+    if (privateRelease) return privateRelease;
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
     const cloud = await handleCloudRoute(request, env, auth, url);

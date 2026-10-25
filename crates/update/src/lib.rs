@@ -26,6 +26,8 @@
 //! on "Restart to update" or when the app next quits, so an app nobody
 //! restarts deliberately still lands on the new version at its next launch.
 
+pub mod fork;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,8 +45,8 @@ use tokio::sync::watch;
 pub mod windows;
 
 /// The version compiled into this binary (the workspace version).
-pub const fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+pub fn current_version() -> &'static str {
+    fork::version()
 }
 
 /// Successful checks repeat this often. The feed is a sub-kilobyte,
@@ -178,11 +180,22 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
             if manifest.version.trim().is_empty() {
                 bail!("manifest.json has an empty version");
             }
+            fork::validate_manifest(&manifest)?;
             return Ok(manifest);
         }
         Ok(response) => {
+            if fork::enabled() {
+                match response.status.as_u16() {
+                    401 | 403 => {
+                        bail!("Sign in with the fork owner's account to check for private updates")
+                    }
+                    404 => bail!("No private Mac release has been published yet"),
+                    status => bail!("The private update service is unavailable (HTTP {status})"),
+                }
+            }
             tracing::debug!(status = %response.status, "manifest.json unavailable; trying latest.txt")
         }
+        Err(err) if fork::enabled() => return Err(err),
         Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
     }
     let latest_url = format!("{base}/latest.txt");
@@ -233,13 +246,7 @@ async fn fetch_release_metadata_with_limits(
     max_bytes: usize,
 ) -> anyhow::Result<ReleaseMetadataResponse> {
     let request = async {
-        let response = client
-            .get(url)
-            // Intermediaries must revalidate: the edge already bounds its own
-            // cache to a minute, and a proxy holding an old manifest for
-            // longer is exactly the "prompt appears late" failure.
-            .header(reqwest::header::CACHE_CONTROL, "no-cache")
-            .send()
+        let response = fork::send(client, url)
             .await
             .with_context(|| format!("fetching {url}"))?;
         let status = response.status();
@@ -283,17 +290,21 @@ fn http_client_with_timeouts(connect: Duration, read: Duration) -> anyhow::Resul
         // updates remain viable on constrained links.
         .read_timeout(read)
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many update redirects");
-            }
-            if attempt.previous().iter().any(|url| url.scheme() == "https")
-                && attempt.url().scheme() != "https"
-            {
-                return attempt.error("update redirect would downgrade HTTPS");
-            }
-            attempt.follow()
-        }))
+        .redirect(if fork::enabled() {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("too many update redirects");
+                }
+                if attempt.previous().iter().any(|url| url.scheme() == "https")
+                    && attempt.url().scheme() != "https"
+                {
+                    return attempt.error("update redirect would downgrade HTTPS");
+                }
+                attempt.follow()
+            })
+        })
         .build()
         .context("building http client")
 }
@@ -317,13 +328,28 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
 /// The project's GitHub releases page — the advisory update strip opens this
 /// for unmanaged installs (source builds, hand-copied binaries), where no
 /// updater flow exists to drive.
-pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
+pub const RELEASES_PAGE: &str = match option_env!("ZERON_FORK_BUILD") {
+    Some(build) if !build.is_empty() => "https://github.com/ClemannD/zeron",
+    _ => "https://github.com/zeronsh/zeron/releases",
+};
 
 /// The newest release's page — the download destination offered when this
 /// installation cannot replace itself.
-pub const LATEST_RELEASE_PAGE: &str = "https://github.com/zeronsh/zeron/releases/latest";
+pub const LATEST_RELEASE_PAGE: &str = match option_env!("ZERON_FORK_BUILD") {
+    Some(build) if !build.is_empty() => "https://github.com/ClemannD/zeron",
+    _ => "https://github.com/zeronsh/zeron/releases/latest",
+};
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
+    if fork::enabled() {
+        let url = std::env::var("ZERON_RELEASES_URL").unwrap_or_else(|_| fork::RELEASES_URL.into());
+        fork::validate_url(&url)?;
+        anyhow::ensure!(
+            url.trim_end_matches('/') == fork::RELEASES_URL,
+            "unexpected private release feed"
+        );
+        return Ok(fork::RELEASES_URL.into());
+    }
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
         && !url.trim().is_empty()
     {
@@ -586,6 +612,17 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
 /// `CFBundleShortVersionString` from an XML property list (the packaging
 /// template; codesign leaves the format alone).
 fn bundle_short_version(plist: &str) -> Option<String> {
+    if fork::enabled() {
+        let marker = "<key>ZeronUpdateVersion</key>";
+        if let Some(after) = plist.split(marker).nth(1) {
+            return after
+                .trim_start()
+                .strip_prefix("<string>")?
+                .split("</string>")
+                .next()
+                .map(str::to_owned);
+        }
+    }
     let after_key = plist
         .split("<key>CFBundleShortVersionString</key>")
         .nth(1)?;
@@ -616,11 +653,9 @@ pub async fn download_release_file(
         );
     }
     let partial = dest.with_extension("partial");
-    let resp = http_client()?
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("downloading {url}"))?
+    fork::validate_manifest(manifest)?;
+    let resp = fork::send(&http_client()?, &url)
+        .await?
         .error_for_status()
         .with_context(|| format!("downloading {url}"))?;
     let mut out = tokio::fs::File::create(&partial)
@@ -873,7 +908,10 @@ pub async fn stage_mac_app(
     let dir = updates.join(version);
     let staged = dir.join("Zeron.app");
     let staged_binary = staged.join("Contents/MacOS/zeron");
-    if staged_binary.exists() && verify_staged_binary(&staged_binary, version).await.is_ok() {
+    if staged_binary.exists()
+        && fork::verify_bundle(&staged).is_ok()
+        && verify_staged_binary(&staged_binary, version).await.is_ok()
+    {
         return Ok(staged);
     }
     prune_stale_stages(&updates, version);
@@ -900,6 +938,10 @@ pub async fn stage_mac_app(
     if !unpacked_binary.exists() {
         let _ = std::fs::remove_dir_all(&dir);
         bail!("app tarball {file} did not contain Zeron.app");
+    }
+    if let Err(err) = fork::verify_bundle(&unpacked) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(err);
     }
     if let Err(err) = verify_staged_binary(&unpacked_binary, version).await {
         let _ = std::fs::remove_dir_all(&dir);
@@ -929,6 +971,7 @@ fn prune_stale_stages(updates: &Path, keep: &str) {
 /// old bundle is restored if the second rename fails.
 pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
     require_mac_app_update_platform()?;
+    fork::verify_bundle(staged)?;
     let parent = bundle
         .parent()
         .context("app bundle has no parent directory")?;
@@ -938,7 +981,11 @@ pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
         .to_string_lossy();
     let pid = std::process::id();
     let fresh = parent.join(format!(".{name}.new-{pid}"));
-    let old = parent.join(format!(".{name}.old-{pid}"));
+    let old = if fork::enabled() {
+        parent.join(format!(".{name}.previous"))
+    } else {
+        parent.join(format!(".{name}.old-{pid}"))
+    };
     let _ = std::fs::remove_dir_all(&fresh);
     if let Err(err) = run(
         "ditto",
@@ -946,6 +993,9 @@ pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
     ) {
         let _ = std::fs::remove_dir_all(&fresh);
         return Err(err);
+    }
+    if fork::enabled() && old.exists() {
+        std::fs::remove_dir_all(&old).context("removing previous update backup")?;
     }
     if let Err(err) = std::fs::rename(bundle, &old) {
         let _ = std::fs::remove_dir_all(&fresh);
@@ -956,7 +1006,9 @@ pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(&fresh);
         return Err(err).context("installing the new app bundle");
     }
-    let _ = std::fs::remove_dir_all(&old);
+    if !fork::enabled() {
+        let _ = std::fs::remove_dir_all(&old);
+    }
     Ok(())
 }
 
@@ -1027,6 +1079,11 @@ impl UpdateStatus {
 
 /// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
 fn auto_update_enabled() -> bool {
+    // The private channel carries Mac app bundles, not daemon tarballs. Its
+    // GUI installs the bundle; the managed engine restarts once quiescent.
+    if fork::enabled() {
+        return false;
+    }
     std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)

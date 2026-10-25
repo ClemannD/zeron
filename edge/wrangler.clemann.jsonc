@@ -62,13 +62,15 @@
   "triggers": { "crons": ["17 * * * *"] },
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "zeron-blobs" },
-    { "binding": "RELEASES", "bucket_name": "zeron-releases" }
+    { "binding": "RELEASES", "bucket_name": "zeron-releases" },
+    { "binding": "PRIVATE_RELEASES", "bucket_name": "zeron-private-releases" }
   ],
   "vars": {
     // Engines send it as `client_id` on the sign-in page; must match their
     // ZERON_WORKOS_CLIENT_ID.
     "WORKOS_CLIENT_ID": "zeron-self",
     "AUTH_MODE": "self",
+    "PRIVATE_RELEASES_USER_ID": "user_cc9417dab50d49a7ba18fee6f402356b",
     "SANDBOX_PROVIDER": "boat",
     "BOAT_API_BASE": "https://boat.dev/api/v1",
     "CLOUD_IDLE_MINUTES": "10",

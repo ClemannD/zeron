@@ -17,6 +17,9 @@ export interface Env {
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
+  /** Fork only: a separate private Mac release bucket and its allowed user. */
+  PRIVATE_RELEASES?: R2Bucket;
+  PRIVATE_RELEASES_USER_ID?: string;
   WORKOS_CLIENT_ID: string;
   /** "workos" (verify AuthKit JWTs), "self" (this edge is the identity
    * provider: passkeys + our own JWTs, self-auth/) or "dev" (bearer ==

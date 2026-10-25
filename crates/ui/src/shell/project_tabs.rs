@@ -1481,10 +1481,11 @@ impl Shell {
             move |bounds, _, window, _| {
                 let chip_span = active_slot.and_then(|slot| {
                     let region = region.get()?;
-                    let x0 = region.left() + px(slot as f32 * PROJECT_TAB_SLOT) + scroll.offset().x;
-                    let x1 = x0 + px(PROJECT_TAB_WIDTH);
-                    // Scrolled out of view: no chip.
-                    (x1 > region.left() && x0 < region.right()).then_some((x0, x1))
+                    let (x0, x1) = project_tab_chip_span(region, slot, scroll.offset().x)?;
+                    // The span follows the scrolled tab and can run off the
+                    // strip. Clip to the strip or the selection paints over
+                    // the sidebar (the tab text is already clipped).
+                    Some((project_tab_chip_mask(region, bounds), x0, x1))
                 });
                 // One layer, so the blur snapshots the wallpaper beneath it and
                 // the band's tint then paints over the result.
@@ -1496,8 +1497,11 @@ impl Shell {
                         paint_project_tab_shade(bounds, shade, window);
                     }
                     paint_project_tab_band(bounds, tint, line, window);
-                    if let Some((x0, x1)) = chip_span {
-                        paint_project_tab_chip(bounds, x0, x1, chip, window);
+                    if let Some((mask, x0, x1)) = chip_span {
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: mask }),
+                            |window| paint_project_tab_chip(bounds, x0, x1, chip, window),
+                        );
                     }
                 });
             },
@@ -1990,6 +1994,35 @@ fn paint_project_tab_shade(bounds: gpui::Bounds<Pixels>, shade: gpui::Hsla, wind
     ));
 }
 
+/// The active chip's horizontal span in window coordinates. `scroll_x` is
+/// the strip's scroll offset (negative once the strip has moved). `None`
+/// when the chip has left the strip entirely. A chip only partly in view
+/// still returns its full span — paint clips that to the strip, so the
+/// rounded selection cannot draw over the sidebar.
+fn project_tab_chip_span(
+    region: gpui::Bounds<Pixels>,
+    slot: usize,
+    scroll_x: Pixels,
+) -> Option<(Pixels, Pixels)> {
+    let x0 = region.left() + px(slot as f32 * PROJECT_TAB_SLOT) + scroll_x;
+    let x1 = x0 + px(PROJECT_TAB_WIDTH);
+    (x1 > region.left() && x0 < region.right()).then_some((x0, x1))
+}
+
+/// Where the chip may show: the tab strip across, the band down. Horizontal
+/// edges are the overlap of the strip and the band, so a scrolled chip stops
+/// at the strip (right of the sidebar) and never past the band.
+fn project_tab_chip_mask(
+    region: gpui::Bounds<Pixels>,
+    band: gpui::Bounds<Pixels>,
+) -> gpui::Bounds<Pixels> {
+    let horizontal = region.intersect(&band);
+    gpui::Bounds::from_corners(
+        gpui::point(horizontal.left(), band.top()),
+        gpui::point(horizontal.right(), band.bottom()),
+    )
+}
+
 /// The active tab's chip on the new-session canvas.
 #[derive(Clone, Copy)]
 struct ProjectTabChip {
@@ -2180,6 +2213,33 @@ mod tests {
         ];
         assert_eq!(latest_session_branch(&chats, &folder).as_deref(), Some("feature"));
         assert_eq!(latest_session_branch(&[], &folder), None);
+    }
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> gpui::Bounds<Pixels> {
+        gpui::Bounds::from_corners(gpui::point(px(x0), px(y0)), gpui::point(px(x1), px(y1)))
+    }
+
+    #[test]
+    fn a_scrolled_chip_is_masked_to_the_strip() {
+        // Sidebar seam at 256; the strip is inset to the right of it.
+        let band = rect(256.0, 0.0, 1400.0, 56.0);
+        let region = rect(280.0, 4.0, 900.0, 56.0);
+        let mask = project_tab_chip_mask(region, band);
+        assert_eq!(mask.left(), region.left());
+        assert_eq!(mask.right(), region.right());
+        assert_eq!(mask.top(), band.top());
+        assert_eq!(mask.bottom(), band.bottom());
+
+        // Scrolled by most of a tab: the span crosses the sidebar, and the
+        // mask still starts at the strip.
+        let (x0, x1) = project_tab_chip_span(region, 0, px(-200.0)).unwrap();
+        assert!(x0 < band.left());
+        assert!(x1 > mask.left() && x0 < mask.left());
+
+        assert!(project_tab_chip_span(region, 0, px(-PROJECT_TAB_WIDTH)).is_none());
+        let (x0, x1) = project_tab_chip_span(region, 0, px(0.0)).unwrap();
+        assert_eq!(x0, region.left());
+        assert_eq!(x1, region.left() + px(PROJECT_TAB_WIDTH));
     }
 
     #[test]

@@ -59,6 +59,7 @@ import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
 import { releaseRoute } from "./releases";
+import { privateReleaseRoute } from "./private-releases";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
@@ -145,6 +146,9 @@ export default {
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
+
+    const privateRelease = await privateReleaseRoute(request, env, auth, url);
+    if (privateRelease) return privateRelease;
 
     // Runner bearers (the Cloud device) act as their DEVICE, not the user:
     // no account management, no vault beyond their own grants, no other

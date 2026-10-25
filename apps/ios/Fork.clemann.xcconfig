@@ -1,0 +1,7 @@
+// Pass with xcodebuild -xcconfig apps/ios/Fork.clemann.xcconfig.
+// The empty expansion prevents // from starting an xcconfig comment.
+DEVELOPMENT_TEAM = 7C4DAG233S
+ZERON_BUNDLE_ID = app.clemann.zeron
+ZERON_EDGE_URL = https:/$()/zeron.clemann.app
+ZERON_AUTH_API_BASE = https:/$()/zeron.clemann.app
+ZERON_AUTH_CLIENT_ID = zeron-self

@@ -147,6 +147,8 @@ pub mod methods {
     /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
     pub const QUIESCE_FOR_SLEEP: &str = "QuiesceForSleep";
     pub const AUTH_STATUS: &str = "AuthStatus";
+    /// Private fork updater only; local authenticated IPC, never relay-forwarded.
+    pub const RELEASE_ACCESS_TOKEN: &str = "ReleaseAccessToken";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";

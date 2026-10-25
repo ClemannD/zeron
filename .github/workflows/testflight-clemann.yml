@@ -1,0 +1,85 @@
+name: TestFlight (Clemann)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-clemann
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: github.repository == 'ClemannD/zeron'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      AC_KEY_PATH: ${{ runner.temp }}/zeron-asc-key.p8
+      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Prepare Apple key and select next build number
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing repository secret $name; see docs/ios-testflight.md." >&2
+              exit 2
+            fi
+          done
+          umask 077
+          printf '%s' "$AC_API_KEY_P8" > "$AC_KEY_PATH"
+          python3 -m venv "$RUNNER_TEMP/asc-python"
+          "$RUNNER_TEMP/asc-python/bin/pip" install --quiet 'PyJWT[crypto]'
+          "$RUNNER_TEMP/asc-python/bin/python" - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+          import jwt
+
+          with open(os.environ["AC_KEY_PATH"]) as file:
+              key = file.read()
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": os.environ["AC_API_ISSUER_ID"], "iat": now, "exp": now + 1199,
+               "aud": "appstoreconnect-v1"}, key, algorithm="ES256",
+              headers={"kid": os.environ["AC_API_KEY_ID"], "typ": "JWT"})
+
+          def get(path):
+              request = urllib.request.Request("https://api.appstoreconnect.apple.com/v1/" + path,
+                  headers={"Authorization": "Bearer " + token})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+
+          apps = get("apps?filter[bundleId]=app.clemann.zeron&limit=10")["data"]
+          if len(apps) != 1:
+              raise SystemExit("Create the App Store Connect app for app.clemann.zeron first.")
+          builds = get(f"builds?filter[app]={apps[0]['id']}&limit=200&sort=-uploadedDate")["data"]
+          number = max((int(b["attributes"]["version"]) for b in builds
+                        if b["attributes"]["version"].isdigit()), default=0) + 1
+          with open(os.environ["GITHUB_ENV"], "a") as file:
+              file.write(f"BUILD_NUMBER={number}\n")
+          print(f"Preparing internal TestFlight build {number}")
+          PY
+
+      - name: Rust iOS targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: clemann-ios-core
+          cache-on-failure: true
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Archive, verify fork endpoints, and upload
+        run: scripts/ios/archive-fork.sh upload
+      - name: Remove temporary Apple key
+        if: always()
+        run: rm -f "$AC_KEY_PATH"

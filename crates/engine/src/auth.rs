@@ -465,6 +465,15 @@ impl Auth {
     /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
     /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
     /// it has under 30s left.
+    /// The release client retries once with a fresh access token after a 401.
+    /// Refresh credentials remain owned by this auth service.
+    pub async fn release_access_token(&self, refresh: bool) -> Result<String, TokenError> {
+        if refresh {
+            *lock(&self.inner.access) = None;
+        }
+        self.access_token().await
+    }
+
     pub async fn access_token(&self) -> Result<String, TokenError> {
         if self.inner.runner.is_some() {
             return self.runner_access_token().await;

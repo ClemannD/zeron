@@ -2,12 +2,20 @@ import AuthenticationServices
 import UIKit
 
 enum Endpoints {
-    static let edgeURL = URL(string: "https://edge.zeron.sh")!
+    // Release settings come from the signed bundle, including self-hosted builds.
+    static let edgeURL = URL(string: setting("ZeronEdgeURL", fallback: "https://edge.zeron.sh"))!
+    static let authAPIBase = setting("ZeronAuthAPIBase", fallback: "https://api.workos.com")
+
+    private static func setting(_ key: String, fallback: String) -> String {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.isEmpty, !value.contains("$(") else { return fallback }
+        return value
+    }
     static var workosClientId: String {
         #if DEBUG
         if let id = debugOverride("-workos", key: "debugWorkosClientId") { return id }
         #endif
-        return "client_01KWD0EAKZKD50YCQJNYSRE4BY"
+        return setting("ZeronAuthClientID", fallback: "client_01KWD0EAKZKD50YCQJNYSRE4BY")
     }
     static let callbackScheme = "zeron"
 
@@ -31,7 +39,7 @@ enum Endpoints {
     #endif
 
     static func authorizeURL(state: String) -> URL {
-        var c = URLComponents(string: "https://api.workos.com/user_management/authorize")!
+        var c = URLComponents(string: "\(authAPIBase)/user_management/authorize")!
         c.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "client_id", value: workosClientId),

@@ -52,6 +52,7 @@ cargo build --release -p zeron
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/licenses/fonts"
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+install -m 755 "$ROOT/target/release/zeron-engine" "$APP/Contents/MacOS/Zeron Engine"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
@@ -71,6 +72,13 @@ rm -rf "$ICONSET"
 PLIST="$APP/Contents/Info.plist"
 plutil -insert LSEnvironment -dictionary "$PLIST" 2>/dev/null || true
 plutil -replace LSEnvironment.ZERON_AUTO_UPDATE -string "0" "$PLIST"
+if [[ -n "${ZERON_FORK_BUILD:-}" ]]; then
+  [[ "$ZERON_FORK_BUILD" =~ ^[1-9][0-9]*$ ]] || { echo "ZERON_FORK_BUILD must be a positive integer" >&2; exit 2; }
+  plutil -replace CFBundleVersion -string "$ZERON_FORK_BUILD" "$PLIST"
+  plutil -replace ZeronUpdateVersion -string "$VERSION.$ZERON_FORK_BUILD" "$PLIST"
+  plutil -replace LSEnvironment.ZERON_RELEASES_URL -string "https://zeron.clemann.app/fork-updates" "$PLIST"
+  plutil -replace LSEnvironment.ZERON_AUTO_UPDATE -string "1" "$PLIST"
+fi
 # Self-hosted edge (edge/wrangler.clemann.jsonc): sync and sign-in go to our
 # own Worker, which is also the identity provider (AUTH_MODE=self), so the
 # sign-in page lives at the edge too. ZERON_FORK_EDGE_URL="" keeps upstream's.
@@ -84,9 +92,13 @@ plutil -replace ZeronForkCommit -string "$COMMIT" "$PLIST"
 
 # Sign last: any edit to the bundle after this invalidates the signature.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp \
+    --identifier sh.zeron.app.engine --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime \
-    --sign "$CODESIGN_IDENTITY" "$APP"
+    --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force \
+    --identifier sh.zeron.app.engine --sign - "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - "$APP"
 fi
 codesign --verify --strict "$APP"
