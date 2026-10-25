@@ -2149,6 +2149,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: Some("commit:same".into()),
+            github_repo: None,
             created_at: Utc::now(),
         }
     }

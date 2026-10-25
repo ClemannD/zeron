@@ -16887,6 +16887,7 @@ mod exit_regressions {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
+                    github_repo: None,
                     created_at: Utc::now(),
                 };
                 state.spaces = vec![space("layout-project", "Zeron"), space("other-project", "Other")];
