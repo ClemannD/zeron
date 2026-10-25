@@ -10,6 +10,9 @@
 #     releases would otherwise download in the background and replace this
 #     build on quit. An "update available" notice is the cue to merge
 #     upstream/main and rerun this script.
+#   - Talks to the self-hosted edge at https://zeron.clemann.app (sync and
+#     passkey sign-in; see edge/wrangler.clemann.jsonc) instead of
+#     edge.zeron.sh. ZERON_FORK_EDGE_URL overrides; empty keeps upstream's.
 #   - No dmg, updater tarball, or notarization.
 #   - Installs: refuses while Zeron is running, moves the current app to
 #     target/package/Zeron.app.backup-<timestamp>, then copies the new one in.
@@ -68,6 +71,15 @@ rm -rf "$ICONSET"
 PLIST="$APP/Contents/Info.plist"
 plutil -insert LSEnvironment -dictionary "$PLIST" 2>/dev/null || true
 plutil -replace LSEnvironment.ZERON_AUTO_UPDATE -string "0" "$PLIST"
+# Self-hosted edge (edge/wrangler.clemann.jsonc): sync and sign-in go to our
+# own Worker, which is also the identity provider (AUTH_MODE=self), so the
+# sign-in page lives at the edge too. ZERON_FORK_EDGE_URL="" keeps upstream's.
+FORK_EDGE="${ZERON_FORK_EDGE_URL-https://zeron.clemann.app}"
+if [[ -n "$FORK_EDGE" ]]; then
+  plutil -replace LSEnvironment.ZERON_EDGE_URL -string "$FORK_EDGE" "$PLIST"
+  plutil -replace LSEnvironment.ZERON_WORKOS_API_BASE -string "$FORK_EDGE" "$PLIST"
+  plutil -replace LSEnvironment.ZERON_WORKOS_CLIENT_ID -string "${ZERON_FORK_CLIENT_ID:-zeron-self}" "$PLIST"
+fi
 plutil -replace ZeronForkCommit -string "$COMMIT" "$PLIST"
 
 # Sign last: any edit to the bundle after this invalidates the signature.

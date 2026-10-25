@@ -21,6 +21,7 @@ export { PreviewRoom } from "../../src/preview-room";
 export { RegistryRoom } from "../../src/registry-room";
 export { CloudAccount } from "../../src/cloud/cloud-account";
 export { CloudIndex } from "../../src/cloud/cloud-index";
+export { AuthDirectory } from "../../src/self-auth/directory";
 export { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "../../src/cloud/workflows";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via

@@ -11,6 +11,8 @@
  *   GET  /auth/orgs                   — caller's active org memberships
  *   POST /auth/orgs                   — create org + admin membership
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
+ *   AUTH_MODE=self (self-auth/routes.ts): GET /user_management/authorize,
+ *   GET /auth/register, POST /auth/passkey/*, /admin/auth/* (ADMIN_TOKEN)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -51,6 +53,8 @@ import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
+import { AuthDirectory } from "./self-auth/directory";
+import { handleSelfAuthRoute } from "./self-auth/routes";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
@@ -76,7 +80,7 @@ import { runnerRefusal } from "./runner-policy";
 import { handleVaultRoute } from "./vault-routes";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, AuthDirectory };
 export { ProvisionWorkflow, WakeWorkflow, SleepWorkflow, DeleteWorkflow };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -106,7 +110,7 @@ export default {
     const parts = url.pathname.split("/").filter(Boolean);
 
     if (url.pathname === "/health") {
-      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
+      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : env.AUTH_MODE === "self" ? "self" : "workos" });
     }
 
     // ── public install surface (also routed from zeron.sh): the
@@ -124,6 +128,8 @@ export default {
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
+    const selfRouted = await handleSelfAuthRoute(request, env, url);
+    if (selfRouted) return selfRouted;
     const authRouted = await handleAuthRoute(request, env, url);
     if (authRouted) return authRouted;
 

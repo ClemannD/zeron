@@ -16,6 +16,7 @@
 import { bearerFromRequest, verifyToken } from "./auth";
 import type { Env } from "./env";
 import { WorkOsAuthFailed, createOrg, exchange, listOrgs, refresh } from "./workos";
+import { resultResponse, selfAuthEnabled, selfDirectory } from "./self-auth/routes";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -44,6 +45,7 @@ export const handleAuthRoute = async (
 ): Promise<Response | undefined> => {
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "auth") return undefined;
+  if (selfAuthEnabled(env)) return handleSelfTokenRoute(request, env, parts);
   const apiKey = env.WORKOS_API_KEY;
 
   if (parts[1] === "exchange" && parts.length === 2 && request.method === "POST") {
@@ -115,6 +117,54 @@ export const handleAuthRoute = async (
     return cliCallback(url);
   }
 
+  return undefined;
+};
+
+/** AUTH_MODE=self: the same routes and wire shapes, answered by our own
+ * AuthDirectory instead of WorkOS (self-auth/directory.ts). */
+const handleSelfTokenRoute = async (
+  request: Request,
+  env: Env,
+  parts: string[]
+): Promise<Response | undefined> => {
+  if (parts[1] === "cli" && parts[2] === "callback" && request.method === "GET") {
+    return cliCallback(new URL(request.url));
+  }
+  const isTokenRoute =
+    parts.length === 2 &&
+    ((request.method === "POST" && (parts[1] === "exchange" || parts[1] === "refresh")) || parts[1] === "orgs");
+  if (!isTokenRoute) return undefined;
+  const directory = selfDirectory(env);
+  if (!directory || !env.AUTH_JWT_PRIVATE_KEY) return notConfigured();
+
+  if (parts[1] === "exchange") {
+    const body = await bodyJson<{ code?: string }>(request);
+    if (typeof body?.code !== "string") return json({ error: "missing code" }, 400);
+    return resultResponse(await directory.exchange(body.code));
+  }
+  if (parts[1] === "refresh") {
+    const body = await bodyJson<{ refreshToken?: string; organizationId?: string }>(request);
+    if (typeof body?.refreshToken !== "string") return json({ error: "missing refreshToken" }, 400);
+    if (body.organizationId !== undefined && typeof body.organizationId !== "string") {
+      return json({ error: "missing refreshToken" }, 400);
+    }
+    return resultResponse(await directory.refresh(body.refreshToken, body.organizationId));
+  }
+
+  const token = bearerFromRequest(request);
+  const caller = token ? await verifyToken(env, token) : undefined;
+  if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
+  if (caller.kind === "runner") return json({ error: "forbidden" }, 403);
+  if (request.method === "GET") return json({ orgs: await directory.listOrgs(caller.userId) });
+  if (request.method === "POST") {
+    const body = await bodyJson<{ name?: string }>(request);
+    if (typeof body?.name !== "string") return json({ error: "missing name" }, 400);
+    const trimmed = body.name.trim();
+    if (trimmed.length === 0 || trimmed.length > 80) {
+      return json({ error: "name must be 1-80 characters" }, 400);
+    }
+    return resultResponse(await directory.createOrg(caller.userId, trimmed));
+  }
   return undefined;
 };
 

@@ -15,6 +15,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env";
 import { claimsRunnerIssuer, parseDevRunnerBearer, verifyRunnerJwt } from "./runner-token";
+import { verifyAccessToken } from "./self-auth/tokens";
 
 export interface Verified {
   readonly userId: string;
@@ -69,6 +70,12 @@ export const verifyToken = async (env: Env, token: string): Promise<Verified | u
     const at = token.indexOf("@");
     if (at > 0) return { userId: token.slice(0, at), orgId: token.slice(at + 1), kind: "user" };
     return { userId: token, kind: "user" };
+  }
+  if (env.AUTH_MODE === "self") {
+    // Our own identity provider (self-auth/): ES256 tokens we signed.
+    if (!env.AUTH_JWT_PRIVATE_KEY) return undefined;
+    const claims = await verifyAccessToken(env.AUTH_JWT_PRIVATE_KEY, token);
+    return claims && { userId: claims.userId, sessionId: claims.sessionId, orgId: claims.orgId, kind: "user" };
   }
   const issuer =
     env.WORKOS_ISSUER ?? `https://api.workos.com/user_management/${env.WORKOS_CLIENT_ID}`;

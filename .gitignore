@@ -11,7 +11,9 @@ node_modules
 build/
 edge/dist/
 .agents
-.claude
+# Fork: local agent state stays out, but this fork's shared skills are tracked.
+.claude/*
+!.claude/skills/
 CLAUDE.md
 /scripts/**/__pycache__/
 .dev.vars

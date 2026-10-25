@@ -1,0 +1,27 @@
+{
+  // Self-hosted zeron-vault on the clemann.app Cloudflare account. Same
+  // Worker as wrangler.jsonc (upstream's account), minus staging. Deploy
+  // BEFORE the edge: `npx wrangler deploy -c wrangler.clemann.jsonc`.
+  // Secrets (`npx wrangler secret put NAME -c wrangler.clemann.jsonc`):
+  // VAULT_KEK (required; see README.md), GITHUB_APP_* (optional).
+  // Keep the bindings and migrations in step with wrangler.jsonc on upstream
+  // merges.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "zeron-vault",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "account_id": "27f9550dae9ea2ae400dff7b77cc052f",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [
+      { "name": "VAULT_DEVICES", "class_name": "VaultDevices" },
+      { "name": "VAULT_ACCOUNTS", "class_name": "VaultAccount" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDevices", "VaultAccount"] }],
+  "triggers": { "crons": ["0 6 * * *"] },
+  "observability": {
+    "enabled": true
+  }
+}

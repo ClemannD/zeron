@@ -20,5 +20,8 @@ declare module "cloudflare:test" {
     ADMIN_TOKEN: string;
     RUNNER_JWT_PUBLIC_KEY: string;
     RUNNER_JWT_PRIVATE_KEY: string;
+    AUTH_DIRECTORY: DurableObjectNamespace<import("../../src/self-auth/directory").AuthDirectory>;
+    AUTH_JWT_PRIVATE_KEY: string;
+    AUTH_SETUP_CODE: string;
   }
 }

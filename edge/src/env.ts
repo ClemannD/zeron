@@ -1,6 +1,7 @@
 import type { VaultRpc } from "../vault/src/api";
 import type { CloudAccount, LifecycleParams, ProvisionParams } from "./cloud/cloud-account";
 import type { CloudIndex } from "./cloud/cloud-index";
+import type { AuthDirectory } from "./self-auth/directory";
 
 export interface Env {
   SESSION_ROOMS: DurableObjectNamespace;
@@ -17,8 +18,18 @@ export interface Env {
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
   WORKOS_CLIENT_ID: string;
-  /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
+  /** "workos" (verify AuthKit JWTs), "self" (this edge is the identity
+   * provider: passkeys + our own JWTs, self-auth/) or "dev" (bearer ==
+   * userId, never prod). */
   AUTH_MODE: string;
+  /** AUTH_MODE=self: the identity directory (`auth1`; self-auth/directory.ts). */
+  AUTH_DIRECTORY?: DurableObjectNamespace<AuthDirectory>;
+  /** AUTH_MODE=self: ES256 private JWK (JSON, secret) signing access tokens;
+   * the public half is derived from it. */
+  AUTH_JWT_PRIVATE_KEY?: string;
+  /** AUTH_MODE=self: one-time code that creates the first account (secret);
+   * refused once any account exists. */
+  AUTH_SETUP_CODE?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;

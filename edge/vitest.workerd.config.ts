@@ -23,6 +23,9 @@ import { createStripeFake } from "./test/workerd/stripe-fake.ts";
 // binding pointed at a recording stub entrypoint in the fixture, and a
 // throwaway ES256 pair so runner JWTs are real.
 const runnerKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
+// Self-auth (AUTH_MODE=self) signing key; tests run its routes with the mode
+// overridden per call (the shared fixture stays in dev auth).
+const selfAuthKey = generateKeyPairSync("ec", { namedCurve: "P-256" });
 
 /** Boat and Stripe fakes behind Miniflare's one outbound service. */
 const outbound = () => {
@@ -46,7 +49,8 @@ export default defineConfig({
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
           REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true },
           CLOUD_ACCOUNTS: { className: "CloudAccount", useSQLite: true },
-          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true }
+          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true },
+          AUTH_DIRECTORY: { className: "AuthDirectory", useSQLite: true }
         },
         workflows: {
           CLOUD_PROVISION: { name: "test-cloud-provision", className: "ProvisionWorkflow" },
@@ -77,7 +81,9 @@ export default defineConfig({
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
-          RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))
+          RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" })),
+          AUTH_JWT_PRIVATE_KEY: JSON.stringify({ ...selfAuthKey.privateKey.export({ format: "jwk" }), kid: "test" }),
+          AUTH_SETUP_CODE: "test-setup-code"
         },
         outboundService: outbound()
       }

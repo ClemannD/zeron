@@ -1,0 +1,83 @@
+{
+  // Self-hosted Zeron edge on the clemann.app Cloudflare account, served at
+  // https://zeron.clemann.app. Same Worker as wrangler.jsonc (upstream's
+  // account) with three differences:
+  //   - AUTH_MODE=self: this edge is its own identity provider (passkeys,
+  //     src/self-auth/) instead of WorkOS;
+  //   - no Stripe, no staging, no zeron.sh routes;
+  //   - its own R2 bucket names (fresh account, nothing to keep).
+  // Deploy (vault first): `npx wrangler deploy -c wrangler.clemann.jsonc`.
+  // Keep bindings and migrations in step with wrangler.jsonc on upstream
+  // merges (append upstream's new migration tags after ours).
+  //
+  // Secrets (`npx wrangler secret put NAME -c wrangler.clemann.jsonc`):
+  //   AUTH_JWT_PRIVATE_KEY  ES256 private JWK signing access tokens
+  //   AUTH_SETUP_CODE       creates the first account; refused afterwards
+  //   ADMIN_TOKEN           operator bearer for /admin/* (invites, users)
+  //   RUNNER_JWT_PRIVATE_KEY / RUNNER_JWT_PUBLIC_KEY  Cloud runner JWTs
+  //   BOAT_API_KEY          optional: Cloud sessions (unset ⇒ Cloud off)
+  //   CLOUD_ACCESS          optional: who Cloud is offered to
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zeron-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "account_id": "27f9550dae9ea2ae400dff7b77cc052f",
+  // Passkeys are bound to zeron.clemann.app; a workers.dev host would only
+  // be a second, passkey-less door.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "zeron.clemann.app", "custom_domain": true }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": {
+    "loro-crdt": "loro-crdt/base64"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "CLOUD_ACCOUNTS", "class_name": "CloudAccount" },
+      { "name": "CLOUD_INDEX", "class_name": "CloudIndex" },
+      // auth1 — users, passkeys, orgs, sessions (src/self-auth/directory.ts).
+      { "name": "AUTH_DIRECTORY", "class_name": "AuthDirectory" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionRoom", "DeviceRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["RegistryRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["CloudAccount", "CloudIndex"] },
+    { "tag": "self-auth-v1", "new_sqlite_classes": ["AuthDirectory"] }
+  ],
+  "workflows": [
+    { "name": "zeron-cloud-provision", "binding": "CLOUD_PROVISION", "class_name": "ProvisionWorkflow" },
+    { "name": "zeron-cloud-wake", "binding": "CLOUD_WAKE", "class_name": "WakeWorkflow" },
+    { "name": "zeron-cloud-sleep", "binding": "CLOUD_SLEEP", "class_name": "SleepWorkflow" },
+    { "name": "zeron-cloud-delete", "binding": "CLOUD_DELETE", "class_name": "DeleteWorkflow" }
+  ],
+  "services": [{ "binding": "VAULT", "service": "zeron-vault", "entrypoint": "VaultApi" }],
+  "triggers": { "crons": ["17 * * * *"] },
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "zeron-blobs" },
+    { "binding": "RELEASES", "bucket_name": "zeron-releases" }
+  ],
+  "vars": {
+    // Engines send it as `client_id` on the sign-in page; must match their
+    // ZERON_WORKOS_CLIENT_ID.
+    "WORKOS_CLIENT_ID": "zeron-self",
+    "AUTH_MODE": "self",
+    "SANDBOX_PROVIDER": "boat",
+    "BOAT_API_BASE": "https://boat.dev/api/v1",
+    "CLOUD_IDLE_MINUTES": "10",
+    "CLOUD_MAX_AWAKE": "5",
+    "CLOUD_MACHINE": "default",
+    "CLOUD_STARTING_CREDITS": "0",
+    "CLOUD_EDGE_URL": "https://zeron.clemann.app"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
