@@ -10,6 +10,7 @@ pub(super) struct TreeContextMenu {
     pub origin: WorkspaceInteractionOrigin,
     pub position: Point<Pixels>,
     pub active: usize,
+    pub search: bool,
 }
 
 fn absolute_workspace_path(root: &str, relative: &str) -> String {
@@ -58,8 +59,24 @@ impl FilesSurface {
             origin,
             position,
             active: 0,
+            search: false,
         });
         cx.notify();
+    }
+
+    fn tree_menu_actions(&self, menu: &TreeContextMenu, cx: &gpui::App) -> Vec<usize> {
+        let mut actions = if menu.search { vec![1] } else { vec![0, 1] };
+        if menu
+            .paths
+            .iter()
+            .all(|path| self.system_open_path(path, cx).is_some())
+        {
+            actions.push(4);
+        }
+        if !menu.search {
+            actions.extend([2, 3]);
+        }
+        actions
     }
 
     /// What keyboard and menu actions apply to: the selection roots when the
@@ -75,6 +92,9 @@ impl FilesSurface {
     fn tree_menu_enabled(&self, paths: &[String], action: usize, cx: &gpui::App) -> bool {
         match action {
             0 | 1 => true,
+            4 => paths
+                .iter()
+                .all(|path| self.system_open_path(path, cx).is_some()),
             2 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
             _ => paths
                 .iter()
@@ -106,11 +126,15 @@ impl FilesSurface {
             popover::MenuKey::Escape => self.close_tree_context_menu(cx),
             key @ (popover::MenuKey::Up | popover::MenuKey::Down) => {
                 if let Some(menu) = self.tree_context_menu.as_open() {
-                    let mut next = menu.active;
-                    for _ in 0..4 {
+                    let actions = self.tree_menu_actions(menu, cx);
+                    let mut next = actions
+                        .iter()
+                        .position(|action| *action == menu.active)
+                        .unwrap_or(0);
+                    for _ in 0..actions.len() {
                         next = popover::menu_step(
                             Some(next),
-                            4,
+                            actions.len(),
                             if matches!(key, popover::MenuKey::Up) {
                                 -1
                             } else {
@@ -118,11 +142,11 @@ impl FilesSurface {
                             },
                         )
                         .unwrap_or(0);
-                        if self.tree_menu_enabled(&menu.paths, next, cx) {
+                        if self.tree_menu_enabled(&menu.paths, actions[next], cx) {
                             break;
                         }
                     }
-                    self.tree_context_menu.open_mut().unwrap().active = next;
+                    self.tree_context_menu.open_mut().unwrap().active = actions[next];
                     cx.notify();
                 }
             }
@@ -138,14 +162,39 @@ impl FilesSurface {
         true
     }
 
-    fn dispatch_tree_menu(&mut self, action: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dispatch_tree_menu(
+        &mut self,
+        action: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.tree_context_menu.as_open() else {
             return;
         };
         let paths = menu.paths.clone();
         let origin = menu.origin.clone();
-        if !self.accepts_origin(&origin, cx) || !self.tree_menu_enabled(&paths, action, cx) {
+        if !self.accepts_origin(&origin, cx)
+            || !self.tree_menu_actions(menu, cx).contains(&action)
+            || !self.tree_menu_enabled(&paths, action, cx)
+        {
             self.close_tree_context_menu(cx);
+            return;
+        }
+        if action == 1 || action == 4 {
+            self.close_tree_context_menu(cx);
+            if action == 4 {
+                for path in paths {
+                    self.open_in_file_manager(&path, cx);
+                }
+            } else {
+                let text = paths
+                    .iter()
+                    .map(|path| absolute_workspace_path(&origin.context.cwd, path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.tree_focus.focus(window, cx);
+            }
             return;
         }
         let Some(entries) = paths
@@ -173,15 +222,6 @@ impl FilesSurface {
                     });
                 }
             }
-            1 => {
-                let text = paths
-                    .iter()
-                    .map(|path| absolute_workspace_path(&origin.context.cwd, path))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.tree_focus.focus(window, cx);
-            }
             2 => self.begin_tree_rename(paths[0].clone(), window, cx),
             3 => self.begin_tree_delete(paths, window, cx),
             _ => {}
@@ -207,18 +247,18 @@ impl FilesSurface {
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for (index, (label, icon_path)) in [
-            ("Add to chat".to_string(), icons::CHAT_ROUND_LINE),
-            (
-                if count > 1 { "Copy paths" } else { "Copy path" }.to_string(),
-                icons::COPY,
-            ),
-            ("Rename…".to_string(), icons::PEN),
-            (delete_label, icons::TRASH_BIN_MINIMALISTIC),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for index in self.tree_menu_actions(menu, cx) {
+            let (label, icon_path) = match index {
+                0 => ("Add to chat".to_string(), icons::CHAT_ROUND_LINE),
+                1 => (
+                    if count > 1 { "Copy paths" } else { "Copy path" }.to_string(),
+                    icons::COPY,
+                ),
+                2 => ("Rename…".to_string(), icons::PEN),
+                3 => (delete_label.clone(), icons::TRASH_BIN_MINIMALISTIC),
+                4 => (crate::local_files::OPEN_LABEL.to_string(), icons::FOLDER),
+                _ => unreachable!(),
+            };
             if index == 2 {
                 card = card.child(popover::menu_separator());
             }
@@ -288,6 +328,62 @@ mod tests {
         ] {
             assert_eq!(absolute_workspace_path(root, "src/a.txt"), expected);
         }
+    }
+
+    #[gpui::test]
+    fn finder_menu_opens_files_and_folders_and_rejects_stale_workspaces(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+        let (files, cx) = super::super::test_support::setup(cx);
+        crate::local_files::take_opened();
+        files.update_in(cx, |files, window, cx| {
+            files.state.update(cx, |state, _| {
+                state.chats[0].cwd = Some(dir.path().to_string_lossy().into_owned())
+            });
+            files.request_context = FilesRequestContext::for_chat(files.state.read(cx), "chat");
+            for path in ["a.txt", "folder"] {
+                files.open_tree_context_menu(
+                    path.into(),
+                    gpui::point(px(50.), px(50.)),
+                    window,
+                    cx,
+                );
+                assert!(
+                    files
+                        .tree_menu_actions(files.tree_context_menu.as_open().unwrap(), cx)
+                        .contains(&4)
+                );
+                files.dispatch_tree_menu(4, window, cx);
+            }
+        });
+        cx.run_until_parked();
+        let mut opened = crate::local_files::take_opened();
+        opened.sort();
+        assert_eq!(
+            opened,
+            vec![
+                (dir.path().join("a.txt"), false),
+                (dir.path().join("folder"), true)
+            ]
+        );
+        files.update_in(cx, |files, window, cx| {
+            files.open_tree_context_menu("a.txt".into(), gpui::point(px(50.), px(50.)), window, cx);
+            files
+                .state
+                .update(cx, |state, _| state.chats[0].device_id = "remote".into());
+            files.dispatch_tree_menu(4, window, cx);
+            files.request_context = FilesRequestContext::for_chat(files.state.read(cx), "chat");
+            files.open_tree_context_menu("a.txt".into(), gpui::point(px(50.), px(50.)), window, cx);
+            assert!(
+                !files
+                    .tree_menu_actions(files.tree_context_menu.as_open().unwrap(), cx)
+                    .contains(&4)
+            );
+            files.dispatch_tree_menu(4, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(crate::local_files::take_opened().is_empty());
     }
 
     #[gpui::test]

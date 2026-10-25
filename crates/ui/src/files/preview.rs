@@ -2311,11 +2311,22 @@ impl FilesSurface {
     /// Where the system's default app can open `path`. Only a workspace on
     /// this device shares the viewport's filesystem; remote spaces live on
     /// another device, so they get no path.
-    fn system_open_path(&self, path: &str) -> Option<std::path::PathBuf> {
-        self.request_context
-            .as_ref()
-            .filter(|context| context.target_device_id.is_none())
-            .map(|context| std::path::Path::new(&context.cwd).join(path))
+    pub(crate) fn system_open_path(
+        &self,
+        path: &str,
+        cx: &gpui::App,
+    ) -> Option<std::path::PathBuf> {
+        if !self.is_current_target(cx) {
+            return None;
+        }
+        let context = self.request_context.as_ref()?;
+        crate::local_files::local_path(&context.cwd, path, context.target_device_id.is_none())
+    }
+
+    pub(crate) fn open_in_file_manager(&self, path: &str, cx: &mut gpui::App) {
+        if let Some(path) = self.system_open_path(path, cx) {
+            crate::local_files::open(path, cx);
+        }
     }
 
     fn render_breadcrumb(
@@ -2337,7 +2348,7 @@ impl FilesSurface {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>();
         let reveal_path = path.to_string();
-        let system_path = self.system_open_path(path);
+        let system_path = self.system_open_path(path, cx);
         let tooltip_path: SharedString = path.to_string().into();
         let can_save = !self.target_change_pending
             && self
@@ -2521,21 +2532,34 @@ impl FilesSurface {
                         cx.emit(FilesEvent::RevealFile(reveal_path.clone()));
                     }))
                     .child(
-                        icon(icons::FOLDER)
+                        icon(icons::FOLDER_TREE)
                             .size(px(crate::surface_chrome::ICON_SIZE))
                             .text_color(theme.text_muted),
                     ),
             )
             .when_some(system_path, |element, system_path| {
-                element.child(
-                    toolbar_button("files-open-with-system", "Open in default editor")
-                        .on_click(move |_, _, cx| cx.open_with_system(&system_path))
-                        .child(
-                            icon(icons::ARROW_UP_RIGHT)
-                                .size(px(crate::surface_chrome::ICON_SIZE))
-                                .text_color(theme.text_muted),
-                        ),
-                )
+                let manager_path = path.to_owned();
+                element
+                    .child(
+                        toolbar_button("files-open-in-finder", crate::local_files::OPEN_LABEL)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_in_file_manager(&manager_path, cx)
+                            }))
+                            .child(
+                                icon(icons::FOLDER)
+                                    .size(px(crate::surface_chrome::ICON_SIZE))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .child(
+                        toolbar_button("files-open-with-system", "Open in default editor")
+                            .on_click(move |_, _, cx| cx.open_with_system(&system_path))
+                            .child(
+                                icon(icons::ARROW_UP_RIGHT)
+                                    .size(px(crate::surface_chrome::ICON_SIZE))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
             })
             .child(
                 toolbar_button(
@@ -4883,37 +4907,25 @@ mod markdown_buffer_tests {
     }
 
     #[gpui::test]
-    fn default_editor_opens_only_files_on_this_device(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let surface = cx.new(|cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
-        });
-        surface.update(cx, |surface, _| {
-            assert_eq!(surface.system_open_path("src/lib.rs"), None);
-            let local = FilesRequestContext {
-                target: zeron_proto::WorkspaceTarget {
-                    chat_id: Some("chat".into()),
-                    space_id: None,
-                    checkout_path: None,
-                },
-                target_device_id: None,
-                cwd: "/workspace".into(),
-                checkout_id: Some("checkout".into()),
-            };
-            surface.request_context = Some(local.clone());
+    fn system_actions_require_a_current_local_workspace(cx: &mut TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update(cx, |surface, cx| {
             assert_eq!(
-                surface.system_open_path("src/lib.rs"),
-                Some(std::path::PathBuf::from("/workspace/src/lib.rs"))
+                surface.system_open_path("src/lib.rs", cx),
+                Some("/workspace/src/lib.rs".into())
             );
-            surface.request_context = Some(FilesRequestContext {
-                target_device_id: Some("other-device".into()),
-                ..local
+            surface.target_change_pending = true;
+            assert!(surface.system_open_path("src/lib.rs", cx).is_none());
+            surface.target_change_pending = false;
+            surface.state.update(cx, |state, _| {
+                state.chats[0].device_id = "other-device".into()
             });
-            assert_eq!(surface.system_open_path("src/lib.rs"), None);
+            // An old context must not continue to offer local actions.
+            assert!(surface.system_open_path("src/lib.rs", cx).is_none());
+            surface.request_context = FilesRequestContext::for_chat(surface.state.read(cx), "chat");
+            assert!(surface.system_open_path("src/lib.rs", cx).is_none());
+            surface.request_context = None;
+            assert!(surface.system_open_path("src/lib.rs", cx).is_none());
         });
     }
 

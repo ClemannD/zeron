@@ -23,6 +23,7 @@ pub enum LinkAction {
     Internal,
     External,
     Copy,
+    RevealFile,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkOutcome {
@@ -38,6 +39,9 @@ pub struct LinkActivation {
 }
 impl LinkActivation {
     pub fn web_outcome(&self, embedded: bool) -> LinkOutcome {
+        if self.action == LinkAction::RevealFile {
+            return LinkOutcome::Rejected;
+        }
         match &self.target.navigation {
             Ok(_) if embedded && self.action == LinkAction::Internal => LinkOutcome::Internal,
             Ok(url) => LinkOutcome::External(url.clone()),

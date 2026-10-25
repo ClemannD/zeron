@@ -4009,6 +4009,31 @@ impl Shell {
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
+        if activation.action == LinkAction::RevealFile {
+            let Some((_, state)) = self.link_owner(&source, cx) else {
+                return LinkOutcome::Rejected;
+            };
+            let state = state.read(cx);
+            let roots = state.file_link_roots(&source);
+            let path = match crate::workspace_links::first_root_owning(
+                &activation.target.original,
+                roots.iter().map(|root| root.root.as_str()),
+            ) {
+                Some(crate::workspace_links::FileLinkResolution::Owned { root, link }) => {
+                    crate::local_files::local_path(&roots[root].root, &link.path, roots[root].local)
+                }
+                Some(crate::workspace_links::FileLinkResolution::Outside(link)) => {
+                    crate::local_files::local_path("", &link.path, state.chat_is_local(&source))
+                }
+                None => None,
+            };
+            return if let Some(path) = path {
+                crate::local_files::open(path, cx);
+                LinkOutcome::Internal
+            } else {
+                LinkOutcome::Rejected
+            };
+        }
         if activation.target.navigation.is_err() {
             return if matches!(
                 activation.action,
@@ -11211,6 +11236,39 @@ impl Shell {
             if let Some((key, surface)) = menu_state.tab {
                 if !chat_id.is_empty() {
                     menu = menu.child(popover::menu_separator());
+                }
+                if let RightSurface::File(id) = surface
+                    && let Some(file) = self.file_surfaces.get(&id)
+                    && let Some(path) = self.file_surface_paths.get(&id).cloned()
+                    && file.read(cx).system_open_path(&path, cx).is_some()
+                {
+                    let owner_key = key.clone();
+                    menu = menu
+                        .child(
+                            popover::menu_row(&theme, false, "file-tab-open-in-finder")
+                                .id("file-tab-open-in-finder")
+                                .debug_selector(|| "file-tab-open-in-finder".into())
+                                .role(gpui::Role::MenuItem)
+                                .aria_label(crate::local_files::OPEN_LABEL)
+                                .child(
+                                    icon(icons::FOLDER)
+                                        .size(px(16.))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(crate::local_files::OPEN_LABEL)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    if this.panel_key(cx) == owner_key
+                                        && this.file_surface_paths.get(&id) == Some(&path)
+                                        && let Some(file) = this.file_surfaces.get(&id).cloned()
+                                    {
+                                        file.update(cx, |file, cx| {
+                                            file.open_in_file_manager(&path, cx)
+                                        });
+                                    }
+                                })),
+                        )
+                        .child(popover::menu_separator());
                 }
                 for (ix, (action, label)) in [
                     (TabCloseAction::This, "Close tab"),

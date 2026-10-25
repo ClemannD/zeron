@@ -143,3 +143,17 @@ An initial full UI run hit a sidebar scheduler failure; its isolated rerun and
 the subsequent complete suite passed. Formatting checks passed for every Rust
 file changed here; the workspace-wide formatting check still reports existing
 differences in unrelated files.
+
+## Open in Finder
+
+On macOS, use **Open in Finder** in a file-tree, file-search-result, file-tab,
+or transcript file-reference context menu. The editor toolbar also offers it.
+Files are selected in their containing folder; folders open directly. Multiple
+selected tree entries are handled individually. Other desktop platforms label
+the action **Open in file manager**.
+
+The action appears only for files owned by this Mac (or the current desktop
+on other platforms). Remote workspace paths keep their Zeron file-opening and
+path-copy actions, without opening an unrelated local path or downloading a
+copy. Switching the workspace invalidates pending menu actions. Missing or
+inaccessible paths show an error notice. Normal file clicks still open in Zeron.

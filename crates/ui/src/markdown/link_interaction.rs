@@ -372,9 +372,13 @@ impl Element for LinkRanges {
                     let target = state.targets[index].clone();
                     let ui = self.ui.clone();
                     let menu = state.menu.clone();
-                    let enabled = action == LinkAction::Copy
-                        || target.navigation.is_ok()
-                        || (action == LinkAction::Internal && file_resolved);
+                    let enabled = if action == LinkAction::RevealFile {
+                        file.as_ref().is_some_and(|file| file.local)
+                    } else {
+                        action == LinkAction::Copy
+                            || target.navigation.is_ok()
+                            || (action == LinkAction::Internal && file_resolved)
+                    };
                     popover::menu_row(
                         &theme,
                         false,
@@ -448,13 +452,12 @@ impl Element for LinkRanges {
                                 Rc::new(move |cx| cx.open_url(url.as_str())),
                             ));
                         }
-                        let path = file.absolute.clone();
-                        card = card.child(file_row(
-                            "Show in folder",
+                        card = card.child(action_row(
+                            LinkAction::RevealFile,
+                            crate::local_files::OPEN_LABEL,
                             icons::FOLDER,
                             2,
                             "link-menu-show-in-folder",
-                            Rc::new(move |cx| cx.reveal_path(&path)),
                         ));
                     }
                     // Copy the resolved absolute path — the root join, not
@@ -1264,6 +1267,18 @@ mod rendered_tests {
         assert_eq!(
             copied.and_then(|item| item.text()).as_deref(),
             Some("/repo dir/src/lib.rs")
+        );
+
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
+        let row = cx
+            .debug_bounds("link-menu-show-in-folder")
+            .unwrap()
+            .center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        assert_eq!(
+            activated.borrow().last().unwrap().action,
+            LinkAction::RevealFile
         );
 
         // "Open in Zeron" is live for a file link and hands it to the

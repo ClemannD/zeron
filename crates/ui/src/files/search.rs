@@ -287,6 +287,38 @@ impl FileSearchState {
 }
 
 impl FilesSurface {
+    pub(super) fn open_search_context_menu(
+        &mut self,
+        path: String,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(origin) = self.interaction_origin(cx) else {
+            return;
+        };
+        if !self
+            .search_state
+            .tree
+            .rows()
+            .iter()
+            .any(|row| row.path == path)
+        {
+            return;
+        }
+        self.tree_focus.focus(window, cx);
+        self.close_editor_context_menu(cx);
+        self.tree_context_menu
+            .open(super::context_menu::TreeContextMenu {
+                paths: vec![path],
+                origin,
+                position,
+                active: 1,
+                search: true,
+            });
+        cx.notify();
+    }
+
     pub(super) fn on_search_edited(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).text().trim().to_string();
         if self.search_state.query == query {
@@ -562,6 +594,25 @@ impl FilesSurface {
             .id("files-search-results")
             .role(gpui::Role::Tree)
             .aria_label("Fuzzy workspace file results")
+            .track_focus(&self.tree_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.tree_menu_key(event, window, cx) {
+                    return;
+                }
+                if event.keystroke.key == "menu"
+                    || (event.keystroke.key == "f10" && event.keystroke.modifiers.shift)
+                {
+                    if let Some(row) = this.search_state.tree.rows().get(this.search_state.active) {
+                        this.open_search_context_menu(
+                            row.path.clone(),
+                            this.search_list.viewport_bounds().origin,
+                            window,
+                            cx,
+                        );
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -615,6 +666,7 @@ impl FilesSurface {
             super::WorkspacePathSource::Search,
             None,
         );
+        let menu_path = row.path.clone();
         let content = div()
             .id(("files-search-result", index))
             .role(gpui::Role::TreeItem)
@@ -638,6 +690,15 @@ impl FilesSurface {
                 this.search_state.active = index;
                 this.activate_search_result(cx);
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.search_state.active = index;
+                    this.open_search_context_menu(menu_path.clone(), event.position, window, cx);
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }),
+            )
             .on_drag(drag_payload, |payload, _, _, cx| {
                 cx.stop_propagation();
                 workspace_path_drag_ghost(payload, cx)
@@ -786,6 +847,34 @@ mod tests {
                 "THIRD_PARTY_NOTICES/THIRD_PARTY_NOTICES.md"
             ]
         );
+    }
+
+    #[gpui::test]
+    fn search_menu_works_for_entries_not_loaded_in_the_explorer(cx: &mut gpui::TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update_in(cx, |files, window, cx| {
+            files.search_state.tree.rebuild(&[search_match(
+                "unloaded/文 件.md",
+                WorkspaceEntryKind::File,
+                100,
+            )]);
+            assert!(files.tree.node("unloaded/文 件.md").is_none());
+            files.open_search_context_menu(
+                "unloaded/文 件.md".into(),
+                gpui::point(px(50.), px(50.)),
+                window,
+                cx,
+            );
+            assert_eq!(
+                files.tree_context_menu.as_open().unwrap().paths,
+                ["unloaded/文 件.md"]
+            );
+            files.dispatch_tree_menu(1, window, cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("/workspace/unloaded/文 件.md")
+            );
+        });
     }
 
     #[test]

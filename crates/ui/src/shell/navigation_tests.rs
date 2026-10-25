@@ -628,3 +628,72 @@ fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut Te
         });
     });
 }
+
+#[gpui::test]
+fn finder_links_resolve_in_the_owner_and_refuse_remote_or_stale_sessions(cx: &mut TestAppContext) {
+    use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("文 件.rs"), "hello").unwrap();
+    let side_dir = dir.path().join("side");
+    std::fs::create_dir(&side_dir).unwrap();
+    std::fs::write(side_dir.join("文 件.rs"), "side checkout").unwrap();
+    let (shell, cx) = setup(cx);
+    crate::local_files::take_opened();
+    let link = LinkActivation {
+        target: LinkTarget::new("file", "文%20件.rs#L12"),
+        action: LinkAction::RevealFile,
+        source_session: Some("parent".into()),
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats[0].cwd = Some(dir.path().to_string_lossy().into_owned())
+        });
+        assert_eq!(
+            shell.activate_session_link(&link, window, cx),
+            LinkOutcome::Internal
+        );
+        let side = serde_json::from_value(serde_json::json!({
+            "id": "side", "parentChatId": "parent", "deviceId": "local",
+            "cwd": side_dir, "archived": false, "createdAt": Utc::now(),
+        }))
+        .unwrap();
+        shell.open_side_chat(side, shell.panel_key(cx), cx);
+        let side_link = LinkActivation {
+            source_session: Some("side".into()),
+            ..link.clone()
+        };
+        assert_eq!(
+            shell.activate_session_link(&side_link, window, cx),
+            LinkOutcome::Internal
+        );
+        let web = LinkActivation {
+            target: LinkTarget::new("web", "https://example.com"),
+            ..link.clone()
+        };
+        assert_eq!(
+            shell.activate_session_link(&web, window, cx),
+            LinkOutcome::Rejected
+        );
+        shell
+            .state
+            .update(cx, |state, _| state.chats[0].device_id = "remote".into());
+        assert_eq!(
+            shell.activate_session_link(&link, window, cx),
+            LinkOutcome::Rejected
+        );
+        shell.active_chat = "other".into();
+        assert_eq!(
+            shell.activate_session_link(&link, window, cx),
+            LinkOutcome::Rejected
+        );
+    });
+    cx.run_until_parked();
+    let mut opened = crate::local_files::take_opened();
+    opened.sort();
+    let mut expected = vec![
+        (dir.path().join("文 件.rs"), false),
+        (side_dir.join("文 件.rs"), false),
+    ];
+    expected.sort();
+    assert_eq!(opened, expected);
+}
