@@ -6892,6 +6892,8 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: None,
+            compatibility: None,
+            held_back: None,
         };
         assert!(!state.apply_harness_updates(vec![]));
         assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
@@ -7731,7 +7733,11 @@ mod tests {
     }
 }
 
-#[cfg(any(feature = "appshots-fixture", feature = "pull-request-fixture"))]
+#[cfg(any(
+    feature = "appshots-fixture",
+    feature = "pull-request-fixture",
+    feature = "project-path-fixture"
+))]
 impl AppState {
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
@@ -7739,9 +7745,10 @@ impl AppState {
     }
 }
 
-#[cfg(feature = "project-palette-fixture")]
+#[cfg(any(test, feature = "project-palette-fixture"))]
 impl AppState {
-    /// Seed provider metadata for the isolated native sidebar review fixture.
+    /// Seed provider metadata for the isolated native sidebar review fixture
+    /// and for tests that click a sidebar badge.
     pub fn fixture_sidebar_change_request(
         &mut self,
         snapshot: zeron_proto::CheckoutChangeRequestStatus,
