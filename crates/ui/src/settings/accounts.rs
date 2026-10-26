@@ -283,6 +283,18 @@ pub(crate) fn render_usage_meter(
     window: &zeron_proto::AgentUsageWindow,
     theme: &Theme,
 ) -> AnyElement {
+    usage_meter(window, theme, false)
+}
+
+/// Sidebar meters grow with the card while keeping labels and percentages aligned.
+pub(crate) fn render_sidebar_usage_meter(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+) -> AnyElement {
+    usage_meter(window, theme, true)
+}
+
+fn usage_meter(window: &zeron_proto::AgentUsageWindow, theme: &Theme, stretch: bool) -> AnyElement {
     let fraction = window.used_fraction.clamp(0.0, 1.0);
     let level = usage_level(fraction);
     let fill = usage_color(level, theme).opacity(match level {
@@ -290,6 +302,7 @@ pub(crate) fn render_usage_meter(
         _ => 0.9,
     });
     div()
+        .when(stretch, |el| el.w_full().min_w_0())
         .h(px(16.0))
         .flex()
         .flex_row()
@@ -306,8 +319,8 @@ pub(crate) fn render_usage_meter(
         )
         .child(
             div()
-                .w(px(USAGE_BAR_WIDTH))
-                .flex_none()
+                .when(stretch, |el| el.flex_1().min_w_0())
+                .when(!stretch, |el| el.w(px(USAGE_BAR_WIDTH)).flex_none())
                 .h(px(4.0))
                 .rounded_full()
                 .overflow_hidden()
