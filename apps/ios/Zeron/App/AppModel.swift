@@ -788,6 +788,7 @@ final class AppModel {
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
             noteDeliveryActivity()
+            SessionActivities.sent(chatId)
             refreshWorkspace()
             return chatId
         } catch {

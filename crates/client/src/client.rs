@@ -1453,6 +1453,79 @@ impl Client {
         Ok(())
     }
 
+    // ── Live Activity ─────────────────────────────────────────────────────
+
+    /// This device's ActivityKit push-to-start token (hex) and its APNs
+    /// `environment`: lets the edge start the sessions Live Activity.
+    pub async fn register_live_activity_start(&self, token: &str, environment: &str) -> Result<()> {
+        self.post_live_activity(
+            serde_json::json!({ "startToken": token, "environment": environment }),
+        )
+        .await
+    }
+
+    /// A started Live Activity's update token (hex).
+    pub async fn register_live_activity(&self, activity_id: &str, token: &str) -> Result<()> {
+        self.post_live_activity(serde_json::json!({ "activityId": activity_id, "token": token }))
+            .await
+    }
+
+    /// This device sent `chat_id` a message: show it in the Live Activity.
+    pub async fn watch_live_activity(&self, chat_id: &str) -> Result<()> {
+        self.post_live_activity(serde_json::json!({ "watch": chat_id }))
+            .await
+    }
+
+    /// The Live Activity `activity_id` ended or was dismissed on the device.
+    pub async fn live_activity_ended(&self, activity_id: &str) -> Result<()> {
+        self.post_live_activity(serde_json::json!({ "ended": activity_id }))
+            .await
+    }
+
+    /// Stop Live Activities on this device (sign-out, turned off).
+    pub async fn unregister_live_activity(&self) -> Result<()> {
+        self.live_activity_request(reqwest::Method::DELETE, None)
+            .await
+    }
+
+    async fn post_live_activity(&self, body: serde_json::Value) -> Result<()> {
+        self.live_activity_request(reqwest::Method::POST, Some(body))
+            .await
+    }
+
+    async fn live_activity_request(
+        &self,
+        method: reqwest::Method,
+        body: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
+        let url = crate::live::urls::registry_live_activity(
+            &live.edge,
+            self.inner.credentials.org_id(),
+            &self.inner.config.device_id,
+        );
+        let token_value = self.inner.tokens.bearer().await?;
+        let mut request = crate::auth::http()
+            .request(method, url)
+            .bearer_auth(token_value);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ClientError::Network(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ClientError::HostError(format!(
+                "live activity http {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn list_refs(&self, device_id: &str, repo_path: &str) -> Result<Vec<RepoRef>> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_refs(repo_path).await,

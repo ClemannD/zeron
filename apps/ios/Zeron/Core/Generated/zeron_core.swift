@@ -1123,6 +1123,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func listRefs(deviceId: String, repoPath: String) async throws  -> [RepoRef]
     
+    /**
+     * A Live Activity ended or was dismissed on this phone.
+     */
+    func liveActivityEnded(activityId: String) async throws 
+    
     func markSeen(chatId: String) 
     
     /**
@@ -1188,6 +1193,16 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func readAttachment(deviceId: String, path: String) async throws  -> Data
     
     /**
+     * A started Live Activity's update token (hex).
+     */
+    func registerLiveActivity(activityId: String, token: String) async throws 
+    
+    /**
+     * The ActivityKit push-to-start token (hex) and its APNs environment.
+     */
+    func registerLiveActivityStart(token: String, environment: String) async throws 
+    
+    /**
      * Ask for session notifications on this device (APNs token as hex,
      * "production" | "sandbox", and which kinds).
      */
@@ -1248,6 +1263,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func unpinSession(chatId: String) throws 
     
     /**
+     * Stop Live Activities on this phone.
+     */
+    func unregisterLiveActivity() async throws 
+    
+    /**
      * Stop session notifications to this device.
      */
     func unregisterPushTarget() async throws 
@@ -1269,6 +1289,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * about to open there), so it starts on the direct link.
      */
     func warmDirect(chatId: String) 
+    
+    /**
+     * This phone sent the chat a message: show it in the Live Activity.
+     */
+    func watchLiveActivity(chatId: String) async throws 
     
     /**
      * The whole derived workspace.
@@ -1814,6 +1839,25 @@ open func listRefs(deviceId: String, repoPath: String)async throws  -> [RepoRef]
         )
 }
     
+    /**
+     * A Live Activity ended or was dismissed on this phone.
+     */
+open func liveActivityEnded(activityId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_live_activity_ended(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(activityId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func markSeen(chatId: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_mark_seen(
@@ -1998,6 +2042,44 @@ open func readAttachment(deviceId: String, path: String)async throws  -> Data  {
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * A started Live Activity's update token (hex).
+     */
+open func registerLiveActivity(activityId: String, token: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_register_live_activity(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(activityId),FfiConverterString.lower(token)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The ActivityKit push-to-start token (hex) and its APNs environment.
+     */
+open func registerLiveActivityStart(token: String, environment: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_register_live_activity_start(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(token),FfiConverterString.lower(environment)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -2219,6 +2301,25 @@ open func unpinSession(chatId: String)throws   {try rustCallWithError(FfiConvert
 }
     
     /**
+     * Stop Live Activities on this phone.
+     */
+open func unregisterLiveActivity()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_unregister_live_activity(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
      * Stop session notifications to this device.
      */
 open func unregisterPushTarget()async throws   {
@@ -2288,6 +2389,25 @@ open func warmDirect(chatId: String)  {try! rustCall() {
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * This phone sent the chat a message: show it in the Live Activity.
+     */
+open func watchLiveActivity(chatId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_watch_live_activity(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -21907,6 +22027,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_refs() != 27606) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_live_activity_ended() != 11977) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_mark_seen() != 64234) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21953,6 +22076,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_read_attachment() != 50982) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_register_live_activity() != 16873) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_register_live_activity_start() != 63949) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_register_push_target() != 33942) {
@@ -22006,6 +22135,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_unpin_session() != 9102) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_unregister_live_activity() != 64938) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_unregister_push_target() != 55720) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22019,6 +22151,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_warm_direct() != 53016) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_watch_live_activity() != 34910) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace() != 42501) {

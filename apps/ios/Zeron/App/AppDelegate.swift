@@ -9,6 +9,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         // Before launch finishes, so a tap that launched the app is delivered.
         UNUserNotificationCenter.current().delegate = PushNotifications.shared
+        // Also before any scene: a push can start the sessions Live Activity
+        // and wake Zeron in the background for its token.
+        SessionActivities.shared.install()
         return true
     }
 

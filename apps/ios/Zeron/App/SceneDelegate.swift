@@ -30,6 +30,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         app.onSignOut = { [weak self] in
             guard let self else { return }
             push.signingOut(client: self.app.client)
+            SessionActivities.shared.signingOut(client: self.app.client)
             self.app.signOutLocally()
             self.showRoot(animated: true)
         }
@@ -56,6 +57,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         if !args.contains("-lab") { shellShown() }
 
         #if DEBUG
+        if let i = args.firstIndex(of: "-sessions-activity-preview") {
+            SessionActivities.shared.preview(i + 1 < args.count ? args[i + 1] : "several")
+        }
         if args.contains("-voice-preview") {
             app.voice.preview()
             if args.contains("-voice-stage") {
@@ -151,11 +155,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     #endif
 
-    /// The signed-in shell is up: refresh this phone's notification
-    /// registration and open a session a notification was tapped for.
+    /// The signed-in shell is up: refresh this phone's notification and Live
+    /// Activity registrations and open a session a notification was tapped for.
     private func shellShown() {
         guard app.isSignedIn else { return }
-        if !app.isDemo { PushNotifications.shared.signedIn() }
+        if !app.isDemo {
+            PushNotifications.shared.signedIn()
+            SessionActivities.shared.attach(app: app)
+        }
         PushNotifications.shared.shellReady()
     }
 
@@ -180,12 +187,18 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
-    /// `zeron://voice` (the call's Live Activity) returns to the stage.
+    /// `zeron://voice` (the call's Live Activity) returns to the stage;
+    /// `zeron://chat/<id>` (a session in the sessions Live Activity) opens it.
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
-              app.voice.live, let root = window?.rootViewController
+        guard let url = URLContexts.first(where: { $0.url.scheme == "zeron" })?.url,
+              let root = window?.rootViewController
         else { return }
-        root.presentVoiceStage(app: app, source: nil)
+        if url.host == "voice", app.voice.live {
+            root.presentVoiceStage(app: app, source: nil)
+        } else if url.host == "chat", let chatId = url.pathComponents.dropFirst().first, app.isSignedIn {
+            if root.presentedViewController != nil { root.dismiss(animated: false) }
+            (root as? AppRouter)?.openSession(chatId)
+        }
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
@@ -194,5 +207,6 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneWillEnterForeground(_ scene: UIScene) {
         app.willEnterForeground()
+        if app.isSignedIn, !app.isDemo { SessionActivities.shared.attach(app: app) }
     }
 }

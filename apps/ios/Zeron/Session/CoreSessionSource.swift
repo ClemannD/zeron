@@ -173,6 +173,7 @@ final class CoreSessionSource: SessionSource {
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
             app?.forgetFreshSideChat(chatId)
             app?.noteDeliveryActivity()
+            SessionActivities.sent(chatId)
             sendFailure = nil
             return true
         } catch {
@@ -190,7 +191,9 @@ final class CoreSessionSource: SessionSource {
     }
 
     func answer(requestId: String, answers: [(questionId: String, labels: [String])]) {
-        try? handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+        if (try? handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })) != nil {
+            SessionActivities.sent(chatId)
+        }
     }
 
     func queueAction(_ id: String, _ action: QueueAction) {

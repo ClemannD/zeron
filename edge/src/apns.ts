@@ -49,27 +49,34 @@ export const providerToken = async (cfg: ApnsConfig, now = Date.now()): Promise<
 export const isDeadToken = (r: ApnsResult): boolean =>
   r.status === 410 || r.reason === "BadDeviceToken" || r.reason === "Unregistered" || r.reason === "DeviceTokenNotForTopic";
 
+/** `alert`: a notification. `liveactivity`: an ActivityKit start, update or
+ * end, sent to the app's `.push-type.liveactivity` topic. */
+export type ApnsPushType = "alert" | "liveactivity";
+
 export const sendApns = async (
   cfg: ApnsConfig,
   environment: ApnsEnvironment,
   deviceToken: string,
   payload: unknown,
-  collapseId: string
+  collapseId: string | undefined,
+  pushType: ApnsPushType = "alert"
 ): Promise<ApnsResult> => {
   const jwt = await providerToken(cfg);
+  const headers: Record<string, string> = {
+    authorization: `bearer ${jwt}`,
+    "apns-topic": pushType === "liveactivity" ? `${cfg.topic}.push-type.liveactivity` : cfg.topic,
+    "apns-push-type": pushType,
+    "apns-priority": "10",
+    // Deliver within a day if the phone is off; older than that is noise.
+    // An activity's state is stale much sooner.
+    "apns-expiration": String(Math.floor(Date.now() / 1000) + (pushType === "liveactivity" ? 60 * 60 : 24 * 60 * 60)),
+    "content-type": "application/json"
+  };
+  // APNs caps collapse ids at 64 bytes.
+  if (collapseId !== undefined) headers["apns-collapse-id"] = collapseId.slice(0, 64);
   const response = await fetch(`${HOSTS[environment]}/3/device/${deviceToken}`, {
     method: "POST",
-    headers: {
-      authorization: `bearer ${jwt}`,
-      "apns-topic": cfg.topic,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
-      // Deliver within a day if the phone is off; older than that is noise.
-      "apns-expiration": String(Math.floor(Date.now() / 1000) + 24 * 60 * 60),
-      // APNs caps collapse ids at 64 bytes.
-      "apns-collapse-id": collapseId.slice(0, 64),
-      "content-type": "application/json"
-    },
+    headers,
     body: JSON.stringify(payload)
   });
   if (response.ok) return { status: response.status };

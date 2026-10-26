@@ -101,6 +101,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         app.cloud.refresh()
         // Back from iOS Settings (notifications may have been allowed there).
         foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            // Live Activities may have been allowed there too.
+            self?.reload()
             self?.refreshNotificationStatus()
         }
     }
@@ -143,6 +145,16 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
                 return Row(id: "notify:\(kind.rawValue)", title: kind.title, symbol: symbol, accessory: .toggle(PushNotifications.shared.isOn(kind)))
             }
         }
+        if !app.isDemo {
+            let activities = SessionActivities.shared
+            rows.append(Row(
+                id: "liveActivity",
+                title: "Live Activity",
+                subtitle: activities.allowed ? "Sessions you message from this phone, on the Lock Screen and in the Dynamic Island" : "Turned off in iOS Settings",
+                symbol: "platter.filled.top.iphone",
+                accessory: .toggle(activities.enabled && activities.allowed)
+            ))
+        }
         return rows
     }
 
@@ -153,6 +165,21 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         }
         if id == "math:render" {
             MathSettings.render = on
+            return reload()
+        }
+        if id == "liveActivity" {
+            let activities = SessionActivities.shared
+            if on, !activities.allowed {
+                // Only the Settings app can turn them back on.
+                let alert = UIAlertController(title: "Live Activities are off", message: "Allow Live Activities for Zeron in iOS Settings.", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { [weak self] _ in self?.reload() })
+                alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { [weak self] _ in
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    self?.reload()
+                })
+                return present(alert, animated: true)
+            }
+            activities.enabled = on
             return reload()
         }
         let push = PushNotifications.shared

@@ -86,12 +86,16 @@ export const parsePrefs = (raw: unknown): PushPrefs => {
   };
 };
 
+/** The desktop's chimes (crates/ui/assets/sounds), bundled in the iOS app.
+ * A build without them plays the default sound. */
+export const SOUNDS: Record<Category, string> = { done: "done.wav", input: "request.wav", failed: "attention.wav" };
+
 /** The APNs body: alert + the chat to open on tap. One thread per chat, and a
  * newer notification for the same chat replaces the older one. */
 export const apnsPayload = (chatId: string, title: string, category: Category) => ({
   aps: {
     alert: { title, body: bodyFor(category) },
-    sound: "default",
+    sound: SOUNDS[category],
     "thread-id": chatId
   },
   chatId,

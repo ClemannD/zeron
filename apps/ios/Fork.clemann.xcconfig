@@ -5,3 +5,6 @@ ZERON_BUNDLE_ID = app.clemann.zeron
 ZERON_EDGE_URL = https:/$()/zeron.clemann.app
 ZERON_AUTH_API_BASE = https:/$()/zeron.clemann.app
 ZERON_AUTH_CLIENT_ID = zeron-self
+// Shared with the Live Activity extension (the sessions activity's wallpaper).
+// Signed in only by scripts/ios/archive-fork.sh's fork entitlements.
+ZERON_APP_GROUP = group.app.clemann.zeron

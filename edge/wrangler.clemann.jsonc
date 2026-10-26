@@ -70,6 +70,8 @@
     // ZERON_WORKOS_CLIENT_ID.
     "WORKOS_CLIENT_ID": "zeron-self",
     "AUTH_MODE": "self",
+    "APNS_TEAM_ID": "7C4DAG233S",
+    "APNS_TOPIC": "app.clemann.zeron",
     "PRIVATE_RELEASES_USER_ID": "user_cc9417dab50d49a7ba18fee6f402356b",
     "SANDBOX_PROVIDER": "boat",
     "BOAT_API_BASE": "https://boat.dev/api/v1",

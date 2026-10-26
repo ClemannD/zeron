@@ -325,6 +325,11 @@ export default {
       if (parts[2] === "push-target" && (request.method === "POST" || request.method === "DELETE")) {
         return forward(env.REGISTRY_ROOMS, room, request, auth, "/push-target", url.search);
       }
+      // A phone's Live Activity tokens and sends (live-activity.ts), or its
+      // removal. `?device=` required.
+      if (parts[2] === "live-activity" && (request.method === "POST" || request.method === "DELETE")) {
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/live-activity", url.search);
+      }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table
       // from local rows with original clocks, automatically.

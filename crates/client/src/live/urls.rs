@@ -70,6 +70,16 @@ pub(crate) fn registry_push_target(edge: &str, org_id: &str, device_id: &str) ->
     )
 }
 
+/// A phone's Live Activity tokens and sends (POST) / removal (DELETE).
+pub(crate) fn registry_live_activity(edge: &str, org_id: &str, device_id: &str) -> String {
+    format!(
+        "{}/registry/{}/live-activity?device={}",
+        edge.trim_end_matches('/'),
+        encode(org_id),
+        encode(device_id)
+    )
+}
+
 pub(crate) fn chat_ws(edge: &str, chat_id: &str, token: &str, device_id: &str) -> String {
     format!(
         "{}/chat2/{}/ws?token={}&device={}",
@@ -142,6 +152,10 @@ mod tests {
         assert_eq!(
             registry_push_target("https://e.sh/", "org_1", "ios-1"),
             "https://e.sh/registry/org_1/push-target?device=ios-1"
+        );
+        assert_eq!(
+            registry_live_activity("https://e.sh/", "org_1", "ios-1"),
+            "https://e.sh/registry/org_1/live-activity?device=ios-1"
         );
         assert_eq!(
             nudge("https://e.sh", "dev-mac"),

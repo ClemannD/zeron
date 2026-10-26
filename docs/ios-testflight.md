@@ -7,6 +7,7 @@ The fork uses `apps/ios/Fork.clemann.xcconfig` when archiving:
 | Apple team | `7C4DAG233S` (Dylan Clemann's local development certificate) |
 | App bundle ID | `app.clemann.zeron` |
 | Live Activity extension ID | `app.clemann.zeron.LiveActivity` |
+| App Group (app + extension) | `group.app.clemann.zeron` |
 | Sync and sign-in API | `https://zeron.clemann.app` |
 | Auth client | `zeron-self` |
 
@@ -22,6 +23,10 @@ receives that edge URL explicitly. Android still uses upstream's defaults.
 2. In Certificates, Identifiers & Profiles, register two explicit App IDs:
    `app.clemann.zeron` (description: Zeron Clemann; enable Push Notifications)
    and `app.clemann.zeron.LiveActivity` (description: Zeron Live Activity).
+   Register the App Group `group.app.clemann.zeron`, then enable App Groups
+   on both App IDs with that group selected. The sessions Live Activity reads
+   the app's wallpaper from it. The export's automatic signing may do this
+   itself; if an upload fails on provisioning, do it by hand.
 3. In App Store Connect → Apps → + → New App, create an iOS app with:
    name `Zeron Clemann`, primary language English (U.S.), bundle ID
    `app.clemann.zeron`, and SKU `zeron-clemann-ios`. The name can differ if
@@ -126,3 +131,26 @@ edge secrets, and set `APNS_TEAM_ID=7C4DAG233S` and
 `APNS_TOPIC=app.clemann.zeron` in `edge/wrangler.clemann.jsonc`. Always use
 `-c wrangler.clemann.jsonc` for Wrangler commands. The shared edge defaults
 belong to upstream and must not be used with this fork's APNs key.
+
+## Sessions Live Activity
+
+The Lock Screen and Dynamic Island show the sessions this iPhone sent a
+message to (a new session, a follow-up, or an answer). The edge drives it
+(`edge/src/live-activity.ts`): the phone registers its ActivityKit tokens and
+reports each send to `/registry/:orgId/live-activity`. The edge starts,
+updates, and ends the activity over APNs, using the same `APNS_*` settings as
+notifications. Pushes go to the `app.clemann.zeron.push-type.liveactivity`
+topic; no extra key or secret is needed.
+
+A session that needs input, finishes, or fails while others still run chimes
+on the activity with the desktop's sound, and the plain notification is
+skipped. The last session finishing ends the activity and leaves the alert to
+the plain notification. `/registry/:orgId/stats` lists the registrations,
+watched sessions, and recent sends under `liveActivity`.
+
+The fork's archive signs the app and extension with
+`apps/ios/Fork.clemann.entitlements` and
+`apps/ios/ZeronLiveActivity.clemann.entitlements` (the App Group above).
+Builds without the group still show the activity, on the system's material
+instead of the wallpaper. On a debug build, `-sessions-activity-preview
+[one|several|done]` starts a local activity with sample sessions.

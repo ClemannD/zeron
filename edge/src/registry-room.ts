@@ -21,7 +21,8 @@
  * and every op they push must be on a row they host (registry-runner.ts).
  *
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
- * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
+ * auto-response pair; the one alarm does the daily tombstone GC + R2 backup,
+ * and sweeps phones' Live Activities while any is up (live-activity.ts).
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { chatHost, parentOf, runnerCanSee, runnerOpRefusal, type RunnerScope } from "./registry-runner";
@@ -35,6 +36,7 @@ import {
   type Category,
   type PushPrefs
 } from "./push-notify";
+import { LiveActivities } from "./live-activity";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -105,6 +107,7 @@ export class RegistryRoom implements DurableObject {
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
+  private readonly liveActivities: LiveActivities;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -125,6 +128,14 @@ export class RegistryRoom implements DurableObject {
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    this.liveActivities = new LiveActivities({
+      sql: ctx.storage.sql,
+      loadRow: (kind, id) => this.loadRow(kind, id),
+      prefs: (device) => this.pushTargets().find((t) => t.device === device)?.prefs ?? parsePrefs(undefined),
+      apns: () => apnsConfig(this.env),
+      waitUntil: (promise) => ctx.waitUntil(promise),
+      scheduleSweep: (at) => this.scheduleSweep(at)
+    });
   }
 
   // ── meta helpers ──────────────────────────────────────────────────────────
@@ -307,7 +318,8 @@ export class RegistryRoom implements DurableObject {
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
         pushConfigured: apnsConfig(this.env) !== undefined,
-        pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[]
+        pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[],
+        liveActivity: this.liveActivities.stats()
       });
     }
 
@@ -341,6 +353,27 @@ export class RegistryRoom implements DurableObject {
           Date.now()
         );
         return json({ ok: true });
+      }
+    }
+
+    // A phone's Live Activity: its ActivityKit tokens, and each send it makes
+    // (live-activity.ts). DELETE when turned off or signing out.
+    if (url.pathname === "/live-activity") {
+      const device = url.searchParams.get("device") ?? "";
+      if (device === "") return json({ error: "bad_request", message: "device required" }, 400);
+      if (request.method === "DELETE") {
+        this.liveActivities.remove(device);
+        return json({ ok: true });
+      }
+      if (request.method === "POST") {
+        let body: Record<string, unknown>;
+        try {
+          body = (await request.json()) as Record<string, unknown>;
+        } catch {
+          return json({ error: "bad_request", message: "malformed body" }, 400);
+        }
+        const result = this.liveActivities.register(device, body ?? {});
+        return result.error ? json({ error: "bad_request", message: result.error }, result.status) : json({ ok: true });
       }
     }
 
@@ -622,7 +655,10 @@ export class RegistryRoom implements DurableObject {
         // advances with the room's seq.
         send(socket, { t: "rows", seq, rows: this.visible(rows, socketState.runner, socketState.runnerAccount) });
       }
-      this.notifySessions(sessionsBefore, touched);
+      // Live Activities first: an alert one carries replaces the plain
+      // notification for that phone and chat.
+      const alerted = this.liveActivities.onBatch(touched.values());
+      this.notifySessions(sessionsBefore, touched, alerted);
     }
     return { ok: true, batch, seq, applied, rejected };
   }
@@ -640,8 +676,9 @@ export class RegistryRoom implements DurableObject {
 
   /** Session rows that changed in a batch → the desktop's notifications
    * (done / needs input / failed), sent to every registered phone after the
-   * batch commits. Best effort: a failed delivery is logged, never retried. */
-  private notifySessions(before: Map<string, Row | undefined>, touched: Map<string, Row>): void {
+   * batch commits. Best effort: a failed delivery is logged, never retried.
+   * `alerted` (`device chatId`) already sounded on that phone's activity. */
+  private notifySessions(before: Map<string, Row | undefined>, touched: Map<string, Row>, alerted: Set<string>): void {
     if (before.size === 0) return;
     const now = Date.now();
     const notes: Notification[] = [];
@@ -664,6 +701,10 @@ export class RegistryRoom implements DurableObject {
         if (!target.prefs[note.category]) continue;
         const entry: PushLogEntry = { at: now, chatId: note.chatId, category: note.category, device: target.device, result: "pending" };
         log.push(entry);
+        if (alerted.has(`${target.device} ${note.chatId}`)) {
+          entry.result = "live activity";
+          continue;
+        }
         if (config === undefined) {
           entry.result = "not configured";
           continue;
@@ -732,14 +773,39 @@ export class RegistryRoom implements DurableObject {
 
   private markBackupDirty(): void {
     this.setMeta("backupDirty", "1");
-    void this.ctx.storage.getAlarm().then((existing) => {
-      if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
-    });
+    if (this.getMeta("backupDueAt") === undefined) {
+      this.setMeta("backupDueAt", String(Date.now() + DAY_MS));
+      this.scheduleAlarm();
+    }
   }
 
-  /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
+  /** A Live Activity sweep at (or before) `at`. */
+  private scheduleSweep(at: number): void {
+    const current = Number(this.getMeta("sweepAt") ?? "0");
+    if (current > Date.now() && current <= at) return;
+    this.setMeta("sweepAt", String(at));
+    this.scheduleAlarm();
+  }
+
+  /** The one alarm, at the earliest of the backup and the sweep. */
+  private scheduleAlarm(): void {
+    const due = [Number(this.getMeta("backupDueAt") ?? "0"), Number(this.getMeta("sweepAt") ?? "0")].filter((t) => t > 0);
+    if (due.length > 0) void this.ctx.storage.setAlarm(Math.min(...due));
+  }
+
+  /** Live Activity sweeps; daily, tombstone GC + nightly R2 backup. */
   async alarm(): Promise<void> {
-    if (this.getMeta("backupDirty") !== "1") return; // idle: stop the chain
+    const now = Date.now();
+    const sweepAt = Number(this.getMeta("sweepAt") ?? "0");
+    if (sweepAt > 0 && sweepAt <= now) {
+      this.setMeta("sweepAt", "0");
+      this.liveActivities.sweep(now);
+    }
+    // An alarm set before `backupDueAt` existed is the daily one.
+    const backupDueAt = this.getMeta("backupDueAt");
+    if (backupDueAt !== undefined && Number(backupDueAt) > now) return this.scheduleAlarm();
+    this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = 'backupDueAt'");
+    if (this.getMeta("backupDirty") !== "1") return this.scheduleAlarm(); // idle: stop the chain
 
     // 1. Tombstone GC. Raising gcFloor to the purged rows' max seq forces a
     //    full resync for any cursor that might have missed a purged delete.
@@ -770,6 +836,7 @@ export class RegistryRoom implements DurableObject {
       this.setMeta("backupSeq", String(seq));
     }
     this.setMeta("backupDirty", "0");
+    this.scheduleAlarm();
   }
 }
 

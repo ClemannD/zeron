@@ -24,6 +24,8 @@
 		A400000000000000000000E2 /* Exceptions for "Zeron" folder in "ZeronLiveActivity" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Design/BrandMarks.swift,
+				Design/HermesMark.swift,
 				"Fonts/Geist-Medium.ttf",
 				"Fonts/GeistMono-Medium.ttf",
 			);

@@ -427,6 +427,49 @@ impl CoreClient {
         on_runtime(async move { client.unregister_push_target().await }).await
     }
 
+    /// The ActivityKit push-to-start token (hex) and its APNs environment.
+    pub async fn register_live_activity_start(
+        &self,
+        token: String,
+        environment: String,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .register_live_activity_start(&token, &environment)
+                .await
+        })
+        .await
+    }
+
+    /// A started Live Activity's update token (hex).
+    pub async fn register_live_activity(
+        &self,
+        activity_id: String,
+        token: String,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.register_live_activity(&activity_id, &token).await }).await
+    }
+
+    /// This phone sent the chat a message: show it in the Live Activity.
+    pub async fn watch_live_activity(&self, chat_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.watch_live_activity(&chat_id).await }).await
+    }
+
+    /// A Live Activity ended or was dismissed on this phone.
+    pub async fn live_activity_ended(&self, activity_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.live_activity_ended(&activity_id).await }).await
+    }
+
+    /// Stop Live Activities on this phone.
+    pub async fn unregister_live_activity(&self) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.unregister_live_activity().await }).await
+    }
+
     pub async fn list_refs(
         &self,
         device_id: String,

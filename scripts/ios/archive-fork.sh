@@ -29,10 +29,14 @@ xcodebuild -project apps/ios/Zeron.xcodeproj -scheme Zeron \
   -archivePath "$ARCHIVE" archive CODE_SIGNING_ALLOWED=NO \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
-# Export retains these push entitlements and replaces the ad-hoc signature
-# with Apple's distribution signature, as in the upstream TestFlight workflow.
+# Export retains these push and app group entitlements and replaces the
+# ad-hoc signatures with Apple's distribution signature, as in the upstream
+# TestFlight workflow. The extension shares the app group (the sessions Live
+# Activity's wallpaper); nested code is signed before the app.
 APP="$ARCHIVE/Products/Applications/Zeron.app"
-codesign --force --sign - --entitlements apps/ios/Zeron.entitlements "$APP"
+codesign --force --sign - --entitlements apps/ios/ZeronLiveActivity.clemann.entitlements \
+  "$APP/PlugIns/ZeronLiveActivity.appex"
+codesign --force --sign - --entitlements apps/ios/Fork.clemann.entitlements "$APP"
 
 python3 - "$APP/Info.plist" <<'PY'
 import plistlib
@@ -44,6 +48,7 @@ expected = {
     "ZeronEdgeURL": "https://zeron.clemann.app",
     "ZeronAuthAPIBase": "https://zeron.clemann.app",
     "ZeronAuthClientID": "zeron-self",
+    "ZeronAppGroup": "group.app.clemann.zeron",
 }
 for key, value in expected.items():
     if info.get(key) != value:
