@@ -138,6 +138,9 @@ pub enum FontKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
+    ProjectTabsEnabled(bool),
+    ProjectTabWidthChanged(crate::settings::ProjectTabWidth),
+    ProjectTabMetaChanged(crate::settings::ProjectTabMeta),
 }
 
 impl FontKind {
@@ -328,6 +331,7 @@ pub struct AppearancePage {
     surface_select: widgets::SelectState,
     background_effect_select: widgets::SelectState,
     reduce_motion_select: widgets::SelectState,
+    project_tab_width_select: widgets::SelectState,
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
     review_entry: Option<String>,
@@ -336,6 +340,57 @@ pub struct AppearancePage {
 }
 
 impl AppearancePage {
+    fn render_project_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::settings::ProjectTabWidth;
+        let settings = crate::settings::current(cx).project_tabs;
+        let enabled = settings.enabled;
+        let toggle = |label: &'static str, id: &'static str, on: bool, event: AppearanceSettingsEvent, first: bool, cx: &mut Context<Self>| {
+            widgets::card_row(theme, first)
+                .child(div().flex_1().min_w_0().child(widgets::row_title(theme, label)))
+                .child(widgets::toggle_switch(theme, on, id)
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label(label)
+                    .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(event);
+                        cx.notify();
+                    })))
+        };
+        let widths = ProjectTabWidth::ALL;
+        let control = widgets::select("project-tab-width", "Tab width", theme,
+            |page: &mut Self| &mut page.project_tab_width_select)
+            .options(widths.iter().map(|width| widgets::SelectOption::new(width.label())),
+                widths.iter().position(|width| *width == settings.width).unwrap_or(1))
+            .width(128.0)
+            .on_select(move |_, ix, _, cx| {
+                cx.emit(AppearanceSettingsEvent::ProjectTabWidthChanged(widths[ix]));
+                cx.notify();
+            })
+            .render(&self.project_tab_width_select, cx);
+        let mut card = widgets::section_card(theme).mt_0()
+            .child(toggle("Show project tabs", "appearance-project-tabs-enabled", enabled,
+                AppearanceSettingsEvent::ProjectTabsEnabled(!enabled), true, cx))
+            .child(widgets::card_row(theme, false)
+                .child(div().flex_1().min_w_0().child(widgets::row_title(theme, "Tab width")))
+                .child(control));
+        let meta = settings.meta;
+        for (label, id, on, next) in [
+            ("Show branch", "appearance-project-tab-branch", meta.branch,
+                crate::settings::ProjectTabMeta { branch: !meta.branch, ..meta }),
+            ("Show pull request", "appearance-project-tab-pr", meta.pull_request,
+                crate::settings::ProjectTabMeta { pull_request: !meta.pull_request, ..meta }),
+        ] {
+            card = card.child(toggle(label, id, on,
+                AppearanceSettingsEvent::ProjectTabMetaChanged(next), false, cx));
+        }
+        widgets::section(theme, "Project tabs", card).into_any_element()
+    }
+
     fn queue_width(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
         let width = crate::settings::normalize_transcript_width(width);
         if self
@@ -710,6 +765,7 @@ impl AppearancePage {
             surface_select: widgets::SelectState::default(),
             background_effect_select: widgets::SelectState::default(),
             reduce_motion_select: widgets::SelectState::default(),
+            project_tab_width_select: widgets::SelectState::default(),
             import_dialog: None,
             background_adjustment_dialog: None,
             review_entry: None,
@@ -4098,6 +4154,7 @@ impl Render for AppearancePage {
             }
         }
 
+        let project_tabs = self.render_project_tabs(&theme, cx);
         let scrollbar = popover::rail(self, "appearance-page-scrollbar", &theme, cx);
         div()
             .id("appearance-page-host")
@@ -4168,6 +4225,7 @@ impl Render for AppearancePage {
                                         .children(color_rows)
                                         .mt(px(16.0)),
                                 )
+                                .child(project_tabs)
                                 .child(widgets::section(
                                     &theme,
                                     "Material and background",

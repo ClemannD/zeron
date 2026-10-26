@@ -941,8 +941,40 @@ pub struct ProjectTabsSettings {
     /// The session last viewed under each tab, reopened on switching back.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub last_chat: HashMap<String, String>,
+    /// Width of each project tab, independent of its metadata.
+    pub width: ProjectTabWidth,
     /// What metadata each tab shows.
     pub meta: ProjectTabMeta,
+}
+
+/// Uniform widths keep tab scrolling, selection, and drag reordering aligned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectTabWidth {
+    Narrow,
+    #[default]
+    Medium,
+    Wide,
+}
+
+impl ProjectTabWidth {
+    pub const ALL: [Self; 3] = [Self::Narrow, Self::Medium, Self::Wide];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Narrow => "Narrow",
+            Self::Medium => "Medium",
+            Self::Wide => "Wide",
+        }
+    }
+
+    pub fn pixels(self) -> f32 {
+        match self {
+            Self::Narrow => 156.0,
+            Self::Medium => 234.0,
+            Self::Wide => 312.0,
+        }
+    }
 }
 
 /// Project tab metadata; each item shows only when it
@@ -2331,6 +2363,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_tab_width_defaults_and_round_trips() {
+        let legacy: ProjectTabsSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(legacy.width, ProjectTabWidth::Medium);
+        for width in ProjectTabWidth::ALL {
+            let settings = ProjectTabsSettings { width, ..Default::default() };
+            let loaded: ProjectTabsSettings = serde_json::from_str(
+                &serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(loaded.width, width);
+        }
+    }
+
+    #[test]
     fn skill_completion_defaults_overrides_and_persistence_are_per_harness() {
         use zeron_proto::HarnessId;
         let dir = tempfile::tempdir().unwrap();
@@ -3192,6 +3236,7 @@ mod tests {
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             project_tabs: ProjectTabsSettings {
+                width: ProjectTabWidth::Wide,
                 enabled: true,
                 order: vec!["space-2".into(), "space-1".into()],
                 hidden: vec!["space-3".into()],

@@ -115,8 +115,11 @@ impl Shell {
     /// spans the window, so the line never runs up through the tabs. `None`
     /// when the titlebar is the plain one and the line may run full height.
     pub(super) fn pane_seam_top(&self, cx: &App) -> Option<f32> {
-        let height = self.workspace_titlebar_height(cx);
-        (height > Theme::TITLEBAR_HEIGHT).then_some(height)
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
+        (matches!(self.route, Route::Chat)
+            && self.settings.project_tabs.enabled
+            && !self.titlebar_trailing_layout(on_canvas, cx).takeover)
+            .then(|| self.workspace_titlebar_height(cx))
     }
 
     /// Top clearance of the right pane's body: the titlebar plus, under

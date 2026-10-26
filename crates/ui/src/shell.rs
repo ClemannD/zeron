@@ -5588,6 +5588,24 @@ impl Shell {
                     AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
                         this.set_code_font_size(size, cx);
                     }
+                    AppearanceSettingsEvent::ProjectTabsEnabled(enabled) => {
+                        this.set_project_tabs_enabled(enabled, cx);
+                    }
+                    AppearanceSettingsEvent::ProjectTabWidthChanged(width) => {
+                        this.settings.project_tabs.width = width;
+                        this.project_tab_drag = None;
+                        this.dismiss_project_tab_card(cx);
+                        this.project_tab_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                        this.schedule_save(cx);
+                        cx.notify();
+                    }
+                    AppearanceSettingsEvent::ProjectTabMetaChanged(meta) => {
+                        this.settings.project_tabs.meta = meta;
+                        this.sync_change_request_visibility(cx);
+                        this.project_tab_branch_checked = None;
+                        this.schedule_save(cx);
+                        cx.notify();
+                    }
                 },
             ));
             self.appearance_page = Some(page);
@@ -16952,6 +16970,9 @@ mod exit_regressions {
                 state.space_branches.insert("layout-project".into(), "main".into());
                 state.space_branches.insert("other-project".into(), "main".into());
             });
+            // Compact tabs have the normal titlebar height but must still
+            // suppress the side pane's divider inside the project band.
+            assert_eq!(shell.pane_seam_top(cx), Some(Theme::TITLEBAR_HEIGHT));
             cx.notify();
         });
         for width in [800.0, 1400.0] {
@@ -16960,7 +16981,7 @@ mod exit_regressions {
             cx.update(|window, cx| window.draw(cx).clear());
             let header = cx.debug_bounds("session-titlebar").unwrap();
             let tab = cx.debug_bounds("project-tab-0").unwrap();
-            assert_eq!(tab.size.width, px(156.0));
+            assert_eq!(tab.size.width, px(crate::settings::ProjectTabWidth::Medium.pixels()));
             assert_eq!(
                 header.size.height,
                 px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT)
@@ -16987,6 +17008,26 @@ mod exit_regressions {
             assert!(title.right() <= branch.left());
             assert!(branch.bottom() <= other.bottom());
         }
+        // Appearance controls reach the shell and persist immediately.
+        let page = shell.update(cx, |shell, cx| {
+            shell.ensure_appearance_page(cx);
+            shell.appearance_page.clone().unwrap()
+        });
+        for width in crate::settings::ProjectTabWidth::ALL {
+            page.update(cx, |_, cx| cx.emit(AppearanceSettingsEvent::ProjectTabWidthChanged(width)));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert_eq!(cx.debug_bounds("project-tab-0").unwrap().size.width, px(width.pixels()));
+            assert_eq!(cx.debug_bounds("project-tab-1").unwrap().size.width, px(width.pixels()));
+            shell.update(cx, |shell, cx| {
+                assert_eq!(shell.settings.project_tabs.width, width);
+                assert_eq!(settings::current(cx).project_tabs.width, width);
+            });
+        }
+        page.update(cx, |_, cx| cx.emit(AppearanceSettingsEvent::ProjectTabWidthChanged(
+            crate::settings::ProjectTabWidth::Medium)));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
         // Right-click opens the tab's menu; "Close tab" hides that tab.
         let other = cx.debug_bounds("project-tab-1").unwrap();
         cx.simulate_mouse_down(
@@ -17008,9 +17049,10 @@ mod exit_regressions {
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("project-tab-1").is_none());
         assert!(cx.debug_bounds("project-tab-0").is_some());
+        page.update(cx, |_, cx| cx.emit(AppearanceSettingsEvent::ProjectTabsEnabled(false)));
         shell.update(cx, |shell, cx| {
-            shell.settings.project_tabs.enabled = false;
-            cx.notify();
+            assert!(!shell.state.read(cx).exact_space_filter);
+            assert!(!settings::current(cx).project_tabs.enabled);
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());

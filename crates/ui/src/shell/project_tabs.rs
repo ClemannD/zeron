@@ -22,13 +22,9 @@ use std::process::Command;
 use std::time::Instant;
 
 use super::*;
-use crate::settings::ProjectTabMeta;
+use crate::settings::{ProjectTabMeta, ProjectTabWidth};
 use crate::state::NO_PROJECT_TAB;
 
-/// Fixed project-tab width. Uniform, as drag reordering assumes; tabs sit
-/// edge to edge (separators are drawn inside), so a slot is one tab.
-const PROJECT_TAB_WIDTH: f32 = 156.0;
-const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
 /// The header must reserve the tab height plus the top gutter. Growing only
 /// the tab would clip its first row inside the scrolling strip.
 const PROJECT_TAB_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD;
@@ -386,7 +382,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn dismiss_project_tab_card(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn dismiss_project_tab_card(&mut self, cx: &mut Context<Self>) {
         if self.project_tab_hover_card.dismiss() {
             cx.notify();
         }
@@ -1270,6 +1266,7 @@ impl Shell {
         let rows = self.project_tab_rows(&keys, cx);
         let activity = self.project_tab_activity(cx);
         let count = rows.len();
+        let tab_width = self.settings.project_tabs.width.pixels();
         let active = self.settings.space_filter.clone();
         let active_ix = rows
             .iter()
@@ -1307,7 +1304,7 @@ impl Shell {
                     let rel_x = f32::from(event.event.position.x)
                         - f32::from(event.bounds.left())
                         - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, PROJECT_TAB_SLOT, count);
+                    let over = crate::terminal::panel::drop_index(rel_x, tab_width, count);
                     this.update_project_tab_drag_over(from, over, cx);
                 },
             ))
@@ -1334,10 +1331,9 @@ impl Shell {
             // spacer (the ghost carries it).
             let wrapped: AnyElement = match drag {
                 Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target =
-                        crate::terminal::panel::slide_offset(ix, from, over) * PROJECT_TAB_SLOT;
-                    let start = crate::terminal::panel::slide_offset(ix, from, prev_over)
-                        * PROJECT_TAB_SLOT;
+                    let target = crate::terminal::panel::slide_offset(ix, from, over) * tab_width;
+                    let start =
+                        crate::terminal::panel::slide_offset(ix, from, prev_over) * tab_width;
                     div()
                         .relative()
                         .child(tab.with_animation(
@@ -1348,7 +1344,7 @@ impl Shell {
                         .into_any_element()
                 }
                 Some((from, ..)) if ix == from => div()
-                    .w(px(PROJECT_TAB_WIDTH))
+                    .w(px(tab_width))
                     .h(px(PROJECT_TAB_HEIGHT))
                     .flex_none()
                     .into_any_element(),
@@ -1373,11 +1369,7 @@ impl Shell {
             .bg(if self.project_tabs_menu.is_open() {
                 crate::theme::wash(0.11)
             } else {
-                motion::hover_blend(
-                    menu_fade,
-                    crate::theme::wash(0.0),
-                    crate::theme::wash(0.11),
-                )
+                motion::hover_blend(menu_fade, crate::theme::wash(0.0), crate::theme::wash(0.11))
             })
             .on_hover(motion::hover_listener(menu_fade))
             .block_mouse_except_scroll()
@@ -1437,9 +1429,12 @@ impl Shell {
                     .relative()
                     .overflow_hidden()
                     .child(
-                        gpui::canvas(move |bounds, _, _| measure.set(Some(bounds)), |_, _, _, _| {})
-                            .absolute()
-                            .size_full(),
+                        gpui::canvas(
+                            move |bounds, _, _| measure.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
                     .child(crate::surface_chrome::tab_strip_region(
                         strip,
@@ -1451,12 +1446,12 @@ impl Shell {
             .into_any_element();
 
         let scroll = self.project_tab_scroll.clone();
-        // This band spans the transcript, side pane, and wallpaper. An opaque
-        // theme surface hides their seams and keeps light-mode text readable
-        // even over a dark image. Blur alone cannot guarantee either property.
+        // Blur quiets image detail; a theme-colored tint lifts dark wallpaper
+        // in light mode instead of darkening it behind dark labels.
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
         let dark = theme.appearance.is_dark();
-        let tint = theme.surface.alpha(1.0);
+        let tint = theme.surface.alpha(if dark { 0.55 } else { 0.52 });
+        let frost = theme.is_frost();
         // The band runs unbroken, in a chat as on the canvas, and the active
         // tab is a closed chip within it, in the hover chip's shape.
         let chip = ProjectTabChip {
@@ -1471,13 +1466,17 @@ impl Shell {
             move |bounds, _, window, _| {
                 let chip_span = active_slot.and_then(|slot| {
                     let region = region.get()?;
-                    let (x0, x1) = project_tab_chip_span(region, slot, scroll.offset().x)?;
+                    let (x0, x1) =
+                        project_tab_chip_span(region, slot, scroll.offset().x, tab_width)?;
                     // The span follows the scrolled tab and can run off the
                     // strip. Clip to the strip or the selection paints over
                     // the sidebar (the tab text is already clipped).
                     Some((project_tab_chip_mask(region, bounds), x0, x1))
                 });
                 window.paint_layer(bounds, |window| {
+                    if frost {
+                        window.paint_backdrop_blur(bounds, gpui::Corners::all(px(0.0)), px(24.0));
+                    }
                     if let Some(shade) = shade {
                         paint_project_tab_shade(bounds, shade, window);
                     }
@@ -1579,7 +1578,11 @@ impl Shell {
             ..
         } = row;
         let group: SharedString = format!("project-tab-{ix}").into();
-        let muted = theme.text_muted;
+        let muted = if theme.appearance.is_light() {
+            theme.text.opacity(0.85)
+        } else {
+            theme.text_muted
+        };
         let status = pull_request
             .as_ref()
             .map(|summary| crate::change_requests::ChangeRequestTabState::from_summary(summary));
@@ -1592,7 +1595,11 @@ impl Shell {
                 .truncate()
                 .text_size(crate::typography::ui_rems(10.5))
                 .line_height(px(14.0))
-                .text_color(if active { muted } else { muted.opacity(0.78) })
+                .text_color(if active || theme.appearance.is_light() {
+                    muted
+                } else {
+                    muted.opacity(0.78)
+                })
                 .child(branch)
         });
         let pr_icon = status.zip(status_color).map(|(status, color)| {
@@ -1621,7 +1628,7 @@ impl Shell {
             .debug_selector(move || format!("project-tab-{ix}"))
             .group(group.clone())
             .relative()
-            .w(px(PROJECT_TAB_WIDTH))
+            .w(px(self.settings.project_tabs.width.pixels()))
             .h(px(PROJECT_TAB_HEIGHT))
             .flex_none()
             .pl(px(14.0))
@@ -1786,47 +1793,45 @@ impl Shell {
                 });
             let key = row.key.clone();
             list = list.child(
-                popover::menu_row(
-                    theme,
-                    active.as_deref() == Some(row.key.as_str()),
-                    fade_key,
-                )
-                .id(("project-tabs-menu-row", ix))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.activate_project_tab(key.clone(), cx);
-                }))
-                .child(art)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when(!open, |el| el.text_color(theme.text_muted))
-                        .child(row.title),
-                )
-                .when_some(device, |el, device| {
-                    el.child(
+                popover::menu_row(theme, active.as_deref() == Some(row.key.as_str()), fade_key)
+                    .id(("project-tabs-menu-row", ix))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.activate_project_tab(key.clone(), cx);
+                    }))
+                    .child(art)
+                    .child(
                         div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(device),
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(!open, |el| el.text_color(theme.text_muted))
+                            .child(row.title),
                     )
-                })
-                .child(div().w(px(14.0)).flex_none().when(open, |el| {
-                    el.child(
-                        icon(icons::CHECK)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    )
-                })),
+                    .when_some(device, |el, device| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(device),
+                        )
+                    })
+                    .child(div().w(px(14.0)).flex_none().when(open, |el| {
+                        el.child(
+                            icon(icons::CHECK)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        )
+                    })),
             );
         }
 
         let meta = self.settings.project_tabs.meta;
         let detail_rows: [(&'static str, &'static str, bool, fn(&mut ProjectTabMeta)); 2] = [
-            ("project-tabs-meta-branch", "Branch", meta.branch, |m| m.branch = !m.branch),
+            ("project-tabs-meta-branch", "Branch", meta.branch, |m| {
+                m.branch = !m.branch
+            }),
             (
                 "project-tabs-meta-pr",
                 "Pull request",
@@ -1913,9 +1918,10 @@ fn project_tab_chip_span(
     region: gpui::Bounds<Pixels>,
     slot: usize,
     scroll_x: Pixels,
+    tab_width: f32,
 ) -> Option<(Pixels, Pixels)> {
-    let x0 = region.left() + px(slot as f32 * PROJECT_TAB_SLOT) + scroll_x;
-    let x1 = x0 + px(PROJECT_TAB_WIDTH);
+    let x0 = region.left() + px(slot as f32 * tab_width) + scroll_x;
+    let x1 = x0 + px(tab_width);
     (x1 > region.left() && x0 < region.right()).then_some((x0, x1))
 }
 
@@ -2133,24 +2139,28 @@ mod tests {
     #[test]
     fn a_scrolled_chip_is_masked_to_the_strip() {
         // Sidebar seam at 256; the strip is inset to the right of it.
-        let band = rect(256.0, 0.0, 1400.0, 56.0);
-        let region = rect(280.0, 4.0, 900.0, 56.0);
-        let mask = project_tab_chip_mask(region, band);
-        assert_eq!(mask.left(), region.left());
-        assert_eq!(mask.right(), region.right());
-        assert_eq!(mask.top(), band.top());
-        assert_eq!(mask.bottom(), band.bottom());
+        for width in ProjectTabWidth::ALL {
+            let tab_width = width.pixels();
+            let band = rect(256.0, 0.0, 1400.0, 56.0);
+            let region = rect(280.0, 4.0, 900.0, 56.0);
+            let mask = project_tab_chip_mask(region, band);
+            assert_eq!(mask.left(), region.left());
+            assert_eq!(mask.right(), region.right());
+            assert_eq!(mask.top(), band.top());
+            assert_eq!(mask.bottom(), band.bottom());
 
-        // Scrolled by most of a tab: the span crosses the sidebar, and the
-        // mask still starts at the strip.
-        let (x0, x1) = project_tab_chip_span(region, 0, px(-PROJECT_TAB_WIDTH * 0.75)).unwrap();
-        assert!(x0 < band.left());
-        assert!(x1 > mask.left() && x0 < mask.left());
+            // Scrolled by most of a tab: the span crosses the sidebar, and the
+            // mask still starts at the strip.
+            let (x0, x1) =
+                project_tab_chip_span(region, 0, px(24.0 - tab_width), tab_width).unwrap();
+            assert!(x0 < band.left());
+            assert!(x1 > mask.left() && x0 < mask.left());
 
-        assert!(project_tab_chip_span(region, 0, px(-PROJECT_TAB_WIDTH)).is_none());
-        let (x0, x1) = project_tab_chip_span(region, 0, px(0.0)).unwrap();
-        assert_eq!(x0, region.left());
-        assert_eq!(x1, region.left() + px(PROJECT_TAB_WIDTH));
+            assert!(project_tab_chip_span(region, 0, px(-tab_width), tab_width).is_none());
+            let (x0, x1) = project_tab_chip_span(region, 0, px(0.0), tab_width).unwrap();
+            assert_eq!(x0, region.left());
+            assert_eq!(x1, region.left() + px(tab_width));
+        }
     }
 
     #[test]
