@@ -3,13 +3,13 @@
 //! composer ring popover's, stretched to the card width, and the data is the same
 //! [`AccountsSnapshotCache`], so a switch or probe anywhere shows up here.
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity, IntoElement, Render, Subscription, Task, Window, div, prelude::*, px};
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 use zeron_rpc::methods;
 
+use crate::accounts_resource::{AccountsResource, target_params, usage_account};
 use crate::icons::icon;
 use crate::pickers::{HarnessCatalogChanged, harness_brand_icon, offered_harnesses};
 use crate::settings::accounts::{
@@ -19,11 +19,6 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// Forced probes hit the provider; the engine throttles them too, but don't
-/// even ask more often than this.
-const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
-/// Background re-probe: usage moves as turns run.
-const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Windows per card — the composer popover's cap, so a card stays compact.
 const MAX_METERS: usize = 2;
 
@@ -48,8 +43,7 @@ pub fn card_accounts<'a>(
 ) -> Vec<&'a AgentAccount> {
     providers
         .iter()
-        .filter_map(|harness| crate::account_usage::active_account(snapshot, *harness))
-        .filter(|account| !account.usage_windows.is_empty())
+        .filter_map(|harness| usage_account(snapshot, *harness))
         .collect()
 }
 
@@ -61,13 +55,6 @@ fn sidebar_target(state: &AppState) -> Option<String> {
         .filter(|device| !device.is_empty())
         .or_else(|| state.effective_device_id())
         .filter(|device| state.local_device_id.as_ref() != Some(device))
-}
-
-fn target_params(target: &Option<String>, mut params: serde_json::Value) -> serde_json::Value {
-    if let Some(target) = target {
-        params["targetDeviceId"] = serde_json::json!(target);
-    }
-    params
 }
 
 fn cached_usage_label(fetched_at: Option<i64>, now: i64) -> String {
@@ -95,12 +82,10 @@ pub struct SidebarUsage {
     generation: u64,
     /// Retain each host's catalog so cached accounts remain visible offline.
     providers: HashMap<Option<String>, Vec<HarnessId>>,
-    unavailable: bool,
     requested: bool,
-    last_forced: Option<Instant>,
     catalog_task: Option<Task<()>>,
-    usage_task: Option<Task<()>>,
-    _poll: Task<()>,
+    resource: Entity<AccountsResource>,
+    _resource: Subscription,
     _cache: Subscription,
     _catalog: Subscription,
     _state: Subscription,
@@ -108,20 +93,12 @@ pub struct SidebarUsage {
 
 impl SidebarUsage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL_INTERVAL).await;
-                if this
-                    .update(cx, |usage, cx| {
-                        usage.load_catalog(cx);
-                        usage.load_usage(cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+        let resource = AccountsResource::for_target(state.clone(), None, cx);
+        let observation = cx.observe(&resource, |usage: &mut Self, resource, cx| {
+            if !resource.read(cx).refreshing {
+                usage.load_catalog(cx);
             }
+            cx.notify();
         });
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
@@ -129,12 +106,10 @@ impl SidebarUsage {
             target: None,
             generation: 0,
             providers: HashMap::new(),
-            unavailable: false,
             requested: false,
-            last_forced: None,
             catalog_task: None,
-            usage_task: None,
-            _poll: poll,
+            resource,
+            _resource: observation,
             // Settings → Accounts and the composer ring write the same cache.
             _cache: cx.observe_global::<AccountsSnapshotCache>(|_, cx| cx.notify()),
             // A Settings → Providers toggle changes which cards belong.
@@ -152,17 +127,23 @@ impl SidebarUsage {
             self.target = target;
             self.generation += 1;
             self.requested = false;
-            self.last_forced = None;
-            self.unavailable = false;
             self.catalog_task = None;
-            self.usage_task = None;
+            self.resource =
+                AccountsResource::for_target(self.state.clone(), self.target.clone(), cx);
+            self._resource = cx.observe(&self.resource, |usage, resource, cx| {
+                if !resource.read(cx).refreshing {
+                    usage.load_catalog(cx);
+                }
+                cx.notify();
+            });
         }
-        if self.requested || state.engine().is_none() {
+        self.resource
+            .update(cx, |resource, cx| resource.ensure_loaded(cx));
+        if self.requested || self.state.read(cx).engine().is_none() {
             return;
         }
         self.requested = true;
         self.load_catalog(cx);
-        self.load_usage(cx);
     }
 
     fn load_catalog(&mut self, cx: &mut Context<Self>) {
@@ -194,67 +175,6 @@ impl SidebarUsage {
         }));
     }
 
-    /// The engine's persisted usage paints at once when nothing is cached;
-    /// the forced probe then replaces it with live numbers.
-    fn load_usage(&mut self, cx: &mut Context<Self>) {
-        if self
-            .last_forced
-            .is_some_and(|at| at.elapsed() < FORCE_MIN_INTERVAL)
-        {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.last_forced = Some(Instant::now());
-        let target = self.target.clone();
-        let generation = self.generation;
-        let paint_first = cx
-            .try_global::<AccountsSnapshotCache>()
-            .is_none_or(|cache| !cache.0.contains_key(&target));
-        self.usage_task = Some(cx.spawn(async move |this, cx| {
-            let fetch = |force_usage: bool| {
-                let engine = engine.clone();
-                let target = target.clone();
-                async move {
-                    engine
-                        .client()
-                        .call(
-                            methods::LIST_AGENT_ACCOUNTS,
-                            target_params(
-                                &target,
-                                serde_json::json!({ "forceUsage": force_usage }),
-                            ),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|value| {
-                            serde_json::from_value::<AgentAccountsSnapshot>(value).ok()
-                        })
-                }
-            };
-            for force_usage in [false, true] {
-                if !force_usage && !paint_first {
-                    continue;
-                }
-                let snapshot = fetch(force_usage).await;
-                this.update(cx, |usage, cx| {
-                    if usage.generation != generation {
-                        return;
-                    }
-                    usage.unavailable = snapshot.is_none();
-                    if let Some(snapshot) = snapshot {
-                        cx.default_global::<AccountsSnapshotCache>()
-                            .0
-                            .insert(target.clone(), snapshot);
-                    }
-                    cx.notify();
-                })
-                .ok();
-            }
-        }));
-    }
-
     fn card(
         account: &AgentAccount,
         theme: &Theme,
@@ -263,6 +183,15 @@ impl SidebarUsage {
     ) -> gpui::Stateful<gpui::Div> {
         let (mark, tint) = harness_brand_icon(account.harness);
         let windows = &account.usage_windows;
+        let provider = accounts::login_options(account.harness)
+            .into_iter()
+            .find(|option| {
+                option.provider.is_some() && option.provider == account.provider.as_deref()
+            });
+        let name = match provider {
+            Some(provider) => format!("{} · {}", provider_name(account.harness), provider.label),
+            None => provider_name(account.harness).to_string(),
+        };
         let mut title = div()
             .flex()
             .flex_row()
@@ -281,7 +210,7 @@ impl SidebarUsage {
                     .text_size(crate::typography::ui_rems(11.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(provider_name(account.harness)),
+                    .child(name),
             );
         if let Some(plan) = account.plan_label.clone() {
             title = title.child(
@@ -328,7 +257,7 @@ impl Render for SidebarUsage {
         self.ensure_loaded(cx);
         let theme = Theme::of(cx).clone();
         let now = chrono::Utc::now();
-        let unavailable = self.unavailable
+        let unavailable = self.resource.read(cx).error.is_some()
             || self
                 .target
                 .as_deref()
@@ -484,5 +413,40 @@ mod tests {
         let cards = card_accounts(&snapshot, &providers);
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].harness, HarnessId::ClaudeCode);
+    }
+
+    #[test]
+    fn cards_skip_active_provider_groups_without_readings() {
+        let mut empty = account(HarnessId::Opencode, true, 0);
+        empty.id = "copilot".into();
+        let mut measured = account(HarnessId::Opencode, true, 1);
+        measured.id = "openai".into();
+        let snapshot = AgentAccountsSnapshot {
+            accounts: vec![empty, measured],
+            warnings: vec![],
+        };
+        let cards = card_accounts(&snapshot, &[HarnessId::Opencode]);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "openai");
+    }
+
+    #[test]
+    fn cards_choose_highest_usage_and_break_ties_independently_of_row_order() {
+        let mut low = account(HarnessId::Opencode, true, 1);
+        low.id = "a".into();
+        let mut high = low.clone();
+        high.id = "b".into();
+        high.usage_windows[0].used_fraction = 0.9;
+        let mut snapshot = AgentAccountsSnapshot {
+            accounts: vec![low, high],
+            warnings: vec![],
+        };
+        assert_eq!(card_accounts(&snapshot, &[HarnessId::Opencode])[0].id, "b");
+        snapshot.accounts.reverse();
+        assert_eq!(card_accounts(&snapshot, &[HarnessId::Opencode])[0].id, "b");
+        snapshot.accounts[1].usage_windows[0].used_fraction = 0.9;
+        assert_eq!(card_accounts(&snapshot, &[HarnessId::Opencode])[0].id, "a");
+        snapshot.accounts.reverse();
+        assert_eq!(card_accounts(&snapshot, &[HarnessId::Opencode])[0].id, "a");
     }
 }
