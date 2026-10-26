@@ -10217,7 +10217,9 @@ impl Shell {
             // update strip — both above the user menu, below the lists.
             .when_some(github_star_banner, |el, banner| el.child(banner))
             .when_some(update_strip, |el, strip| el.child(strip))
-            .child(self.sidebar_usage.clone())
+            .when(self.settings.sidebar_show_usage_cards, |sidebar| {
+                sidebar.child(self.sidebar_usage.clone())
+            })
             .child(
                 div()
                     .p(px(Theme::SPACE_SM))
