@@ -1,7 +1,8 @@
 //! Plan-usage cards at the foot of the chat sidebar: one per enabled provider
 //! that reports usage, showing the live account's meters. The meters are the
-//! composer ring popover's (`render_usage_meter`) and the data is the same
+//! composer ring popover's, stretched to the card width, and the data is the same
 //! [`AccountsSnapshotCache`], so a switch or probe anywhere shows up here.
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity, IntoElement, Render, Subscription, Task, Window, div, prelude::*, px};
@@ -12,7 +13,7 @@ use zeron_rpc::methods;
 use crate::icons::icon;
 use crate::pickers::{HarnessCatalogChanged, harness_brand_icon, offered_harnesses};
 use crate::settings::accounts::{
-    self, AccountsSnapshotCache, provider_name, render_usage_meter, reports_usage, signs_in,
+    self, AccountsSnapshotCache, provider_name, render_sidebar_usage_meter, reports_usage, signs_in,
 };
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -26,7 +27,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Windows per card — the composer popover's cap, so a card stays compact.
 const MAX_METERS: usize = 2;
 
-/// The providers to show cards for, in Settings order: offered on this device
+/// The providers to show cards for, in Settings order: offered on the host
 /// (enabled and installed) and able to report usage. Pure.
 pub fn usage_providers(catalog: &[HarnessDescriptor]) -> Vec<HarnessId> {
     let offered: Vec<HarnessId> = offered_harnesses(catalog).iter().map(|d| d.id).collect();
@@ -52,11 +53,49 @@ pub fn card_accounts<'a>(
         .collect()
 }
 
-/// Loads this device's harness catalog and accounts, and keeps them fresh.
+/// Normalize local queries to the shared cache's `None` key.
+fn sidebar_target(state: &AppState) -> Option<String> {
+    state
+        .selected_chat_row()
+        .map(|chat| chat.device_id.clone())
+        .filter(|device| !device.is_empty())
+        .or_else(|| state.effective_device_id())
+        .filter(|device| state.local_device_id.as_ref() != Some(device))
+}
+
+fn target_params(target: &Option<String>, mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(target) = target {
+        params["targetDeviceId"] = serde_json::json!(target);
+    }
+    params
+}
+
+fn cached_usage_label(fetched_at: Option<i64>, now: i64) -> String {
+    match fetched_at {
+        Some(at) => {
+            let minutes = now.saturating_sub(at).max(0) / 60_000;
+            if minutes == 0 {
+                "Cached · updated just now".into()
+            } else if minutes < 60 {
+                format!("Cached · updated {minutes}m ago")
+            } else if minutes < 1440 {
+                format!("Cached · updated {}h ago", minutes / 60)
+            } else {
+                format!("Cached · updated {}d ago", minutes / 1440)
+            }
+        }
+        None => "Cached · update time unknown".into(),
+    }
+}
+
+/// Loads the selected host's catalog and accounts through the device relay.
 pub struct SidebarUsage {
     state: Entity<AppState>,
-    /// `None` until the catalog has loaded.
-    providers: Option<Vec<HarnessId>>,
+    target: Option<String>,
+    generation: u64,
+    /// Retain each host's catalog so cached accounts remain visible offline.
+    providers: HashMap<Option<String>, Vec<HarnessId>>,
+    unavailable: bool,
     requested: bool,
     last_forced: Option<Instant>,
     catalog_task: Option<Task<()>>,
@@ -72,7 +111,14 @@ impl SidebarUsage {
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
-                if this.update(cx, |usage, cx| usage.load_usage(cx)).is_err() {
+                if this
+                    .update(cx, |usage, cx| {
+                        usage.load_catalog(cx);
+                        usage.load_usage(cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -80,7 +126,10 @@ impl SidebarUsage {
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
-            providers: None,
+            target: None,
+            generation: 0,
+            providers: HashMap::new(),
+            unavailable: false,
             requested: false,
             last_forced: None,
             catalog_task: None,
@@ -95,9 +144,20 @@ impl SidebarUsage {
         }
     }
 
-    /// First load, once the engine is up. Cheap enough to call every render.
+    /// Follow the same host as the composer, including an open chat's host.
     fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if self.requested || self.state.read(cx).engine().is_none() {
+        let state = self.state.read(cx);
+        let target = sidebar_target(state);
+        if self.target != target {
+            self.target = target;
+            self.generation += 1;
+            self.requested = false;
+            self.last_forced = None;
+            self.unavailable = false;
+            self.catalog_task = None;
+            self.usage_task = None;
+        }
+        if self.requested || state.engine().is_none() {
             return;
         }
         self.requested = true;
@@ -109,16 +169,24 @@ impl SidebarUsage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let target = self.target.clone();
+        let generation = self.generation;
         self.catalog_task = Some(cx.spawn(async move |this, cx| {
             let list = engine
                 .client()
-                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .call(
+                    methods::LIST_HARNESSES,
+                    target_params(&target, serde_json::json!({})),
+                )
                 .await
                 .ok()
                 .and_then(|value| serde_json::from_value::<Vec<HarnessDescriptor>>(value).ok());
             if let Some(list) = list {
                 this.update(cx, |usage, cx| {
-                    usage.providers = Some(usage_providers(&list));
+                    if usage.generation != generation {
+                        return;
+                    }
+                    usage.providers.insert(target, usage_providers(&list));
                     cx.notify();
                 })
                 .ok();
@@ -139,18 +207,24 @@ impl SidebarUsage {
             return;
         };
         self.last_forced = Some(Instant::now());
+        let target = self.target.clone();
+        let generation = self.generation;
         let paint_first = cx
             .try_global::<AccountsSnapshotCache>()
-            .is_none_or(|cache| !cache.0.contains_key(&None));
+            .is_none_or(|cache| !cache.0.contains_key(&target));
         self.usage_task = Some(cx.spawn(async move |this, cx| {
             let fetch = |force_usage: bool| {
                 let engine = engine.clone();
+                let target = target.clone();
                 async move {
                     engine
                         .client()
                         .call(
                             methods::LIST_AGENT_ACCOUNTS,
-                            serde_json::json!({ "forceUsage": force_usage }),
+                            target_params(
+                                &target,
+                                serde_json::json!({ "forceUsage": force_usage }),
+                            ),
                         )
                         .await
                         .ok()
@@ -163,14 +237,20 @@ impl SidebarUsage {
                 if !force_usage && !paint_first {
                     continue;
                 }
-                if let Some(snapshot) = fetch(force_usage).await {
-                    this.update(cx, |_, cx| {
+                let snapshot = fetch(force_usage).await;
+                this.update(cx, |usage, cx| {
+                    if usage.generation != generation {
+                        return;
+                    }
+                    usage.unavailable = snapshot.is_none();
+                    if let Some(snapshot) = snapshot {
                         cx.default_global::<AccountsSnapshotCache>()
                             .0
-                            .insert(None, snapshot);
-                    })
-                    .ok();
-                }
+                            .insert(target.clone(), snapshot);
+                    }
+                    cx.notify();
+                })
+                .ok();
             }
         }));
     }
@@ -179,6 +259,7 @@ impl SidebarUsage {
         account: &AgentAccount,
         theme: &Theme,
         now: chrono::DateTime<chrono::Utc>,
+        unavailable: bool,
     ) -> gpui::Stateful<gpui::Div> {
         let (mark, tint) = harness_brand_icon(account.harness);
         let windows = &account.usage_windows;
@@ -226,8 +307,19 @@ impl SidebarUsage {
                 windows
                     .iter()
                     .take(MAX_METERS)
-                    .map(|window| render_usage_meter(window, theme)),
+                    .map(|window| render_sidebar_usage_meter(window, theme)),
             )
+            .when(unavailable || account.usage_error.is_some(), |el| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .text_color(theme.text_muted)
+                        .child(cached_usage_label(
+                            account.usage_fetched_at,
+                            now.timestamp_millis(),
+                        )),
+                )
+            })
     }
 }
 
@@ -236,14 +328,19 @@ impl Render for SidebarUsage {
         self.ensure_loaded(cx);
         let theme = Theme::of(cx).clone();
         let now = chrono::Utc::now();
+        let unavailable = self.unavailable
+            || self
+                .target
+                .as_deref()
+                .is_some_and(|target| !self.state.read(cx).device_online(target, now));
         let cards: Vec<gpui::Stateful<gpui::Div>> = match (
-            &self.providers,
+            self.providers.get(&self.target),
             cx.try_global::<AccountsSnapshotCache>()
-                .and_then(|cache| cache.0.get(&None)),
+                .and_then(|cache| cache.0.get(&self.target)),
         ) {
             (Some(providers), Some(snapshot)) => card_accounts(snapshot, providers)
                 .into_iter()
-                .map(|account| Self::card(account, &theme, now))
+                .map(|account| Self::card(account, &theme, now, unavailable))
                 .collect(),
             _ => Vec::new(),
         };
@@ -265,6 +362,67 @@ impl Render for SidebarUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_follows_selected_host_and_open_chat() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("viewer".into());
+        assert_eq!(sidebar_target(&state), None);
+
+        state.selected_device = Some("home".into());
+        assert_eq!(sidebar_target(&state).as_deref(), Some("home"));
+        let params = target_params(
+            &sidebar_target(&state),
+            serde_json::json!({"forceUsage": true}),
+        );
+        assert_eq!(
+            params,
+            serde_json::json!({"targetDeviceId": "home", "forceUsage": true})
+        );
+
+        state.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "remote-chat",
+                "deviceId": "other-host",
+                "archived": false,
+                "createdAt": "2026-10-25T12:00:00Z",
+            }))
+            .unwrap(),
+        ];
+        state.selected_chat = Some("remote-chat".into());
+        assert_eq!(sidebar_target(&state).as_deref(), Some("other-host"));
+
+        state.chats[0].device_id = "viewer".into();
+        assert_eq!(sidebar_target(&state), None);
+        assert_eq!(
+            target_params(&sidebar_target(&state), serde_json::json!({})),
+            serde_json::json!({})
+        );
+
+        state.selected_chat = None;
+        assert_eq!(sidebar_target(&state).as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn cached_readings_show_age_even_without_a_probe_timestamp() {
+        assert_eq!(cached_usage_label(None, 0), "Cached · update time unknown");
+        assert_eq!(
+            cached_usage_label(Some(60_000), 0),
+            "Cached · updated just now"
+        );
+        assert_eq!(
+            cached_usage_label(Some(0), 120_000),
+            "Cached · updated 2m ago"
+        );
+        assert_eq!(
+            cached_usage_label(Some(0), 7_200_000),
+            "Cached · updated 2h ago"
+        );
+        assert_eq!(
+            cached_usage_label(Some(0), 172_800_000),
+            "Cached · updated 2d ago"
+        );
+    }
 
     fn descriptor(id: HarnessId, installed: bool, enabled: Option<bool>) -> HarnessDescriptor {
         serde_json::from_value(serde_json::json!({
