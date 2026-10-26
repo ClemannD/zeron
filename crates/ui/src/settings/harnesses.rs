@@ -42,6 +42,8 @@ use crate::theme::Theme;
 
 #[path = "completion.rs"]
 mod completion;
+#[path = "usage_cards.rs"]
+mod usage_cards;
 
 /// Left inset of an expanded provider's details: the header trigger's
 /// padding, brand tile and gap, so the details start on the title's edge.
@@ -1546,7 +1548,8 @@ impl Render for HarnessesPage {
                                         .child(toolbar),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .child(self.render_usage_cards_settings(&theme, cx)),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),
