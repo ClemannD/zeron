@@ -27,11 +27,11 @@ use crate::state::NO_PROJECT_TAB;
 
 /// Fixed project-tab width. Uniform, as drag reordering assumes; tabs sit
 /// edge to edge (separators are drawn inside), so a slot is one tab.
-const PROJECT_TAB_WIDTH: f32 = 312.0;
+const PROJECT_TAB_WIDTH: f32 = 156.0;
 const PROJECT_TAB_SLOT: f32 = PROJECT_TAB_WIDTH;
 /// The header must reserve the tab height plus the top gutter. Growing only
 /// the tab would clip its first row inside the scrolling strip.
-const PROJECT_TAB_HEIGHT: f32 = 52.0;
+const PROJECT_TAB_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD;
 pub(super) const PROJECT_TAB_HEADER_HEIGHT: f32 = PROJECT_TAB_HEIGHT + Theme::TITLEBAR_TOP_PAD;
 /// The tab chips' corner radius.
 const PROJECT_TAB_RADIUS: f32 = 8.0;
@@ -1451,22 +1451,12 @@ impl Shell {
             .into_any_element();
 
         let scroll = self.project_tab_scroll.clone();
-        // The new-session canvas shows the wallpaper straight through the
-        // band. Where the band blurs it (frosted themes) a light tint is
-        // enough and the image stays visible; otherwise it needs heavy
-        // coverage for the tab text to stay readable.
+        // This band spans the transcript, side pane, and wallpaper. An opaque
+        // theme surface hides their seams and keeps light-mode text readable
+        // even over a dark image. Blur alone cannot guarantee either property.
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
-        let frost = on_canvas && theme.is_frost();
         let dark = theme.appearance.is_dark();
-        let tint_alpha = match (on_canvas, frost, dark) {
-            (false, _, true) => 0.26,
-            (false, _, false) => 0.05,
-            (true, true, true) => 0.24,
-            (true, true, false) => 0.1,
-            (true, false, true) => 0.72,
-            (true, false, false) => 0.3,
-        };
-        let tint = gpui::hsla(0.0, 0.0, 0.0, tint_alpha);
+        let tint = theme.surface.alpha(1.0);
         // The band runs unbroken, in a chat as on the canvas, and the active
         // tab is a closed chip within it, in the hover chip's shape.
         let chip = ProjectTabChip {
@@ -1474,7 +1464,7 @@ impl Shell {
             border: theme.wash(if dark { 0.14 } else { 0.1 }),
         };
         // On the canvas the band's own tint fades out below it.
-        let shade = on_canvas.then(|| gpui::hsla(0.0, 0.0, 0.0, tint_alpha * 0.5));
+        let shade = on_canvas.then(|| tint.opacity(0.5));
         let line = theme.border;
         let band = gpui::canvas(
             |_, _, _| {},
@@ -1487,12 +1477,7 @@ impl Shell {
                     // the sidebar (the tab text is already clipped).
                     Some((project_tab_chip_mask(region, bounds), x0, x1))
                 });
-                // One layer, so the blur snapshots the wallpaper beneath it and
-                // the band's tint then paints over the result.
                 window.paint_layer(bounds, |window| {
-                    if frost {
-                        paint_project_tab_blur(bounds, window);
-                    }
                     if let Some(shade) = shade {
                         paint_project_tab_shade(bounds, shade, window);
                     }
@@ -1570,10 +1555,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One project tab: name, branch, PR and changes, and a close button
-    /// that shows on hover (always on the active tab). Inactive tabs wash on
-    /// hover; the active tab draws nothing of its own — the band paints its
-    /// chip.
+    /// One compact row: project name, then branch and optional PR state at
+    /// the right. Change totals remain available in the hover card.
+    /// Inactive tabs wash on hover; the band paints the active tab's chip.
     #[allow(clippy::too_many_arguments)]
     fn render_project_tab(
         &self,
@@ -1600,71 +1584,25 @@ impl Shell {
             .as_ref()
             .map(|summary| crate::change_requests::ChangeRequestTabState::from_summary(summary));
         let status_color = status.map(|status| status.color(theme));
-        // The open tab is the brighter one; the others stay compact and dim
-        // (the project name keeps its full strength either way).
-        let branch_icon_color = if active { muted } else { muted.opacity(0.7) };
-        let branch_text_color = if active { muted } else { muted.opacity(0.78) };
-        let branch_size = if active { 10.5 } else { 10.0 };
-        let branch_row = div()
-            .debug_selector(move || format!("project-tab-branch-{ix}"))
-            .h(px(12.0))
-            .flex_none()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                icon(icons::GIT_BRANCH)
-                    .size(px(if active { 10.0 } else { 9.0 }))
-                    .flex_none()
-                    .text_color(branch_icon_color),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(branch_size))
-                    .line_height(px(12.0))
-                    .text_color(branch_text_color)
-                    .children(branch.clone()),
-            )
-            // The pull request is one glyph at the row's end.
-            .children(status.zip(status_color).map(|(status, color)| {
-                div()
-                    .debug_selector(move || format!("project-tab-pr-state-{ix}"))
-                    .flex_none()
-                    .ml(px(6.0))
-                    .child(icon(status.icon()).size(px(12.0)).text_color(color))
-            }));
-        // Working-tree changes sit at the end of the name's row, on the open
-        // tab only.
-        let change_totals = changes
-            .filter(|&(adds, dels)| active && adds + dels > 0)
-            .map(|(adds, dels)| {
-                div()
-                    .debug_selector(move || format!("project-tab-changes-{ix}"))
-                    .flex_none()
-                    .ml(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(5.0))
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.0))
-                    .line_height(px(12.0))
-                    .child(
-                        div()
-                            .text_color(crate::changes::add_color(theme))
-                            .child(format!("+{adds}")),
-                    )
-                    .child(
-                        div()
-                            .text_color(crate::changes::del_color(theme))
-                            .child(format!("−{dels}")),
-                    )
-            });
+        let branch_label = branch.clone().map(|branch| {
+            div()
+                .debug_selector(move || format!("project-tab-branch-{ix}"))
+                .max_w(px(60.0))
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(10.5))
+                .line_height(px(14.0))
+                .text_color(if active { muted } else { muted.opacity(0.78) })
+                .child(branch)
+        });
+        let pr_icon = status.zip(status_color).map(|(status, color)| {
+            div()
+                .debug_selector(move || format!("project-tab-pr-state-{ix}"))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(icon(status.icon()).size(px(12.0)).text_color(color))
+        });
         let menu_key = key.clone();
         let middle_key = key.clone();
         let click_key = key.clone();
@@ -1734,41 +1672,21 @@ impl Shell {
                         .bg(theme.border),
                 )
             })
+            .child(div().flex_none().child(leading))
             .child(
                 div()
+                    .debug_selector(move || format!("project-tab-title-{ix}"))
                     .flex_1()
-                    .h_full()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .debug_selector(move || format!("project-tab-title-{ix}"))
-                            .h(px(16.0))
-                            .flex_none()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(5.0))
-                            .child(div().flex_none().child(leading))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .line_height(px(14.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(title.clone()),
-                            )
-                            .children(change_totals),
-                    )
-                    .child(branch_row),
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(px(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(title.clone()),
             )
+            .children(branch_label)
+            .children(pr_icon)
             .children(hover_card)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -1815,7 +1733,7 @@ impl Shell {
 
     /// Every project, alphabetically, then "No project": a check marks the
     /// open tabs, and picking any row switches to it (reopening a hidden
-    /// one). Below, the toggles for each tab's details line.
+    /// one). Below, the toggles for each tab's metadata.
     fn render_project_tabs_menu(
         &mut self,
         theme: &Theme,
@@ -1966,14 +1884,6 @@ impl Shell {
             .child(details)
             .into_any_element()
     }
-}
-
-/// Backdrop blur behind the tab band, stopping crisply at its bottom edge.
-/// (The renderer's blur has no gradient mask; stepping the radius down in
-/// strips below the bar reads as a smear, so the softening below is a
-/// tinted shade instead — see [`paint_project_tab_shade`].)
-fn paint_project_tab_blur(bounds: gpui::Bounds<Pixels>, window: &mut Window) {
-    window.paint_backdrop_blur(bounds, gpui::Corners::all(px(0.0)), px(16.0));
 }
 
 /// A soft shade falling off below the band so it sits on the wallpaper
@@ -2233,7 +2143,7 @@ mod tests {
 
         // Scrolled by most of a tab: the span crosses the sidebar, and the
         // mask still starts at the strip.
-        let (x0, x1) = project_tab_chip_span(region, 0, px(-200.0)).unwrap();
+        let (x0, x1) = project_tab_chip_span(region, 0, px(-PROJECT_TAB_WIDTH * 0.75)).unwrap();
         assert!(x0 < band.left());
         assert!(x1 > mask.left() && x0 < mask.left());
 

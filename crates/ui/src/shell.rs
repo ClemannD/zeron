@@ -16922,7 +16922,7 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn project_tabs_keep_all_three_rows_inside_the_header(cx: &mut TestAppContext) {
+    fn project_tabs_keep_compact_metadata_on_one_line(cx: &mut TestAppContext) {
         let (shell, cx, dir) = pull_request_shell(cx);
         cx.update(|_, cx| motion::set_reduced_motion(cx, true));
         shell.update(cx, |shell, cx| {
@@ -16960,6 +16960,7 @@ mod exit_regressions {
             cx.update(|window, cx| window.draw(cx).clear());
             let header = cx.debug_bounds("session-titlebar").unwrap();
             let tab = cx.debug_bounds("project-tab-0").unwrap();
+            assert_eq!(tab.size.width, px(156.0));
             assert_eq!(
                 header.size.height,
                 px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT)
@@ -16969,24 +16970,21 @@ mod exit_regressions {
             assert!(tab.bottom() <= header.bottom());
             let title = cx.debug_bounds("project-tab-title-0").unwrap();
             let branch = cx.debug_bounds("project-tab-branch-0").unwrap();
+            assert_eq!(header.size.height, px(Theme::TITLEBAR_HEIGHT));
             assert!(title.top() >= tab.top());
-            assert!(title.bottom() <= branch.top());
-            assert!(branch.bottom() <= tab.bottom());
-            // No close button; the open tab's changes end the name's row and
-            // its pull request glyph is not in a third row.
-            assert!(cx.debug_bounds("project-tab-close-0").is_none());
-            let changes = cx.debug_bounds("project-tab-changes-0").unwrap();
-            assert!(changes.top() >= title.top() && changes.bottom() <= title.bottom());
-            assert!(changes.right() <= title.right());
-            // Inactive tabs are compact: name and branch only; the changes
-            // stay with the open tab.
+            assert!(title.bottom() <= tab.bottom());
+            assert!((title.center().y - branch.center().y).abs() < px(1.0));
+            assert!(title.right() <= branch.left());
+            assert!(branch.right() <= tab.right());
+            assert!(cx.debug_bounds("project-tab-changes-0").is_none());
             let other = cx.debug_bounds("project-tab-1").unwrap();
             assert_eq!(other.size.height, tab.size.height);
             assert!(cx.debug_bounds("project-tab-changes-1").is_none());
             let title = cx.debug_bounds("project-tab-title-1").unwrap();
             let branch = cx.debug_bounds("project-tab-branch-1").unwrap();
             assert!(title.top() >= other.top());
-            assert!(title.bottom() <= branch.top());
+            assert!((title.center().y - branch.center().y).abs() < px(1.0));
+            assert!(title.right() <= branch.left());
             assert!(branch.bottom() <= other.bottom());
         }
         // Right-click opens the tab's menu; "Close tab" hides that tab.

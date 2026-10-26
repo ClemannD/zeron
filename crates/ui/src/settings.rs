@@ -941,11 +941,11 @@ pub struct ProjectTabsSettings {
     /// The session last viewed under each tab, reopened on switching back.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub last_chat: HashMap<String, String>,
-    /// What the line under each tab's name shows.
+    /// What metadata each tab shows.
     pub meta: ProjectTabMeta,
 }
 
-/// The details line under a project tab's name; each item shows only when it
+/// Project tab metadata; each item shows only when it
 /// has something to say (a git branch, a known pull request, a remote host).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
