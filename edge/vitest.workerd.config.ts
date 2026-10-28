@@ -65,6 +65,7 @@ export default defineConfig({
         bindings: {
           AUTH_MODE: "dev",
           PRIVATE_RELEASES_USER_ID: "release-owner",
+          PRIVATE_RELEASES_TOKEN: "test-update-capability",
           WORKOS_CLIENT_ID: "test-only",
           BOAT_API_KEY: "test-boat-key",
           BOAT_API_BASE: "https://boat.test/api/v1",

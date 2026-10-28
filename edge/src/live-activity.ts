@@ -536,7 +536,7 @@ export class LiveActivities {
 
   private putWatch(device: string, watch: Watch): void {
     this.host.sql.exec(
-      "INSERT INTO la_watches (device, chat_id, watch) VALUES (?, ?, ?) ON CONFLICT(device, chat_id) DO UPDATE SET watch = excluded.watch",
+      "INSERT INTO la_watches (device, chat_id, watch) VALUES (?, ?, ?) ON CONFLICT(device, chat_id) DO UPDATE SET watch = excluded.watch WHERE la_watches.watch IS NOT excluded.watch",
       device,
       watch.chatId,
       JSON.stringify(watch)
@@ -550,7 +550,7 @@ export class LiveActivities {
 
   private putActivity(device: string, activity: ActivityRecord): void {
     this.host.sql.exec(
-      "INSERT INTO la_activities (device, activity) VALUES (?, ?) ON CONFLICT(device) DO UPDATE SET activity = excluded.activity",
+      "INSERT INTO la_activities (device, activity) VALUES (?, ?) ON CONFLICT(device) DO UPDATE SET activity = excluded.activity WHERE la_activities.activity IS NOT excluded.activity",
       device,
       JSON.stringify(activity)
     );

@@ -119,10 +119,10 @@ export default {
     if (billing) return billing;
     const runner = await handleRunnerPublicRoute(request, env, url);
     if (runner) return runner;
+    const privateRelease = await privateReleaseRoute(request, env, url);
+    if (privateRelease) return privateRelease;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
-    const privateRelease = await privateReleaseRoute(request, env, auth, url);
-    if (privateRelease) return privateRelease;
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
     const cloud = await handleCloudRoute(request, env, auth, url);
