@@ -85,6 +85,7 @@ impl MuseUsage {
         let fraction = |percent: f64| (percent / 100.0).clamp(0.0, 1.0) as f32;
         vec![
             zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: zeron_proto::plan_usage::codex_window_label(
                     self.window.duration_mins.unwrap_or(0) * 60,
                 )
@@ -93,6 +94,7 @@ impl MuseUsage {
                 resets_at: resets(self.window.resets_at_ms),
             },
             zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: "Week".into(),
                 used_fraction: fraction(self.weekly.used_percent),
                 resets_at: resets(self.weekly.resets_at_ms),

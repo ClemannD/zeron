@@ -736,7 +736,7 @@ final class UsageMeter: UIView {
         let fill = UIView()
         fill.backgroundColor = fraction > 0.9 ? Palette.danger : Palette.text.withAlphaComponent(0.55)
         let value = UILabel()
-        var text = "\(Int((fraction * 100).rounded()))%"
+        var text = window.valueLabel
         if let resets = window.resetsAtMs {
             // Until the window resets: "45m", "3h", "4d".
             let left = max(0, TimeInterval(resets) / 1000 - Date().timeIntervalSince1970)
@@ -747,29 +747,49 @@ final class UsageMeter: UIView {
         value.font = Fonts.ui(.sans, 12).withMonospacedDigits()
         value.textColor = Palette.secondary
         value.textAlignment = .right
+        value.adjustsFontSizeToFitWidth = true
+        value.minimumScaleFactor = 0.8
         for v in [label, track, value] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         fill.translatesAutoresizingMaskIntoConstraints = false
         track.addSubview(fill)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor),
-            label.widthAnchor.constraint(equalToConstant: 56),
-            label.topAnchor.constraint(equalTo: topAnchor),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor),
-            track.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
-            track.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            track.heightAnchor.constraint(equalToConstant: 4),
-            value.leadingAnchor.constraint(equalTo: track.trailingAnchor, constant: 10),
-            value.trailingAnchor.constraint(equalTo: trailingAnchor),
-            value.widthAnchor.constraint(equalToConstant: 76),
-            value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+        let fillConstraints = [
             fill.leadingAnchor.constraint(equalTo: track.leadingAnchor),
             fill.topAnchor.constraint(equalTo: track.topAnchor),
             fill.bottomAnchor.constraint(equalTo: track.bottomAnchor),
             fill.widthAnchor.constraint(equalTo: track.widthAnchor, multiplier: max(fraction, 0.001)),
-        ])
+        ]
+        if window.isSpend {
+            track.isHidden = !window.hasLimit
+            NSLayoutConstraint.activate(fillConstraints + [
+                label.leadingAnchor.constraint(equalTo: leadingAnchor),
+                label.topAnchor.constraint(equalTo: topAnchor),
+                value.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 8),
+                value.trailingAnchor.constraint(equalTo: trailingAnchor),
+                value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+                track.leadingAnchor.constraint(equalTo: leadingAnchor),
+                track.trailingAnchor.constraint(equalTo: trailingAnchor),
+                track.topAnchor.constraint(equalTo: label.bottomAnchor, constant: window.hasLimit ? 4 : 0),
+                track.heightAnchor.constraint(equalToConstant: window.hasLimit ? 4 : 0),
+                track.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        } else {
+            NSLayoutConstraint.activate(fillConstraints + [
+                label.leadingAnchor.constraint(equalTo: leadingAnchor),
+                label.widthAnchor.constraint(equalToConstant: 56),
+                label.topAnchor.constraint(equalTo: topAnchor),
+                label.bottomAnchor.constraint(equalTo: bottomAnchor),
+                track.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+                track.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+                track.heightAnchor.constraint(equalToConstant: 4),
+                value.leadingAnchor.constraint(equalTo: track.trailingAnchor, constant: 10),
+                value.trailingAnchor.constraint(equalTo: trailingAnchor),
+                value.widthAnchor.constraint(equalToConstant: 76),
+                value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            ])
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }

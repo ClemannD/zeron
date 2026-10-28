@@ -1443,14 +1443,52 @@ pub enum AgentLoginStatus {
     Error,
 }
 
-/// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
+/// CLI plan quota or spend window (accounts settings meters), not app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageWindow {
     pub label: String,
-    /// 0.0..=1.0
+    /// Fraction used; may exceed 1.0 when spending passes a cap.
     pub used_fraction: f32,
     pub resets_at: Option<DateTime<Utc>>,
+    /// Billing-period spend, in major currency units. Absent for quota meters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend: Option<AgentUsageSpend>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsageSpend {
+    pub used: f64,
+    /// None means the provider reports no spend cap.
+    pub limit: Option<f64>,
+    pub currency: String,
+}
+
+impl AgentUsageWindow {
+    pub fn has_limit(&self) -> bool {
+        self.spend
+            .as_ref()
+            .is_none_or(|spend| spend.limit.is_some())
+    }
+
+    /// Shared by desktop and mobile so remote readings show the same amounts.
+    pub fn value_label(&self) -> String {
+        let Some(spend) = &self.spend else {
+            return format!(
+                "{}%",
+                (self.used_fraction.clamp(0.0, 1.0) * 100.0).round() as u32
+            );
+        };
+        let amount = |value: f64| match spend.currency.as_str() {
+            "USD" => format!("${value:.2}"),
+            currency => format!("{currency} {value:.2}"),
+        };
+        match spend.limit {
+            Some(limit) => format!("{} / {}", amount(spend.used), amount(limit)),
+            None => format!("{} / No limit", amount(spend.used)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -4,13 +4,30 @@
 
 use super::{CoreClient, CoreResult, HarnessInfo, on_runtime};
 
-/// One plan rate-limit window ("Session", "Week").
+/// One plan quota or spend window ("Session", "Week", "Month").
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct UsageWindowInfo {
     pub label: String,
-    /// 0.0…1.0 of the window used.
+    /// Fraction of the window used; can exceed 1.0 for spend over a cap.
     pub used_fraction: f32,
     pub resets_at_ms: Option<i64>,
+    /// Percent for quotas, or currency spent / monthly limit for billing.
+    pub value_label: String,
+    pub has_limit: bool,
+    pub is_spend: bool,
+}
+
+impl From<zeron_proto::AgentUsageWindow> for UsageWindowInfo {
+    fn from(w: zeron_proto::AgentUsageWindow) -> Self {
+        Self {
+            value_label: w.value_label(),
+            has_limit: w.has_limit(),
+            is_spend: w.spend.is_some(),
+            label: w.label,
+            used_fraction: w.used_fraction,
+            resets_at_ms: w.resets_at.map(|at| at.timestamp_millis()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -51,15 +68,7 @@ impl From<zeron_proto::AgentAccount> for DeviceAccountInfo {
             api_key: a.auth_kind == Some(zeron_proto::AgentAuthKind::ApiKey),
             organization: a.organization,
             provider: a.provider,
-            usage: a
-                .usage_windows
-                .into_iter()
-                .map(|w| UsageWindowInfo {
-                    label: w.label,
-                    used_fraction: w.used_fraction,
-                    resets_at_ms: w.resets_at.map(|at| at.timestamp_millis()),
-                })
-                .collect(),
+            usage: a.usage_windows.into_iter().map(Into::into).collect(),
             usage_error: a.usage_error,
         }
     }

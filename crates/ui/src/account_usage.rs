@@ -299,7 +299,6 @@ impl AccountUsage {
                                 account
                                     .usage_windows
                                     .iter()
-                                    .take(2)
                                     .map(|window| render_usage_meter(window, theme)),
                             ),
                     )
@@ -396,6 +395,7 @@ mod tests {
             "usageWindows": used
                 .iter()
                 .map(|fraction| AgentUsageWindow {
+                    spend: None,
                     label: "5h".into(),
                     used_fraction: *fraction,
                     resets_at: None,

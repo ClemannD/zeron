@@ -13416,25 +13416,37 @@ public func FfiConverterTypeTranscriptStatus_lower(_ value: TranscriptStatus) ->
 
 
 /**
- * One plan rate-limit window ("Session", "Week").
+ * One plan quota or spend window ("Session", "Week", "Month").
  */
 public struct UsageWindowInfo: Equatable, Hashable {
     public var label: String
     /**
-     * 0.0…1.0 of the window used.
+     * Fraction of the window used; can exceed 1.0 for spend over a cap.
      */
     public var usedFraction: Float
     public var resetsAtMs: Int64?
+    /**
+     * Percent for quotas, or currency spent / monthly limit for billing.
+     */
+    public var valueLabel: String
+    public var hasLimit: Bool
+    public var isSpend: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(label: String, 
         /**
-         * 0.0…1.0 of the window used.
-         */usedFraction: Float, resetsAtMs: Int64?) {
+         * Fraction of the window used; can exceed 1.0 for spend over a cap.
+         */usedFraction: Float, resetsAtMs: Int64?, 
+        /**
+         * Percent for quotas, or currency spent / monthly limit for billing.
+         */valueLabel: String, hasLimit: Bool, isSpend: Bool) {
         self.label = label
         self.usedFraction = usedFraction
         self.resetsAtMs = resetsAtMs
+        self.valueLabel = valueLabel
+        self.hasLimit = hasLimit
+        self.isSpend = isSpend
     }
 
     
@@ -13455,7 +13467,10 @@ public struct FfiConverterTypeUsageWindowInfo: FfiConverterRustBuffer {
             try UsageWindowInfo(
                 label: FfiConverterString.read(from: &buf), 
                 usedFraction: FfiConverterFloat.read(from: &buf), 
-                resetsAtMs: FfiConverterOptionInt64.read(from: &buf)
+                resetsAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                valueLabel: FfiConverterString.read(from: &buf), 
+                hasLimit: FfiConverterBool.read(from: &buf), 
+                isSpend: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -13463,6 +13478,9 @@ public struct FfiConverterTypeUsageWindowInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.label, into: &buf)
         FfiConverterFloat.write(value.usedFraction, into: &buf)
         FfiConverterOptionInt64.write(value.resetsAtMs, into: &buf)
+        FfiConverterString.write(value.valueLabel, into: &buf)
+        FfiConverterBool.write(value.hasLimit, into: &buf)
+        FfiConverterBool.write(value.isSpend, into: &buf)
     }
 }
 

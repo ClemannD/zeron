@@ -357,14 +357,7 @@ impl CoreClient {
             .await
             .map(|usage| match usage {
                 Some((windows, plan)) => CloudUsageInfo {
-                    windows: windows
-                        .into_iter()
-                        .map(|w| super::UsageWindowInfo {
-                            label: w.label,
-                            used_fraction: w.used_fraction,
-                            resets_at_ms: w.resets_at.map(|at| at.timestamp_millis()),
-                        })
-                        .collect(),
+                    windows: windows.into_iter().map(Into::into).collect(),
                     plan,
                 },
                 None => CloudUsageInfo {

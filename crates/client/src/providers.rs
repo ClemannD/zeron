@@ -371,6 +371,7 @@ pub(crate) fn with_demo_toggles(demo: bool, mut list: Vec<HarnessInfo>) -> Vec<H
 
 fn demo_accounts() -> AgentAccountsSnapshot {
     let window = |label: &str, used: f32, hours: i64| zeron_proto::AgentUsageWindow {
+        spend: None,
         label: label.into(),
         used_fraction: used,
         resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(hours)),

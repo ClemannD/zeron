@@ -379,6 +379,7 @@ impl Client {
         };
         if self.inner.is_demo() {
             let window = |label: &str, used: f32, hours: i64| zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: label.into(),
                 used_fraction: used,
                 resets_at: Some(Utc::now() + chrono::Duration::hours(hours)),

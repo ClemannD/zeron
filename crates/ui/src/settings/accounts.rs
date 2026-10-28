@@ -302,6 +302,50 @@ fn usage_meter(window: &zeron_proto::AgentUsageWindow, theme: &Theme, stretch: b
         UsageLevel::Normal => 0.8,
         _ => 0.9,
     });
+    if window.spend.is_some() {
+        return div()
+            .when(stretch, |el| el.w_full())
+            .when(!stretch, |el| el.w(px(USAGE_COLUMN_WIDTH)))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .text_size(crate::typography::ui_rems(11.5))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(window.label.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_right()
+                            .child(SharedString::from(window.value_label())),
+                    ),
+            )
+            .when(window.has_limit(), |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .h(px(4.0))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.wash(0.08))
+                        .when(fraction > 0.0, |el| {
+                            el.child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(fraction.max(0.015)))
+                                    .rounded_full()
+                                    .bg(fill),
+                            )
+                        }),
+                )
+            })
+            .into_any_element();
+    }
     div()
         .when(stretch, |el| el.w_full().min_w_0())
         .h(px(16.0))
@@ -1313,7 +1357,6 @@ impl AccountsPage {
                     account
                         .usage_windows
                         .iter()
-                        .take(2)
                         .map(|window| render_usage_meter(window, theme)),
                 )
                 .into_any_element()
@@ -2418,11 +2461,13 @@ mod tests {
         let soon = now + TimeDelta::minutes(125);
         let windows = [
             zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: "Session".into(),
                 used_fraction: 0.07,
                 resets_at: Some(soon),
             },
             zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: "Week".into(),
                 used_fraction: 0.44,
                 resets_at: None,
@@ -2661,6 +2706,7 @@ mod tests {
             plan_label: Some("ChatGPT Plus".into()),
             active,
             usage_windows: vec![zeron_proto::AgentUsageWindow {
+                spend: None,
                 label: "Session".into(),
                 used_fraction: 0.4,
                 resets_at: None,

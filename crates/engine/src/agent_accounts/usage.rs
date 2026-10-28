@@ -372,6 +372,7 @@ pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
     };
     Some(UsageSnapshot {
         windows: vec![AgentUsageWindow {
+            spend: None,
             label: label.to_string(),
             used_fraction: (used_percent / 100.0) as f32,
             resets_at: parse_when(
@@ -414,6 +415,7 @@ pub(super) fn devin_usage_snapshot(
         ] {
             if let Some(remaining) = plan.get(percent_key).and_then(json_f64) {
                 windows.push(AgentUsageWindow {
+                    spend: None,
                     label: label.to_string(),
                     used_fraction: ((100.0 - remaining) / 100.0).clamp(0.0, 1.0) as f32,
                     resets_at: json_secs(plan.get(reset_key)),
@@ -500,6 +502,7 @@ pub(super) fn copilot_usage_snapshot(body: &serde_json::Value) -> Option<UsageSn
                 }
             };
             windows.push(AgentUsageWindow {
+                spend: None,
                 label: label.to_string(),
                 used_fraction: used.clamp(0.0, 1.0) as f32,
                 resets_at,
@@ -516,6 +519,7 @@ pub(super) fn copilot_usage_snapshot(body: &serde_json::Value) -> Option<UsageSn
             ) && total > 0.0
             {
                 windows.push(AgentUsageWindow {
+                    spend: None,
                     label: label.to_string(),
                     used_fraction: (1.0 - remaining / total).clamp(0.0, 1.0) as f32,
                     resets_at,
@@ -564,6 +568,7 @@ pub(super) fn nous_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         && monthly > 0.0
     {
         windows.push(AgentUsageWindow {
+            spend: None,
             label: "Month".to_string(),
             used_fraction: (1.0 - remaining / monthly).clamp(0.0, 1.0) as f32,
             resets_at: parse_when(sub.get("current_period_end")),

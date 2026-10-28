@@ -636,6 +636,7 @@ for line in sys.stdin:
         );
         // Usage arrives from a run on that account (never from a probe).
         let window = |label: &str| AgentUsageWindow {
+            spend: None,
             label: label.into(),
             used_fraction: 0.25,
             resets_at: None,

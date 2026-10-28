@@ -51,7 +51,6 @@ import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.UsageWindowInfo
-import kotlin.math.roundToInt
 
 /** Whose agent logins a page shows: Cloud's vault, or a computer's CLIs. */
 sealed interface AccountsTarget {
@@ -244,7 +243,7 @@ fun UsageBar(window: UsageWindowInfo, modifier: Modifier = Modifier) {
             Text(window.label, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
             Spacer(Modifier.width(8.dp))
             Text(
-                listOfNotNull("${(used * 100).roundToInt()}% used", window.resetsAtMs?.let { "resets ${resetLabel(it)}" }).joinToString(" · "),
+                listOfNotNull(window.valueLabel, window.resetsAtMs?.let { "resets ${resetLabel(it)}" }).joinToString(" · "),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.End,
@@ -253,13 +252,15 @@ fun UsageBar(window: UsageWindowInfo, modifier: Modifier = Modifier) {
                 modifier = Modifier.weight(1f),
             )
         }
-        Spacer(Modifier.height(6.dp))
-        LinearWavyProgressIndicator(
-            progress = { used },
-            color = tone,
-            trackColor = tone.copy(alpha = 0.18f),
-            modifier = Modifier.fillMaxWidth(),
-        )
+        if (window.hasLimit) {
+            Spacer(Modifier.height(6.dp))
+            LinearWavyProgressIndicator(
+                progress = { used },
+                color = tone,
+                trackColor = tone.copy(alpha = 0.18f),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 

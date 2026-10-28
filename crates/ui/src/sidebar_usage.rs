@@ -19,9 +19,6 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// Windows per card — the composer popover's cap, so a card stays compact.
-const MAX_METERS: usize = 2;
-
 /// The providers to show cards for, in Settings order: offered on the host
 /// (enabled and installed) and able to report usage. Pure.
 pub fn usage_providers(catalog: &[HarnessDescriptor]) -> Vec<HarnessId> {
@@ -235,7 +232,6 @@ impl SidebarUsage {
             .children(
                 windows
                     .iter()
-                    .take(MAX_METERS)
                     .map(|window| render_sidebar_usage_meter(window, theme)),
             )
             .when(unavailable || account.usage_error.is_some(), |el| {

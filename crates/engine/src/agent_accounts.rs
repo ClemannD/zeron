@@ -4181,6 +4181,7 @@ fn cursor_usage_windows(body: &serde_json::Value) -> Option<Vec<AgentUsageWindow
     let (auto, api) = (percent("autoPercentUsed"), percent("apiPercentUsed"));
     if auto.is_some() || api.is_some() {
         let window = |label: &str, percent: Option<f64>| AgentUsageWindow {
+            spend: None,
             label: label.to_string(),
             used_fraction: (percent.unwrap_or(0.0) / 100.0) as f32,
             resets_at,
@@ -4199,6 +4200,7 @@ fn cursor_usage_windows(body: &serde_json::Value) -> Option<Vec<AgentUsageWindow
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     Some(vec![AgentUsageWindow {
+        spend: None,
         label: "Month".to_string(),
         used_fraction: (used / limit) as f32,
         resets_at,
@@ -4965,7 +4967,7 @@ mod tests {
 
     #[test]
     fn claude_usage_windows_none_without_any_bucket() {
-        // A 200 with only `extra_usage` (no rate windows) is not a snapshot —
+        // A 200 with no rate windows or usable spend is not a snapshot —
         // the UI then says "Usage unavailable" instead of showing nothing.
         assert!(claude_usage_windows(&serde_json::json!({ "extra_usage": {} })).is_none());
         assert!(claude_usage_windows(&serde_json::json!({ "five_hour": {} })).is_none());
@@ -5240,6 +5242,7 @@ mod probe_tests {
     fn snapshot() -> UsageSnapshot {
         UsageSnapshot {
             windows: vec![AgentUsageWindow {
+                spend: None,
                 label: "5h".into(),
                 used_fraction: 0.4,
                 resets_at: None,
