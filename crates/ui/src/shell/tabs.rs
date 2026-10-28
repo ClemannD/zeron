@@ -83,6 +83,16 @@ fn panel_titlebar_widths(
     }
 }
 
+/// A target the opener names for the new-session canvas, over the sidebar
+/// filter and the canvas's own last pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NewSessionTarget {
+    /// This project (space id).
+    Project(String),
+    /// No project, on this device (id): a "No project" sidebar group.
+    NoProject(String),
+}
+
 impl Shell {
     /// Match content clearance to the header actually drawn above it.
     pub(super) fn workspace_titlebar_height(&self, cx: &App) -> f32 {
@@ -290,9 +300,14 @@ impl Shell {
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
     ///
-    /// `project` (the per-project `+` on a sidebar group header) homes the
-    /// canvas on that project and wins over the sidebar filter.
-    pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+    /// `target` (the `+` on a sidebar group header) homes the canvas on that
+    /// project, or on no project on that device, and wins over the sidebar
+    /// filter.
+    pub(super) fn open_new_session(
+        &mut self,
+        target: Option<NewSessionTarget>,
+        cx: &mut Context<Self>,
+    ) {
         self.command_palette = None;
         self.set_voice_stage_open(false, cx);
         self.set_route(Route::Chat, cx);
@@ -313,23 +328,27 @@ impl Shell {
         }
         self.nav.push(NavEntry::Chat(String::new()));
         // The "No project" tab's canvas mints project-less sessions.
-        let no_project_tab = project.is_none()
+        let no_project_tab = target.is_none()
             && self.settings.project_tabs.enabled
             && self.settings.space_filter.as_deref() == Some(crate::state::NO_PROJECT_TAB);
-        let target = {
-            let state = self.state.read(cx);
-            project
-                .or_else(|| self.settings.space_filter.clone())
-                .filter(|id| state.space_row(id).is_some())
-        };
+        let project = match &target {
+            Some(NewSessionTarget::Project(project)) => Some(project.clone()),
+            Some(NewSessionTarget::NoProject(_)) => None,
+            None => self.settings.space_filter.clone(),
+        }
+        .filter(|id| self.state.read(cx).space_row(id).is_some());
         let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
         self.state.update(cx, |s, cx| {
             // Leaving a chat puts the canvas's own target back; the filter
             // (an explicit standing choice) then applies on top of it.
             let restores = s.canvas_target.is_some();
             s.select_chat(None, cx);
-            if target.is_some() {
-                s.select_space(target, cx);
+            if let Some(NewSessionTarget::NoProject(device)) = target {
+                // The composer's "Don't work in a project" pick, on that device.
+                s.select_space(None, cx);
+                s.select_device(device, cx);
+            } else if project.is_some() {
+                s.select_space(project, cx);
             } else if no_project_tab {
                 s.select_space(None, cx);
             } else if !restores && defaults.no_project {
@@ -694,8 +713,8 @@ impl Shell {
         });
         // Project tabs take the title's place (the sidebar highlights the
         // open session); they hide with it during panel takeover.
-        let project_bar =
-            (self.settings.project_tabs.enabled && !takeover).then(|| self.render_project_tab_bar(cx));
+        let project_bar = (self.settings.project_tabs.enabled && !takeover)
+            .then(|| self.render_project_tab_bar(cx));
         let tabs_shown = project_bar.is_some();
         let (project_strip, project_band) = match project_bar {
             Some(bar) => (Some(bar.strip), Some(bar.band)),

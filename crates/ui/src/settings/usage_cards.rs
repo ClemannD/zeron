@@ -1,5 +1,6 @@
 //! Local sidebar preferences below the device's provider settings.
 use super::HarnessesPage;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::{settings, settings::widgets, theme::Theme};
 use gpui::{AnyElement, Context, div, prelude::*};
 
@@ -55,7 +56,9 @@ impl HarnessesPage {
                 theme,
                 enabled,
                 "sidebar-usage-cards",
-            ));
+            ))
+            .search_anchor(SettingId::SidebarUsageCards)
+            .block();
         widgets::section(
             theme,
             "Usage cards",

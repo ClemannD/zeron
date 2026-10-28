@@ -110,6 +110,8 @@ impl ChangeRequestTabState {
         // most useful thing to surface until they settle.
         } else if live.ci.state == CiState::Pending {
             Self::Building
+        } else if live.ci.state == CiState::Unknown {
+            Self::Open
         } else if live.mergeability == ChangeRequestMergeability::Mergeable {
             if live.review_decision == ChangeRequestReviewDecision::ReviewRequired {
                 Self::ReadyAwaitingApprovals
