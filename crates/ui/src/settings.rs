@@ -926,10 +926,12 @@ pub enum SidebarOrganization {
 /// clones of one repository are separate tabs, never grouped), each scoping
 /// the sidebar to that space's sessions. Device-local, like the sidebar
 /// filter it drives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectTabsSettings {
     pub enabled: bool,
+    /// Single-row tabs; disable for the larger name and metadata layout.
+    pub compact: bool,
     /// Visible tabs in strip order: space ids, or
     /// [`crate::state::NO_PROJECT_TAB`]. Spaces in neither this list nor
     /// [`Self::hidden`] are new and join the end of the strip.
@@ -945,6 +947,20 @@ pub struct ProjectTabsSettings {
     pub width: ProjectTabWidth,
     /// What metadata each tab shows.
     pub meta: ProjectTabMeta,
+}
+
+impl Default for ProjectTabsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            compact: true,
+            order: Vec::new(),
+            hidden: Vec::new(),
+            last_chat: HashMap::new(),
+            width: ProjectTabWidth::default(),
+            meta: ProjectTabMeta::default(),
+        }
+    }
 }
 
 /// Uniform widths keep tab scrolling, selection, and drag reordering aligned.
@@ -2370,11 +2386,23 @@ mod tests {
     fn project_tab_width_defaults_and_round_trips() {
         let legacy: ProjectTabsSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(legacy.width, ProjectTabWidth::Medium);
+        assert!(legacy.compact);
         for width in ProjectTabWidth::ALL {
             let settings = ProjectTabsSettings { width, ..Default::default() };
             let loaded: ProjectTabsSettings = serde_json::from_str(
                 &serde_json::to_string(&settings).unwrap()).unwrap();
             assert_eq!(loaded.width, width);
+        }
+    }
+
+    #[test]
+    fn project_tab_layout_preference_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        for compact in [false, true] {
+            let mut settings = UiSettings::default();
+            settings.project_tabs.compact = compact;
+            settings.save(dir.path()).unwrap();
+            assert_eq!(UiSettings::load(dir.path()).project_tabs.compact, compact);
         }
     }
 
@@ -3243,6 +3271,7 @@ mod tests {
             project_tabs: ProjectTabsSettings {
                 width: ProjectTabWidth::Wide,
                 enabled: true,
+                compact: false,
                 order: vec!["space-2".into(), "space-1".into()],
                 hidden: vec!["space-3".into()],
                 last_chat: HashMap::from([("space-1".to_string(), "chat-1".to_string())]),

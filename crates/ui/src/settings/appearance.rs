@@ -139,6 +139,7 @@ pub enum FontKind {
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
     ProjectTabsEnabled(bool),
+    ProjectTabsCompact(bool),
     ProjectTabWidthChanged(crate::settings::ProjectTabWidth),
     ProjectTabMetaChanged(crate::settings::ProjectTabMeta),
 }
@@ -375,6 +376,8 @@ impl AppearancePage {
         let mut card = widgets::section_card(theme).mt_0()
             .child(toggle("Show project tabs", "appearance-project-tabs-enabled", enabled,
                 AppearanceSettingsEvent::ProjectTabsEnabled(!enabled), true, cx))
+            .child(toggle("Compact project tabs", "appearance-project-tabs-compact", settings.compact,
+                AppearanceSettingsEvent::ProjectTabsCompact(!settings.compact), false, cx))
             .child(widgets::card_row(theme, false)
                 .child(div().flex_1().min_w_0().child(widgets::row_title(theme, "Tab width")))
                 .child(control));

@@ -5603,6 +5603,9 @@ impl Shell {
                     AppearanceSettingsEvent::ProjectTabsEnabled(enabled) => {
                         this.set_project_tabs_enabled(enabled, cx);
                     }
+                    AppearanceSettingsEvent::ProjectTabsCompact(compact) => {
+                        this.set_project_tabs_compact(compact, cx);
+                    }
                     AppearanceSettingsEvent::ProjectTabWidthChanged(width) => {
                         this.settings.project_tabs.width = width;
                         this.project_tab_drag = None;
@@ -16954,7 +16957,7 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn project_tabs_keep_compact_metadata_on_one_line(cx: &mut TestAppContext) {
+    fn project_tabs_toggle_compact_and_larger_layouts(cx: &mut TestAppContext) {
         let (shell, cx, dir) = pull_request_shell(cx);
         cx.update(|_, cx| motion::set_reduced_motion(cx, true));
         shell.update(cx, |shell, cx| {
@@ -16989,44 +16992,63 @@ mod exit_regressions {
             assert_eq!(shell.pane_seam_top(cx), Some(Theme::TITLEBAR_HEIGHT));
             cx.notify();
         });
-        for width in [800.0, 1400.0] {
-            cx.simulate_resize(gpui::size(px(width), px(800.0)));
-            cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear());
-            let header = cx.debug_bounds("session-titlebar").unwrap();
-            let tab = cx.debug_bounds("project-tab-0").unwrap();
-            assert_eq!(tab.size.width, px(crate::settings::ProjectTabWidth::Medium.pixels()));
-            assert_eq!(
-                header.size.height,
-                px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT)
-            );
-            assert_eq!(header.size.height, px(Theme::TITLEBAR_TOP_PAD) + tab.size.height);
-            assert!(tab.top() >= header.top() + px(Theme::TITLEBAR_TOP_PAD));
-            assert!(tab.bottom() <= header.bottom());
-            let title = cx.debug_bounds("project-tab-title-0").unwrap();
-            let branch = cx.debug_bounds("project-tab-branch-0").unwrap();
-            assert_eq!(header.size.height, px(Theme::TITLEBAR_HEIGHT));
-            assert!(title.top() >= tab.top());
-            assert!(title.bottom() <= tab.bottom());
-            assert!((title.center().y - branch.center().y).abs() < px(1.0));
-            assert!(title.right() <= branch.left());
-            assert!(branch.right() <= tab.right());
-            assert!(cx.debug_bounds("project-tab-changes-0").is_none());
-            let other = cx.debug_bounds("project-tab-1").unwrap();
-            assert_eq!(other.size.height, tab.size.height);
-            assert!(cx.debug_bounds("project-tab-changes-1").is_none());
-            let title = cx.debug_bounds("project-tab-title-1").unwrap();
-            let branch = cx.debug_bounds("project-tab-branch-1").unwrap();
-            assert!(title.top() >= other.top());
-            assert!((title.center().y - branch.center().y).abs() < px(1.0));
-            assert!(title.right() <= branch.left());
-            assert!(branch.bottom() <= other.bottom());
-        }
-        // Appearance controls reach the shell and persist immediately.
         let page = shell.update(cx, |shell, cx| {
             shell.ensure_appearance_page(cx);
             shell.appearance_page.clone().unwrap()
         });
+        for compact in [true, false] {
+            page.update(cx, |_, cx| cx.emit(AppearanceSettingsEvent::ProjectTabsCompact(compact)));
+            shell.update(cx, |shell, cx| {
+                assert_eq!(shell.settings.project_tabs.compact, compact);
+                assert_eq!(settings::current(cx).project_tabs.compact, compact);
+                assert_eq!(shell.pane_seam_top(cx), Some(shell.project_tab_header_height()));
+            });
+            for width in [800.0, 1400.0] {
+                cx.simulate_resize(gpui::size(px(width), px(800.0)));
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear());
+                let header = cx.debug_bounds("session-titlebar").unwrap();
+                let tab = cx.debug_bounds("project-tab-0").unwrap();
+                assert_eq!(tab.size.width, px(crate::settings::ProjectTabWidth::Medium.pixels()));
+                assert_eq!(
+                    header.size.height,
+                    px(if compact { Theme::TITLEBAR_HEIGHT } else { 52.0 + Theme::TITLEBAR_TOP_PAD })
+                );
+                assert_eq!(header.size.height, px(Theme::TITLEBAR_TOP_PAD) + tab.size.height);
+                assert!(tab.top() >= header.top() + px(Theme::TITLEBAR_TOP_PAD));
+                assert!(tab.bottom() <= header.bottom());
+                let title = cx.debug_bounds("project-tab-title-0").unwrap();
+                let branch = cx.debug_bounds("project-tab-branch-0").unwrap();
+                assert!(title.top() >= tab.top());
+                assert!(title.bottom() <= tab.bottom());
+                if compact {
+                    assert!((title.center().y - branch.center().y).abs() < px(1.0));
+                    assert!(title.right() <= branch.left());
+                    assert!(cx.debug_bounds("project-tab-changes-0").is_none());
+                } else {
+                    assert!(title.bottom() <= branch.top());
+                    let changes = cx.debug_bounds("project-tab-changes-0").unwrap();
+                    assert!(changes.right() <= tab.right());
+                    assert!((title.center().y - changes.center().y).abs() < px(1.0));
+                }
+                assert!(branch.right() <= tab.right());
+                assert!(branch.bottom() <= tab.bottom());
+                let other = cx.debug_bounds("project-tab-1").unwrap();
+                assert_eq!(other.size.height, tab.size.height);
+                assert!(cx.debug_bounds("project-tab-changes-1").is_none());
+                let title = cx.debug_bounds("project-tab-title-1").unwrap();
+                let branch = cx.debug_bounds("project-tab-branch-1").unwrap();
+                assert!(title.top() >= other.top());
+                if compact {
+                    assert!((title.center().y - branch.center().y).abs() < px(1.0));
+                    assert!(title.right() <= branch.left());
+                } else {
+                    assert!(title.bottom() <= branch.top());
+                }
+                assert!(branch.bottom() <= other.bottom());
+            }
+        }
+        // Appearance controls reach the shell and persist immediately.
         for width in crate::settings::ProjectTabWidth::ALL {
             page.update(cx, |_, cx| cx.emit(AppearanceSettingsEvent::ProjectTabWidthChanged(width)));
             cx.run_until_parked();

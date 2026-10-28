@@ -25,10 +25,6 @@ use super::*;
 use crate::settings::{ProjectTabMeta, ProjectTabWidth};
 use crate::state::NO_PROJECT_TAB;
 
-/// The header must reserve the tab height plus the top gutter. Growing only
-/// the tab would clip its first row inside the scrolling strip.
-const PROJECT_TAB_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD;
-pub(super) const PROJECT_TAB_HEADER_HEIGHT: f32 = PROJECT_TAB_HEIGHT + Theme::TITLEBAR_TOP_PAD;
 /// The tab chips' corner radius.
 const PROJECT_TAB_RADIUS: f32 = 8.0;
 /// Air above and below the tab chips within the band. The tab itself sits
@@ -348,6 +344,27 @@ pub(super) struct ProjectTabBar {
 }
 
 impl Shell {
+    fn project_tab_height(&self) -> f32 {
+        if self.settings.project_tabs.compact {
+            Theme::TITLEBAR_HEIGHT - Theme::TITLEBAR_TOP_PAD
+        } else {
+            52.0
+        }
+    }
+
+    /// Reserve both rows and the top gutter so larger tabs never clip.
+    pub(super) fn project_tab_header_height(&self) -> f32 {
+        self.project_tab_height() + Theme::TITLEBAR_TOP_PAD
+    }
+
+    pub(super) fn set_project_tabs_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        self.settings.project_tabs.compact = compact;
+        self.project_tab_drag = None;
+        self.dismiss_project_tab_card(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn hover_project_tab_card(&mut self, key: &str, hovered: bool, cx: &mut Context<Self>) {
         let now = Instant::now();
         if !hovered {
@@ -1345,7 +1362,7 @@ impl Shell {
                 }
                 Some((from, ..)) if ix == from => div()
                     .w(px(tab_width))
-                    .h(px(PROJECT_TAB_HEIGHT))
+                    .h(px(self.project_tab_height()))
                     .flex_none()
                     .into_any_element(),
                 _ => tab.into_any_element(),
@@ -1554,8 +1571,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One compact row: project name, then branch and optional PR state at
-    /// the right. Change totals remain available in the hover card.
+    /// Compact tabs put metadata beside the name; larger tabs put it below
+    /// and show working-tree totals on the active tab.
     /// Inactive tabs wash on hover; the band paints the active tab's chip.
     #[allow(clippy::too_many_arguments)]
     fn render_project_tab(
@@ -1587,10 +1604,12 @@ impl Shell {
             .as_ref()
             .map(|summary| crate::change_requests::ChangeRequestTabState::from_summary(summary));
         let status_color = status.map(|status| status.color(theme));
+        let compact = self.settings.project_tabs.compact;
         let branch_label = branch.clone().map(|branch| {
             div()
                 .debug_selector(move || format!("project-tab-branch-{ix}"))
-                .max_w(px(60.0))
+                .when(compact, |el| el.max_w(px(60.0)))
+                .when(!compact, |el| el.flex_1())
                 .min_w_0()
                 .truncate()
                 .text_size(crate::typography::ui_rems(10.5))
@@ -1610,6 +1629,92 @@ impl Shell {
                 .items_center()
                 .child(icon(status.icon()).size(px(12.0)).text_color(color))
         });
+        let title_label = div()
+            .debug_selector(move || format!("project-tab-title-{ix}"))
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(14.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .child(title.clone());
+        let content: AnyElement = if compact {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_none().child(leading))
+                .child(title_label)
+                .children(branch_label)
+                .children(pr_icon)
+                .into_any_element()
+        } else {
+            let change_totals = changes
+                .filter(|&(adds, dels)| active && (adds > 0 || dels > 0))
+                .map(|(adds, dels)| {
+                    div()
+                        .debug_selector(move || format!("project-tab-changes-{ix}"))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .line_height(px(12.0))
+                        .child(
+                            div()
+                                .text_color(crate::changes::add_color(theme))
+                                .child(format!("+{adds}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(crate::changes::del_color(theme))
+                                .child(format!("−{dels}")),
+                        )
+                });
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .h(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .child(div().flex_none().child(leading))
+                        .child(title_label)
+                        .children(change_totals),
+                )
+                .when(branch_label.is_some() || pr_icon.is_some(), |el| {
+                    el.child(
+                        div()
+                            .h(px(14.0))
+                            .flex_none()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .when(branch_label.is_some(), |el| {
+                                el.child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(10.0))
+                                        .flex_none()
+                                        .text_color(muted),
+                                )
+                            })
+                            .children(branch_label)
+                            .children(pr_icon),
+                    )
+                })
+                .into_any_element()
+        };
         let menu_key = key.clone();
         let middle_key = key.clone();
         let click_key = key.clone();
@@ -1629,7 +1734,7 @@ impl Shell {
             .group(group.clone())
             .relative()
             .w(px(self.settings.project_tabs.width.pixels()))
-            .h(px(PROJECT_TAB_HEIGHT))
+            .h(px(self.project_tab_height()))
             .flex_none()
             .pl(px(14.0))
             .pr(px(14.0))
@@ -1679,21 +1784,7 @@ impl Shell {
                         .bg(theme.border),
                 )
             })
-            .child(div().flex_none().child(leading))
-            .child(
-                div()
-                    .debug_selector(move || format!("project-tab-title-{ix}"))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(title.clone()),
-            )
-            .children(branch_label)
-            .children(pr_icon)
+            .child(content)
             .children(hover_card)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();

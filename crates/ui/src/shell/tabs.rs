@@ -91,7 +91,7 @@ impl Shell {
             && self.settings.project_tabs.enabled
             && !self.titlebar_trailing_layout(on_canvas, cx).takeover
         {
-            super::project_tabs::PROJECT_TAB_HEADER_HEIGHT
+            self.project_tab_header_height()
         } else {
             Theme::TITLEBAR_HEIGHT
         }
@@ -762,7 +762,7 @@ impl Shell {
         let bar = div()
             .debug_selector(|| "session-titlebar".into())
             .h(px(if tabs_shown {
-                super::project_tabs::PROJECT_TAB_HEADER_HEIGHT
+                self.project_tab_header_height()
             } else {
                 Theme::TITLEBAR_HEIGHT
             }))
@@ -792,7 +792,7 @@ impl Shell {
             .child(
                 div()
                     .absolute()
-                    .top(px(super::project_tabs::PROJECT_TAB_HEADER_HEIGHT))
+                    .top(px(self.project_tab_header_height()))
                     .right(px(self.files_visible_width(cx)))
                     .h(px(PANE_HEADER_ROW_HEIGHT))
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
