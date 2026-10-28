@@ -3,6 +3,8 @@
 Private Mac app releases use a separate authenticated R2 feed. See
 [Mac private updates](macos-private-updates.md) for publishing and bootstrap
 installation; these artifacts never go in the public `zeron-releases` bucket.
+Signed Mac releases use a read-only update credential (`PRIVATE_RELEASES_TOKEN`
+on the edge), so local-only Macs receive updates without a sync sign-in.
 
 This fork runs its own edge and vault on the clemann.app Cloudflare account
 (`27f9550dae9ea2ae400dff7b77cc052f`), with the edge as its own identity

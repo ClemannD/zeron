@@ -187,6 +187,13 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
             if fork::enabled() {
                 match response.status.as_u16() {
                     401 | 403 => {
+                        if option_env!("ZERON_FORK_UPDATE_TOKEN")
+                            .is_some_and(|token| !token.is_empty())
+                        {
+                            bail!(
+                                "The private update credential was refused; install a current signed fork release"
+                            )
+                        }
                         bail!("Sign in with the fork owner's account to check for private updates")
                     }
                     404 => bail!("No private Mac release has been published yet"),

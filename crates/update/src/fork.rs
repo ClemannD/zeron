@@ -59,6 +59,34 @@ pub async fn send(client: &reqwest::Client, url: &str) -> anyhow::Result<reqwest
             .context("requesting release");
     }
     validate_url(url)?;
+    send_private(
+        client,
+        url,
+        option_env!("ZERON_FORK_UPDATE_TOKEN").filter(|token| !token.is_empty()),
+    )
+    .await
+}
+
+async fn send_private(
+    client: &reqwest::Client,
+    url: &str,
+    update_token: Option<&str>,
+) -> anyhow::Result<reqwest::Response> {
+    if let Some(token) = update_token {
+        let mut credential = reqwest::header::HeaderValue::from_str(token)
+            .context("invalid private update credential")?;
+        credential.set_sensitive(true);
+        // Use the release-only capability before looking up a sync session.
+        // Never attach user credentials or ask the engine to sign in here.
+        return client
+            .get(url)
+            .header("X-Zeron-Update-Token", credential)
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .send()
+            .await
+            .context("requesting private release");
+    }
+    // Compatibility with older fork builds that used an owner session.
     let provider = TOKENS
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -155,20 +183,22 @@ mod tests {
     /// Release acceptance test against our real Worker/R2 and Apple-signed
     /// packages. Installs only into a temporary directory, never Applications.
     #[tokio::test]
-    #[ignore = "requires a published newer release, owner token, and signed bootstrap app"]
+    #[ignore = "requires a published newer release, update credential, and signed bootstrap app"]
     async fn private_feed_live_stage_verify_swap_and_backup() {
         assert!(
             enabled(),
             "compile with ZERON_FORK_BUILD set to the bootstrap build number"
         );
-        let token = std::env::var("ZERON_UPDATE_TEST_TOKEN").expect("owner access token");
         let bootstrap = std::path::PathBuf::from(
             std::env::var("ZERON_UPDATE_TEST_APP").expect("signed bootstrap app"),
         );
-        set_token_provider(Arc::new(move |_| {
-            let token = token.clone();
-            Box::pin(async move { Ok(token) })
-        }));
+        if option_env!("ZERON_FORK_UPDATE_TOKEN").is_none_or(|token| token.is_empty()) {
+            let token = std::env::var("ZERON_UPDATE_TEST_TOKEN").expect("owner access token");
+            set_token_provider(Arc::new(move |_| {
+                let token = token.clone();
+                Box::pin(async move { Ok(token) })
+            }));
+        }
         let manifest = crate::fetch_latest("https://zeron.clemann.app")
             .await
             .unwrap();
@@ -273,6 +303,45 @@ mod tests {
         assert!(validate_private_manifest(&manifest).is_ok());
         assert!(crate::version_newer("0.2.124.8", "0.2.124.7"));
         assert!(crate::version_newer("0.2.125.1", "0.2.124.8"));
+    }
+
+    #[tokio::test]
+    async fn update_capability_works_signed_out_without_session_refresh_or_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for status in ["200 OK", "401 Unauthorized", "302 Found"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut chunk = [0; 512];
+                    let length = socket.read(&mut chunk).await.unwrap();
+                    assert!(length > 0 && bytes.len() < 4096);
+                    bytes.extend_from_slice(&chunk[..length]);
+                }
+                let request = String::from_utf8_lossy(&bytes).to_lowercase();
+                assert!(request.contains("x-zeron-update-token: update-only"));
+                assert!(!request.contains("authorization:"));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nLocation: http://127.0.0.1:1/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        // No token provider is registered: each request must bypass sync auth,
+        // including when the update credential is refused.
+        for status in [200, 401, 302] {
+            let response = send_private(&client, &url, Some("update-only"))
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]

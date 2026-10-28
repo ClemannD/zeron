@@ -127,6 +127,8 @@ export default {
     }
     const release = await releaseRoute(request, env, url);
     if (release) return release;
+    const privateRelease = await privateReleaseRoute(request, env, url);
+    if (privateRelease) return privateRelease;
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
@@ -147,9 +149,6 @@ export default {
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
-
-    const privateRelease = await privateReleaseRoute(request, env, auth, url);
-    if (privateRelease) return privateRelease;
 
     // Runner bearers (the Cloud device) act as their DEVICE, not the user:
     // no account management, no vault beyond their own grants, no other

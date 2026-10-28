@@ -13,7 +13,7 @@ describe("private fork releases", () => {
     const allowed = await SELF.fetch("https://test/fork-updates/manifest.json", { headers });
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get("cache-control")).toBe("private, no-store");
-    expect(allowed.headers.get("vary")).toBe("Authorization");
+    expect(allowed.headers.get("vary")).toBe("Authorization, X-Zeron-Update-Token");
     expect(await allowed.json()).toEqual({ version: "0.2.124.1" });
     expect((await SELF.fetch("https://test/fork-updates/manifest.json", { headers: { authorization: "Bearer other@org1" } })).status).toBe(403);
     expect((await SELF.fetch("https://test/fork-updates/manifest.json?token=release-owner@org1")).status).toBe(403);
@@ -35,12 +35,45 @@ describe("private fork releases", () => {
     const selfEnv = { ...env, AUTH_MODE: "self" };
     const auth = await authenticate(selfEnv, request);
     expect(auth?.userId).toBe("release-owner");
-    const response = await privateReleaseRoute(request, selfEnv, auth!, new URL(request.url));
+    const response = await privateReleaseRoute(request, selfEnv, new URL(request.url));
     expect(response!.status).toBe(200);
     await response!.arrayBuffer();
     const runner = await SELF.fetch("https://test/fork-updates/signed-test.json", {
       headers: { authorization: "Bearer runner:release-owner@org1:runner1" }
     });
     expect(runner.status).toBe(403);
+  });
+
+  it("lets a signed-out Mac read releases with an update-only capability", async () => {
+    await env.PRIVATE_RELEASES!.put("local-only.json", '{"version":"0.2.126.9"}');
+    await env.PRIVATE_RELEASES!.put("local-only.tar.gz", "signed-app");
+    const headers = { "x-zeron-update-token": "test-update-capability" };
+    const response = await SELF.fetch("https://test/fork-updates/local-only.json", { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({ version: "0.2.126.9" });
+    const artifact = await SELF.fetch("https://test/fork-updates/local-only.tar.gz", { headers });
+    expect(artifact.status).toBe(200);
+    expect(await artifact.text()).toBe("signed-app");
+    const head = await SELF.fetch("https://test/fork-updates/local-only.tar.gz", { headers, method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+    expect((await SELF.fetch("https://test/fork-updates/local-only.json", { headers, method: "PUT" })).status).toBe(405);
+    expect((await SELF.fetch("https://test/fork-updates/missing.json", { headers })).status).toBe(404);
+    expect((await SELF.fetch("https://test/fork-updates/bad%2Fkey", { headers })).status).toBe(400);
+    // Possession is read-only and confined to the private release route.
+    for (const path of ["/ws/org1/registry", "/vault/connections", "/cloud/accounts", "/fork-updates-other/app"]) {
+      expect((await SELF.fetch(`https://test${path}`, { headers })).status).toBe(401);
+    }
+    expect((await SELF.fetch("https://test/releases/local-only.tar.gz", { headers })).status).toBe(404);
+    for (const token of ["wrong-token", "", "é".repeat("test-update-capability".length)]) {
+      expect((await SELF.fetch("https://test/fork-updates/local-only.json", {
+        headers: { "x-zeron-update-token": token }
+      })).status).toBe(401);
+    }
+    expect((await SELF.fetch("https://test/fork-updates/local-only.json?token=test-update-capability")).status).toBe(403);
+    const request = new Request("https://test/fork-updates/local-only.json", { headers });
+    const disabled = await privateReleaseRoute(request, { ...env, PRIVATE_RELEASES_TOKEN: undefined }, new URL(request.url));
+    expect(disabled!.status).toBe(401);
   });
 });

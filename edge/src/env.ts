@@ -20,6 +20,8 @@ export interface Env {
   /** Fork only: a separate private Mac release bucket and its allowed user. */
   PRIVATE_RELEASES?: R2Bucket;
   PRIVATE_RELEASES_USER_ID?: string;
+  /** Fork only: read-only release capability, independent of sync sessions. */
+  PRIVATE_RELEASES_TOKEN?: string;
   WORKOS_CLIENT_ID: string;
   /** "workos" (verify AuthKit JWTs), "self" (this edge is the identity
    * provider: passkeys + our own JWTs, self-auth/) or "dev" (bearer ==

@@ -56,7 +56,22 @@ print(number)
 PY
 )"
 export ZERON_FORK_BUILD
+# An update-only capability keeps local-only Macs out of account/sync auth.
+# Provision the same value as the edge's PRIVATE_RELEASES_TOKEN once (guide).
+ZERON_FORK_UPDATE_TOKEN="$(python3 - "$HOME/.zeron-selfhost/macos-update-token" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit('Configure macos-update-token first; see docs/macos-private-updates.md')
+token = path.read_text().strip()
+if not re.fullmatch(r'[a-f0-9]{64}', token):
+    raise SystemExit('Invalid macos-update-token: expected 32 random bytes as hex')
+print(token)
+PY
+)"
+export ZERON_FORK_UPDATE_TOKEN
 ZERON_FORK_BUILD_ONLY=1 scripts/install-fork-macos.sh
+unset ZERON_FORK_UPDATE_TOKEN
 OUT="$ROOT/target/package"
 APP="$OUT/Zeron.app"
 VERSION="$(plutil -extract ZeronUpdateVersion raw -o - "$APP/Contents/Info.plist")"
@@ -111,6 +126,25 @@ pathlib.Path(manifest).write_text(json.dumps(data, indent=2) + '\n')
 print('Private release ready:', version)
 PY
 if [[ "$ACTION" == publish ]]; then
+  # Refuse publication if local-only clients cannot use this credential.
+  # Never follow redirects with a credential or print it on failure.
+  python3 - "$HOME/.zeron-selfhost/macos-update-token" <<'PY'
+import pathlib, sys, urllib.error, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+token = pathlib.Path(sys.argv[1]).read_text().strip()
+request = urllib.request.Request('https://zeron.clemann.app/fork-updates/manifest.json',
+    headers={'X-Zeron-Update-Token': token, 'User-Agent': 'zeron-release/1'})
+try:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+        if response.status != 200:
+            raise SystemExit('Private update credential check failed')
+except urllib.error.HTTPError as error:
+    # The first release may not have a manifest yet. Auth is checked before R2.
+    if error.code != 404:
+        raise SystemExit(f'Private update credential check failed (HTTP {error.code}); configure the edge before publishing')
+PY
   cd "$ROOT/edge"
   # The public RELEASES binding is deliberately never used for fork artifacts.
   for artifact in "$TARBALL" "$ZIP"; do
