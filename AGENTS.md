@@ -91,7 +91,10 @@ change needs a backend deploy, not new app builds. Report which app releases
 were published and any remaining Apple processing. Do not replace or restart the
 running home Mac app merely to publish an update for other devices.
 
-For upstream syncs, use
+For a changelog-first upstream review followed by a confirmed merge and
+release, use
+[upstream-changelog-and-pull](.claude/skills/upstream-changelog-and-pull/SKILL.md).
+For directly authorized upstream syncs, use
 [update-from-upstream](.claude/skills/update-from-upstream/SKILL.md), then
 hand off to `release-fork` if shipping the merged changes was requested.
 Pushing `main` alone does not publish either app.
