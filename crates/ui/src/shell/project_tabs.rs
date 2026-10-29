@@ -998,11 +998,30 @@ impl Shell {
         };
         let theme = Theme::of(cx).for_popup();
         let closing = self.project_tab_menu.closing_since();
+        let path = self
+            .state
+            .read(cx)
+            .space_row(&key)
+            .map(|space| space.path.clone());
         let menu = popover::popover_card(&theme)
             .w(px(250.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_tab_menu(cx)))
             .flex()
             .flex_col()
+            .when_some(path, |menu, path| {
+                menu.child(
+                    popover::menu_row(&theme, false, "project-tab-menu-copy-path")
+                        .id("project-tab-menu-copy-path")
+                        .debug_selector(|| "project-tab-menu-copy-path".into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_project_tab_menu(cx);
+                            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                        }))
+                        .child(icon(icons::COPY).size(px(14.0)).text_color(theme.text_muted))
+                        .child(SharedString::from("Copy path")),
+                )
+            })
             .when(key != NO_PROJECT_TAB, |menu| {
                 let reset_key = key.clone();
                 menu.child(
