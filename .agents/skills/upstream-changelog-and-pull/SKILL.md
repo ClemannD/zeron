@@ -47,14 +47,16 @@ continue without asking again. Honor any narrower platform or action scope.
 Use [update-from-upstream](../update-from-upstream/SKILL.md) for the merge,
 fork-config reconciliation, checks, commit, push, and backend deployment.
 Use [release-fork](../release-fork/SKILL.md) for authorized app publication.
-Read both files directly; they are tracked repository skills. Reuse completed
+Read both files directly from `.agents/skills/`, the canonical repository
+skill directory; `.claude/skills` is a directory symlink to it. Reuse completed
 checks and deploys rather than repeating them. Merge the reviewed upstream
 revision; if a new fetch adds material changes, summarize those additions
 before seeking approval for the expanded scope.
 
 Preserve both upstream behavior and fork features, especially project tabs,
-usage cards, self-auth, private updates, and the tracked `.claude/skills/`
-exception. Inspect auto-merged integration points too. If unrelated dirty
+usage cards, self-auth, private updates, tracked `.agents/skills/`, and the
+`.claude/skills` directory symlink and ignore exceptions. Inspect auto-merged
+integration points too. If unrelated dirty
 work or a product decision prevents a safe merge, describe the concrete
 issue and ask for direction without discarding work.
 

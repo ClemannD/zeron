@@ -10,10 +10,11 @@ node_modules
 .wrangler
 build/
 edge/dist/
-.agents
-# Fork: local agent state stays out, but this fork's shared skills are tracked.
+# Fork: shared skills live in .agents; other local agent state stays out.
+.agents/*
+!.agents/skills/
 .claude/*
-!.claude/skills/
+!.claude/skills
 CLAUDE.md
 /scripts/**/__pycache__/
 .dev.vars

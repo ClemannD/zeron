@@ -47,10 +47,13 @@ fork's traffic to WorkOS.
   Append new migration tags **after** ours (`self-auth-v1`); never reorder or
   rename existing tags. Leave out upstream's Stripe vars, staging env and
   zeron.sh routes. Then run `npm test` in `edge/` and redeploy.
-- **`.claude/skills/` is tracked; the rest of `.claude/` is not.** Upstream
-  ignores all of `.claude`. This fork's `.gitignore` uses `.claude/*` with
-  `!.claude/skills/`, so shared skills (like `update-from-upstream`) are
-  committed. Keep that exception if a merge touches `.gitignore`.
+- **Shared skills live in `.agents/skills/`.** Create and edit every repo
+  skill there so all agents can discover it. `.claude/skills` is a tracked
+  relative directory symlink to `../.agents/skills`; do not keep separate
+  copies or add per-skill links. Git tracks the canonical skills and this
+  symlink, while other local `.agents/` and `.claude/` state stays ignored.
+  Preserve this layout and both skill exceptions if an upstream merge
+  touches `.gitignore`.
 - **Don't push to `main` expecting CI to deploy.** `.github/workflows/deploy.yml`
   is upstream's and targets upstream's configs. It stays inert while the fork
   has no `CLOUDFLARE_API_TOKEN` secret. Don't add one.
@@ -78,11 +81,11 @@ software passkey (`test/workerd/passkey-fake.ts`).
 
 ## Releasing changes to personal devices
 
-Use [the release-fork skill](.claude/skills/release-fork/SKILL.md) when asked
+Use [the release-fork skill](.agents/skills/release-fork/SKILL.md) when asked
 to release, ship, publish an update, or update the installed apps after a
 feature or merge. It covers private Mac updates, iPhone TestFlight, backend
 deploys, validation, and version allocation. Read that file directly if the
-agent's skill catalog does not list it; `.claude/skills/` is the tracked source.
+agent's skill catalog does not list it; `.agents/skills/` is the tracked source.
 
 Implementing a feature or merging code alone does not publish an app.
 For a release request without a specified device, release the affected Mac
@@ -93,8 +96,8 @@ running home Mac app merely to publish an update for other devices.
 
 For a changelog-first upstream review followed by a confirmed merge and
 release, use
-[upstream-changelog-and-pull](.claude/skills/upstream-changelog-and-pull/SKILL.md).
+[upstream-changelog-and-pull](.agents/skills/upstream-changelog-and-pull/SKILL.md).
 For directly authorized upstream syncs, use
-[update-from-upstream](.claude/skills/update-from-upstream/SKILL.md), then
+[update-from-upstream](.agents/skills/update-from-upstream/SKILL.md), then
 hand off to `release-fork` if shipping the merged changes was requested.
 Pushing `main` alone does not publish either app.

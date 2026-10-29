@@ -111,7 +111,7 @@ processing that build and the group has access. A processing-complete email
 alone does not establish testing access.
 
 Agents releasing features or merged changes should follow
-[release-fork](../.claude/skills/release-fork/SKILL.md) for the complete
+[release-fork](../.agents/skills/release-fork/SKILL.md) for the complete
 Mac/iPhone/backend workflow.
 
 ## Connect to the home Mac
