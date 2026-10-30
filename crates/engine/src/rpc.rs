@@ -291,6 +291,13 @@ struct DiscardWorkingTreeParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ListPackageScriptsParams {
+    space_id: String,
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListProjectActionsParams {
     space_id: String,
 }
@@ -316,6 +323,7 @@ struct DeleteProjectActionParams {
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
+    #[serde(alias = "scriptName")]
     action_id: String,
     cols: u16,
     rows: u16,
@@ -1268,6 +1276,38 @@ impl EngineRpc {
         Ok(space)
     }
 
+    async fn project_action_checkout(
+        &self,
+        space: &Space,
+        chat_id: &str,
+    ) -> Result<std::path::PathBuf, RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(|err| RpcError::Failed(err.to_string()))?
+            .ok_or_else(|| RpcError::Failed("Project chat not found".into()))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(RpcError::Failed(
+                "Project chat belongs to another device".into(),
+            ));
+        }
+        if chat.space_id.as_deref() != Some(space.id.as_str()) {
+            return Err(RpcError::Failed(
+                "Project chat belongs to another space".into(),
+            ));
+        }
+        let cwd = chat
+            .cwd
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| RpcError::Failed("Project chat has no checkout".into()))?;
+        let checkout = self
+            .repos
+            .workspace_checkout(std::path::Path::new(&space.path), &cwd)
+            .await
+            .ok_or_else(|| RpcError::Failed("Project chat checkout is unavailable".into()))?;
+        Ok(checkout)
+    }
+
     /// Resolve a mention-search root from synced workspace rows. A client may
     /// name an existing linked worktree for a new chat, but it is verified
     /// against the space repository before any filesystem walk begins.
@@ -2189,6 +2229,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
+            | methods::LIST_PACKAGE_SCRIPTS
+            | methods::RUN_PACKAGE_SCRIPT
             | methods::RUN_PROJECT_ACTION
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
@@ -4480,42 +4522,40 @@ impl RpcService for EngineRpc {
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
-            methods::RUN_PROJECT_ACTION => {
+            methods::LIST_PACKAGE_SCRIPTS => {
+                let p: ListPackageScriptsParams = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                let checkout = self.project_action_checkout(&space, &p.chat_id).await?;
+                let scripts = tokio::task::spawn_blocking(move || {
+                    crate::package_scripts::read_package_scripts(&checkout)
+                })
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
+                RpcReply::value(&scripts)
+            }
+            methods::RUN_PROJECT_ACTION | methods::RUN_PACKAGE_SCRIPT => {
+                let package_script = method == methods::RUN_PACKAGE_SCRIPT;
                 let p: RunProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
-                let chat = self
-                    .workspace
-                    .chat(&p.chat_id)
-                    .map_err(|err| RpcError::Failed(err.to_string()))?
-                    .ok_or_else(|| RpcError::Failed("Project chat not found".into()))?;
-                if chat.device_id != self.doc_host.device_id() {
-                    return Err(RpcError::Failed(
-                        "Project chat belongs to another device".into(),
-                    ));
-                }
-                if chat.space_id.as_deref() != Some(space.id.as_str()) {
-                    return Err(RpcError::Failed(
-                        "Project chat belongs to another space".into(),
-                    ));
-                }
-                let cwd = chat
-                    .cwd
-                    .map(std::path::PathBuf::from)
-                    .ok_or_else(|| RpcError::Failed("Project chat has no checkout".into()))?;
-                let checkout = self
-                    .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &cwd)
-                    .await
-                    .ok_or_else(|| {
-                        RpcError::Failed("Project chat checkout is unavailable".into())
-                    })?;
+                let checkout = self.project_action_checkout(&space, &p.chat_id).await?;
                 let project_root = std::fs::canonicalize(&space.path)
                     .map_err(|_| RpcError::Failed("Project root is unavailable".into()))?;
-                let action = self
-                    .project_actions
-                    .action(&space.id, std::path::Path::new(&space.path), &p.action_id)
+                let action = if package_script {
+                    let name = p.action_id.clone();
+                    let checkout = checkout.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::package_scripts::package_script_action(&checkout, &name)
+                    })
+                    .await
                     .map_err(|err| RpcError::Failed(err.to_string()))?
-                    .ok_or_else(|| RpcError::Failed("Project action not found".into()))?;
+                    .map_err(|err| RpcError::Failed(err.to_string()))?
+                } else {
+                    self.project_actions
+                        .action(&space.id, std::path::Path::new(&space.path), &p.action_id)
+                        .map_err(|err| RpcError::Failed(err.to_string()))?
+                        .ok_or_else(|| RpcError::Failed("Project action not found".into()))?
+                };
                 let run = crate::project_actions::launch_project_action(
                     &self.terminals,
                     &action,
@@ -5449,7 +5489,7 @@ mod tests {
         );
         assert!(
             service
-            .handle(methods::AUTH_STATUS, serde_json::json!({}))
+                .handle(methods::AUTH_STATUS, serde_json::json!({}))
                 .await
                 .is_ok()
         );
