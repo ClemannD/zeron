@@ -543,10 +543,18 @@ function fillRun(ctx, s, run) {
 // Where everything sits on the card, in points from its top-left corner
 // (the native card's layout: a 1-point border, 16 of padding, pills 22
 // high, badges 20, Geist Mono at 0.6 em).
+// "004·182": six digits, a centred dot between their halves (the native
+// card's `numbered`).
+export function serial(n) {
+  const v = Math.max(0, Math.trunc(Number(n) || 0));
+  const pad = (x) => String(x % 1000).padStart(3, "0");
+  return `${pad(Math.trunc(v / 1000))}·${pad(v)}`;
+}
+
 export function layoutCard(card) {
   const name = card.firstName || `@${card.username}`;
   const since = sinceOf(card.joinedOn);
-  const number = `#${card.userNumber}`;
+  const number = serial(card.userNumber);
   const x0 = BORDER + PAD, x1 = W - BORDER - PAD, y0 = BORDER + PAD, y1 = H - BORDER - PAD;
   const runs = [], boxes = [];
   const sz = TOKENS.size;
