@@ -116,6 +116,12 @@ ${options.site ? `<meta name="twitter:site" content="${escapeHtml(options.site)}
   footer { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: center; align-items: baseline; padding: 0 16px 32px; color: var(--muted); font-size: 13px; }
   footer b { color: var(--ink); font-weight: 600; }
   footer a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--faint); }
+  /* On a phone, the card alone: it fills the screen, nothing under it. */
+  @media (max-width: 640px) {
+    main { grid-template-rows: 1fr; }
+    .stage { min-height: 0; }
+    footer { display: none; }
+  }
 </style>`;
   return `${head(title, description, urls, meta)}
 <body>
