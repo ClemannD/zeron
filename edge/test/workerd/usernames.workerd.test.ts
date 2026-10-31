@@ -489,21 +489,21 @@ describe("a card over time", () => {
     expect(await directory().card("steadycard")).toMatchObject({ firstName: "Renamed", ...deriveCard(id, CARD_SCENES) });
   });
 
-  it("keeps a card claimed at 20 scenes once Black Hole makes 21", async () => {
-    expect(CARD_SCENES).toBe(21);
-    const id = idMovedBy(21, "user_at20", 20);
-    const fresh = idMovedBy(21, "user_at21", 20);
+  it("keeps a card claimed at 20 scenes once more are added", async () => {
+    expect(CARD_SCENES).toBe(26);
+    const id = idMovedBy(26, "user_at20", 20);
+    const fresh = idMovedBy(26, "user_at21", 20);
     await signUp(id, fresh);
     // Claimed before the bump, stored at 20.
     await directory().claimUsername(id, "claimedat20", 20);
     const face = deriveCard(id, 20);
-    expect(face.scene).not.toBe(deriveCard(id, 21).scene);
+    expect(face.scene).not.toBe(deriveCard(id, 26).scene);
     expect(await (await readCard("claimedat20")).json()).toMatchObject(face);
-    // Today's routes pass 21; the stored 20 wins, through a rename too.
+    // Today's routes pass 26; the stored 20 wins, through a rename too.
     expect(await (await claim(id, "claimedat20")).json()).toMatchObject(face);
     expect(await (await admin("/admin/usernames/set", { userId: id, username: "claimedat20b" })).json()).toMatchObject(face);
-    // A claim made now draws from all 21.
-    expect(await (await claim(fresh, "claimedat21")).json()).toMatchObject(deriveCard(fresh, 21));
+    // A claim made now draws from all 26.
+    expect(await (await claim(fresh, "claimedat21")).json()).toMatchObject(deriveCard(fresh, 26));
   });
 
   it("adds the stored count to a directory that predates it", async () => {
