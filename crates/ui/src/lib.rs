@@ -79,6 +79,7 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod background_tray;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;

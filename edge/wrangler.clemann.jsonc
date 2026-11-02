@@ -5,6 +5,9 @@
   //   - AUTH_MODE=self: this edge is its own identity provider (passkeys,
   //     src/self-auth/) instead of WorkOS;
   //   - no Stripe, no staging, no zeron.sh routes;
+  //   - none of upstream's WorkOS user directory (USER_DIRECTORY, webhooks)
+  //     or member cards (CARD_IMAGES, CARD_READS, BROWSER, static assets):
+  //     unbound, those routes answer 404/503;
   //   - its own R2 bucket names (fresh account, nothing to keep).
   // Deploy (vault first): `npx wrangler deploy -c wrangler.clemann.jsonc`.
   // Keep bindings and migrations in step with wrangler.jsonc on upstream
@@ -21,6 +24,9 @@
   "name": "zeron-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  // Node's built-ins for @cloudflare/puppeteer (src/card-image.ts imports
+  // node:buffer); the bundle needs it even though the card pages stay off.
+  "compatibility_flags": ["nodejs_compat"],
   "account_id": "27f9550dae9ea2ae400dff7b77cc052f",
   // Passkeys are bound to zeron.clemann.app; a workers.dev host would only
   // be a second, passkey-less door.

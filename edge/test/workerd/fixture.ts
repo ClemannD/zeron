@@ -1,6 +1,8 @@
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
+import { handlePublicCardRoute, handleUsernameRoute } from "../../src/card-routes";
+import { publicCardGate } from "../../src/card-gate";
 import { handleAdminRoute } from "../../src/cloud/billing";
 import {
   autoWakeCloudDevice,
@@ -16,6 +18,7 @@ import { releaseRoute } from "../../src/releases";
 import { privateReleaseRoute } from "../../src/private-releases";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
+import { handleUserDirectoryRoute } from "../../src/user-directory";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -23,6 +26,7 @@ export { RegistryRoom } from "../../src/registry-room";
 export { CloudAccount } from "../../src/cloud/cloud-account";
 export { CloudIndex } from "../../src/cloud/cloud-index";
 export { AuthDirectory } from "../../src/self-auth/directory";
+export { UserDirectory } from "../../src/user-directory";
 export { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "../../src/cloud/workflows";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via
@@ -121,10 +125,16 @@ export default {
     if (runner) return runner;
     const privateRelease = await privateReleaseRoute(request, env, url);
     if (privateRelease) return privateRelease;
+    const users = await handleUserDirectoryRoute(request, env, url);
+    if (users) return users;
+    const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (card) return card;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
+    const username = await handleUsernameRoute(request, env, auth, url);
+    if (username) return username;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;
     const vault = await handleVaultRoute(request, env, auth, url);
