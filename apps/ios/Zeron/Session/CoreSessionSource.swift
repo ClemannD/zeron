@@ -392,10 +392,42 @@ final class CoreSessionSource: SessionSource {
     }
 
     private static let images = NSCache<NSString, UIImage>()
+    /// The core's prefix for an image a reply names in Markdown (a host path,
+    /// read under the chat's jail) rather than an attachment or upload.
+    static let chatImagePrefix = "chat-image:"
+
+    /// How to read `reference`'s bytes from the chat's host: an attachment
+    /// (`ReadAttachmentChunk`), or a reply's Markdown image
+    /// (`ReadChatImageChunk`, only from inside this chat's folder).
+    private func reader(for reference: String) -> @Sendable () async throws -> Data {
+        let client = self.client
+        let device = hostDevice
+        guard reference.hasPrefix(Self.chatImagePrefix) else {
+            return { try await client.readAttachment(deviceId: device, path: reference) }
+        }
+        let chat = chatId
+        let path = Self.hostPath(String(reference.dropFirst(Self.chatImagePrefix.count)), cwd: app?.row(chatId)?.cwd)
+        return { try await client.readChatImage(deviceId: device, chatId: chat, path: path) }
+    }
+
+    /// A path a reply names, made absolute on its host: a relative one joins
+    /// the chat's folder in that host's separator style (as on the desktop).
+    static func hostPath(_ path: String, cwd: String?) -> String {
+        let absolute = path.hasPrefix("/") || path.hasPrefix("\\")
+            || path.range(of: #"^[A-Za-z]:[/\\]"#, options: .regularExpression) != nil
+        guard !absolute, let cwd, !cwd.isEmpty else { return path }
+        let relative = path.hasPrefix("./") ? String(path.dropFirst(2)) : path
+        let windows = cwd.contains("\\")
+        var base = cwd
+        while base.count > 1, base.hasSuffix("/") || (windows && base.hasSuffix("\\")) { base.removeLast() }
+        return windows
+            ? base + "\\" + relative.replacingOccurrences(of: "/", with: "\\")
+            : base + "/" + relative
+    }
 
     func image(_ reference: String) async -> UIImage? {
         if let hit = Self.images.object(forKey: reference as NSString) { return hit }
-        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference),
+        guard let data = try? await reader(for: reference)(),
               let image = await UIImage(data: data)?.byPreparingForDisplay()
         else { return nil }
         Self.images.setObject(image, forKey: reference as NSString)
@@ -410,18 +442,36 @@ final class CoreSessionSource: SessionSource {
             view.image = hit
             return
         }
-        let device = hostDevice
-        let client = self.client
-        view.accessibilityIdentifier = reference
+        let read = reader(for: reference)
+        let isChatImage = reference.hasPrefix(Self.chatImagePrefix)
         Task.detached(priority: .userInitiated) {
-            guard let data = try? await client.readAttachment(deviceId: device, path: reference),
+            guard let data = try? await read(),
                   let image = UIImage(data: data)?.preparingForDisplay()
-            else { return }
+            else {
+                // A reply's image the host won't serve (outside the chat's
+                // folder, moved, not an image) says so instead of an empty tile.
+                guard isChatImage else { return }
+                await MainActor.run {
+                    guard view.accessibilityIdentifier == reference else { return }
+                    Self.showUnavailable(in: view)
+                }
+                return
+            }
             Self.images.setObject(image, forKey: reference as NSString)
             await MainActor.run {
                 guard view.accessibilityIdentifier == reference else { return }
                 UIView.transition(with: view, duration: 0.2, options: .transitionCrossDissolve) { view.image = image }
             }
         }
+    }
+
+    @MainActor
+    private static func showUnavailable(in view: UIImageView) {
+        let symbol = UIImage(systemName: "photo.badge.exclamationmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .regular))
+        view.contentMode = .center
+        view.tintColor = Palette.tertiary
+        view.image = symbol
+        view.isUserInteractionEnabled = false
+        view.accessibilityLabel = "Image unavailable"
     }
 }

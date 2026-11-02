@@ -575,6 +575,18 @@ impl CoreClient {
         Ok(bytes.as_ref().clone())
     }
 
+    /// An image a reply names in Markdown: read from the chat's host, only
+    /// from inside that chat's folder (`ReadChatImageChunk`).
+    pub async fn read_chat_image(
+        &self,
+        device_id: String,
+        chat_id: String,
+        path: String,
+    ) -> CoreResult<Vec<u8>> {
+        let client = self.client.clone();
+        Ok(on_runtime(async move { client.read_chat_image(&device_id, &chat_id, &path).await }).await?)
+    }
+
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     /// OS network path: `false` only for a definitive "unsatisfied".

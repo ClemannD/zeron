@@ -19,6 +19,10 @@ final class AppModel {
         let id: String
         var name: String
         var sessions: [SessionRowVM]
+        /// The checkout the group's latest session ran in (nil for Home).
+        var latestProjectId: String?
+        /// Home groups: the device their sessions ran on.
+        var deviceId: String?
     }
 
     /// The Sessions page groups its unsectioned sessions by project
@@ -461,10 +465,44 @@ final class AppModel {
                 groups[i].sessions.append(vm)
             } else {
                 index[id] = groups.count
-                groups.append(ProjectGroupVM(id: id, name: name, sessions: [vm]))
+                groups.append(ProjectGroupVM(id: id, name: name, sessions: [vm], latestProjectId: row.project?.id, deviceId: row.project == nil ? row.deviceId : nil))
             }
         }
         return groups
+    }
+
+    /// Points the new-session page at a front-page project group: the
+    /// project (keeping the current checkout when it's one of the group's,
+    /// else the latest session's if online, else any reachable one), or for
+    /// a Home group, no project on that device. False when the group has
+    /// nothing a session can start in.
+    @MainActor func prepareNewSession(inGroup id: String) -> Bool {
+        guard let group = frontPage.projectGroups.first(where: { $0.id == id }) else { return false }
+        var draft = lastDraft
+        if let device = group.deviceId {
+            guard hostOptions.contains(where: { $0.id == device }) else { return false }
+            draft.projectId = nil
+            draft.hostId = device
+            draft.branch = nil
+            draft.cloud = nil
+        } else {
+            let options = projectOptions
+            guard let latest = group.latestProjectId else { return false }
+            let key = options.first { $0.id == latest }?.groupKey ?? String(id.dropFirst("project:".count))
+            let members = options.filter { $0.groupKey == key }
+            guard let pick = members.first(where: { $0.id == draft.projectId })
+                ?? members.first(where: { $0.id == latest && $0.online })
+                ?? members.first(where: \.online)
+                ?? members.first(where: { $0.id == latest })
+                ?? members.first
+            else { return false }
+            if pick.id != draft.projectId || draft.cloud == true { draft.branch = nil }
+            draft.projectId = pick.id
+            draft.hostId = nil
+            draft.cloud = pick.isCloud ? true : nil
+        }
+        lastDraft = draft
+        return true
     }
 
     static func status(_ i: ChatIndicator) -> SessionRowVM.Status {

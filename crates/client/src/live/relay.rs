@@ -278,16 +278,35 @@ impl Relay {
 
     /// `ReadAttachmentChunk` until done.
     pub(crate) async fn read_attachment(&self, device_id: &str, path: &str) -> Result<Vec<u8>> {
+        self.read_chunks(device_id, methods::READ_ATTACHMENT_CHUNK, json!({ "path": path }))
+            .await
+    }
+
+    /// `ReadChatImageChunk` until done: an image a reply in `chat_id` names
+    /// in Markdown, served only from inside that chat's folder on its host.
+    pub(crate) async fn read_chat_image(
+        &self,
+        device_id: &str,
+        chat_id: &str,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        self.read_chunks(
+            device_id,
+            methods::READ_CHAT_IMAGE_CHUNK,
+            json!({ "chatId": chat_id, "path": path }),
+        )
+        .await
+    }
+
+    /// A chunked read (`{…params, offset}` → `{data, done, nextOffset}`)
+    /// until done.
+    async fn read_chunks(&self, device_id: &str, method: &str, params: Value) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         let mut offset: u64 = 0;
         for _ in 0..1000 {
-            let reply = self
-                .call(
-                    device_id,
-                    methods::READ_ATTACHMENT_CHUNK,
-                    json!({ "path": path, "offset": offset }),
-                )
-                .await?;
+            let mut params = params.clone();
+            params["offset"] = json!(offset);
+            let reply = self.call(device_id, method, params).await?;
             let data = reply
                 .get("data")
                 .and_then(Value::as_str)

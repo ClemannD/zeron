@@ -1193,6 +1193,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func readAttachment(deviceId: String, path: String) async throws  -> Data
     
     /**
+     * An image a reply names in Markdown: read from the chat's host, only
+     * from inside that chat's folder (`ReadChatImageChunk`).
+     */
+    func readChatImage(deviceId: String, chatId: String, path: String) async throws  -> Data
+    
+    /**
      * A started Live Activity's update token (hex).
      */
     func registerLiveActivity(activityId: String, token: String) async throws 
@@ -2036,6 +2042,26 @@ open func readAttachment(deviceId: String, path: String)async throws  -> Data  {
             rustFutureFunc: {
                 uniffi_zeron_mobile_fn_method_coreclient_read_attachment(
                         self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(path)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * An image a reply names in Markdown: read from the chat's host, only
+     * from inside that chat's folder (`ReadChatImageChunk`).
+     */
+open func readChatImage(deviceId: String, chatId: String, path: String)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_read_chat_image(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(chatId),FfiConverterString.lower(path)
                 )
             },
             pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
@@ -22094,6 +22120,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_read_attachment() != 50982) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_read_chat_image() != 62954) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_register_live_activity() != 16873) {

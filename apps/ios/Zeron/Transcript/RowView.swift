@@ -245,6 +245,8 @@ final class RowView: UIView {
                 iv.layer.cornerCurve = .continuous
                 iv.isUserInteractionEnabled = true
                 iv.accessibilityTraits = .image
+                // A reply's Markdown image carries its alt text.
+                if let alt = w.payload, !alt.isEmpty { iv.accessibilityLabel = alt }
                 iv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(openImage(_:))))
                 delegate?.rowView(self, imageFor: reference, into: iv)
                 if reference.hasPrefix("pending://") {

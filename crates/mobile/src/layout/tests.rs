@@ -778,6 +778,54 @@ fn visual_rows_take_the_height_their_worker_measures() {
     view.close();
 }
 
+fn image_refs(rows: &[RowDisplay]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|d| d.widgets.iter())
+        .filter_map(|w| match &w.kind {
+            display::WidgetKind::Image { reference } => Some(reference.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A reply's Markdown image of a host file draws as an image (read from the
+/// chat's folder), in place between the paragraph's text; URLs, `~`, network
+/// paths and non-raster files stay links.
+#[test]
+fn reply_markdown_images_of_host_files_draw_inline() {
+    let rows = rows_of("Here is the chart: ![Revenue](/Users/me/app/out/chart.png) and more text.", 390.0);
+    assert_eq!(image_refs(&rows), ["chat-image:/Users/me/app/out/chart.png"]);
+    let text: String = rows.iter().map(|d| d.text.clone()).collect();
+    assert!(text.contains("Here is the chart") && text.contains("and more text"), "{text}");
+    assert!(!text.contains("Revenue"), "the alt text is the image's label, not a link: {text}");
+    let image = rows.iter().flat_map(|d| d.widgets.iter()).find(|w| matches!(w.kind, display::WidgetKind::Image { .. })).unwrap();
+    assert_eq!(image.payload.as_deref(), Some("Revenue"));
+
+    assert_eq!(image_refs(&rows_of("![](out/shot.JPG)", 390.0)), ["chat-image:out/shot.JPG"]);
+    assert_eq!(image_refs(&rows_of("- item ![a](/tmp/a.webp)", 390.0)), ["chat-image:/tmp/a.webp"]);
+
+    for md in [
+        "![remote](https://example.com/a.png)",
+        "![file url](file:///Users/me/a.png)",
+        "![home](~/a.png)",
+        "![unc](//server/share/a.png)",
+        "![svg](/Users/me/a.svg)",
+        "![data](data:image/png;base64,AAAA)",
+    ] {
+        let rows = rows_of(md, 390.0);
+        assert!(image_refs(&rows).is_empty(), "{md:?} should stay a link");
+        assert!(rows.iter().any(|d| !d.links.is_empty()), "{md:?} keeps its link");
+    }
+}
+
+/// A linked image keeps its link as a caption under the image.
+#[test]
+fn linked_reply_image_keeps_its_link() {
+    let rows = rows_of("[![Diagram](/srv/app/d.png)](https://example.com/d)", 390.0);
+    assert_eq!(image_refs(&rows), ["chat-image:/srv/app/d.png"]);
+    assert!(rows.iter().any(|d| !d.links.is_empty()));
+}
+
 /// Every row of a one-message transcript at `width`.
 fn rows_of(md: &str, width: f32) -> Vec<RowDisplay> {
     let mut w = worker(width);

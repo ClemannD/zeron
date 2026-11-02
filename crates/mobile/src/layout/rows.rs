@@ -1240,7 +1240,8 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
             PBlock::Text(t) | PBlock::Heading(t) => t.p.heap_bytes() + math_bytes(t),
             PBlock::Code(c) => c.body.p.heap_bytes() + c.source.len() + c.label.as_ref().map_or(0, |l| l.p.heap_bytes()),
             PBlock::Math(m) => formula_bytes(&m.formula),
-            PBlock::Quote(children) => children.iter().map(block).sum(),
+            PBlock::Flow(children) | PBlock::Quote(children) => children.iter().map(block).sum(),
+            PBlock::Image { reference, alt } => reference.len() + alt.len(),
             PBlock::List { items, .. } => items
                 .iter()
                 .map(|i| i.children.iter().map(block).sum::<usize>() + i.marker.as_ref().map_or(0, |m| m.p.heap_bytes()))

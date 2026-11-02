@@ -547,6 +547,17 @@ class SessionsViewController: SessionListController {
 
     override func headerMenu(_ id: String) -> UIMenu? {
         if id == "recent" { return nil }
+        if app.groupByProject, app.frontPage.projectGroups.contains(where: { $0.id == id }) {
+            return UIMenu(children: [
+                UIAction(title: "New Session", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in
+                    guard let self, self.app.prepareNewSession(inGroup: id) else {
+                        Toast.show("This project isn't available to start a session in.", in: self?.view.window)
+                        return
+                    }
+                    self.router?.presentNewSession(prompt: nil)
+                },
+            ])
+        }
         guard let folder = app.frontPage.folders.first(where: { $0.id == id }) else { return nil }
         let open = UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in self?.openFolder(id) }
         if id == "pinned" {

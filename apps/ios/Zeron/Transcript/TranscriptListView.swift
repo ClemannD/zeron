@@ -696,10 +696,15 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, open url: URL) {
         guard let vc = findViewController() else { return }
-        // An image chip opens its upload full size, as its thumbnail did.
-        if url.scheme == "zeron-preview" {
-            guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "ref" })?.value
+        // An image chip opens its upload full size, as its thumbnail did; a
+        // link to an image file on the chat's host (`[chart](out/chart.png)`)
+        // opens that image, read from inside the chat's folder.
+        let hostImage = url.scheme == nil && ["png", "jpg", "jpeg", "webp", "gif"].contains(url.pathExtension.lowercased())
+        if url.scheme == "zeron-preview" || hostImage {
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+            guard let reference = hostImage
+                ? CoreSessionSource.chatImagePrefix + url.path(percentEncoded: false)
+                : query?.first(where: { $0.name == "ref" })?.value
             else { return }
             Task { @MainActor [weak self, weak view, weak vc] in
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }

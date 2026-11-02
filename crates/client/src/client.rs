@@ -1705,6 +1705,21 @@ impl Client {
         Ok(bytes)
     }
 
+    /// An image a reply in `chat_id` names in Markdown, read from the chat's
+    /// host (`device_id`) only from inside that chat's folder. Not cached:
+    /// an agent may rewrite the file under the same name.
+    pub async fn read_chat_image(
+        &self,
+        device_id: &str,
+        chat_id: &str,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => Ok(demo.read_attachment(path)?.as_ref().clone()),
+            Backend::Live(live) => live.relay.read_chat_image(device_id, chat_id, path).await,
+        }
+    }
+
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     /// OS network path (NWPathMonitor): `false` only for a definitive

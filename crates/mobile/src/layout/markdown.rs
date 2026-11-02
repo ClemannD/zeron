@@ -311,6 +311,12 @@ pub(crate) struct PTable {
 
 pub(crate) enum PBlock {
     Text(PText),
+    /// A paragraph split around the local images it names: its text and
+    /// those images, stacked in order.
+    Flow(Vec<PBlock>),
+    /// A local image a reply names in Markdown (`![alt](path)`), read from
+    /// the chat's host (see [`chat_image_reference`]).
+    Image { reference: String, alt: String },
     Heading(PText),
     Code(Box<PCode>),
     Math(Box<PMath>),
@@ -509,9 +515,80 @@ pub(crate) fn prepare_plain(
     }
 }
 
+/// Widget references for Markdown images start with this; the app reads the
+/// rest (a host path) with `ReadChatImageChunk`, under the chat's jail.
+pub(crate) const CHAT_IMAGE_PREFIX: &str = "chat-image:";
+
+/// The widget reference for a Markdown image the chat's host may serve, as the
+/// desktop draws it (`reply_images::markdown_image`): a PNG, JPEG, WebP or GIF
+/// named by a host path, absolute or relative to the chat's folder. URLs (any
+/// scheme), `~` and network or device paths stay links; the host refuses
+/// anything outside the chat's folder.
+pub(crate) fn chat_image_reference(source: &str) -> Option<String> {
+    let source = source.trim();
+    if source.is_empty() || source.starts_with('~') || has_scheme(source) || is_remote_or_device_path(source) {
+        return None;
+    }
+    let (stem, ext) = source.rsplit_once('.')?;
+    let raster = matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif");
+    (raster && !stem.is_empty() && !ext.contains(['/', '\\'])).then(|| format!("{CHAT_IMAGE_PREFIX}{source}"))
+}
+
+/// `http:`, `file:`, `data:`, `javascript:`…; a drive letter (`C:\`) is not one.
+fn has_scheme(source: &str) -> bool {
+    source.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.len() > 1
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// UNC (`\\host\share`, `//host/share`), device (`\\.\`, `\\?\`, `\??\`) and
+/// drive-relative (`C:x.png`) forms: never read, as on the desktop.
+fn is_remote_or_device_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let separator = |b: Option<&u8>| matches!(b, Some(b'/' | b'\\'));
+    (separator(bytes.first()) && separator(bytes.get(1)))
+        || path.starts_with(r"\??\")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && !separator(bytes.get(2)))
+}
+
+/// A paragraph, with each local image it names drawn as an image block in
+/// place (a linked image keeps its link as a caption beneath). Paragraphs
+/// without one, and images that are URLs, render as before: text and links.
+fn prepare_paragraph(ctx: &mut Ctx, runs: &[InlineRun], muted: bool) -> PBlock {
+    let local = |run: &InlineRun| run.style.image.as_ref().and_then(|img| chat_image_reference(&img.source));
+    if !runs.iter().any(|run| local(run).is_some()) {
+        return PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted));
+    }
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for (i, run) in runs.iter().enumerate() {
+        let Some(reference) = local(run) else { continue };
+        let Some(image) = &run.style.image else { continue };
+        if runs[start..i].iter().any(|r| !r.text.trim().is_empty() || r.style.image.is_some()) {
+            blocks.push(PBlock::Text(prepare_runs(ctx, &runs[start..i], TextKind::Body, muted)));
+        }
+        let alt = if image.alt.is_empty() { "Image".to_owned() } else { image.alt.clone() };
+        blocks.push(PBlock::Image { reference, alt: alt.clone() });
+        if let Some(link) = &image.link {
+            let mut caption = run.clone();
+            caption.text = alt;
+            caption.style.image = None;
+            caption.style.link = Some(link.clone());
+            blocks.push(PBlock::Text(prepare_runs(ctx, &[caption], TextKind::Body, muted)));
+        }
+        start = i + 1;
+    }
+    if runs[start..].iter().any(|r| !r.text.trim().is_empty() || r.style.image.is_some()) {
+        blocks.push(PBlock::Text(prepare_runs(ctx, &runs[start..], TextKind::Body, muted)));
+    }
+    PBlock::Flow(blocks)
+}
+
 pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: bool) -> PBlock {
     match block {
-        Block::Paragraph { runs } => PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)),
+        Block::Paragraph { runs } => prepare_paragraph(ctx, runs, muted),
         Block::Heading { level, runs } => {
             PBlock::Heading(prepare_runs(ctx, runs, TextKind::Heading(*level), muted))
         }
@@ -947,6 +1024,15 @@ pub(crate) fn place(block: &PBlock, px: Px, x: f32, y: f32, width: f32, out: Opt
     use geom::*;
     match block {
         PBlock::Text(t) | PBlock::Heading(t) => place_text(t, x, y, width, out),
+        PBlock::Flow(children) => place_stack(children, px, x, y, width, PARA_GAP, out),
+        PBlock::Image { reference, alt } => {
+            let side = px.v(super::rows::geom::IMAGE).min(width);
+            if let Some(out) = out {
+                out.fill(x, y, side, side, px.v(14.0), ColorRole::ChipBackground);
+                out.widget(WidgetKind::Image { reference: reference.clone() }, (x, y, side, side), Some(alt.clone()));
+            }
+            side
+        }
         PBlock::Code(c) => place_code(c, px, x, y, width, out),
         PBlock::Math(m) => place_math(m, px, x, y, width, out),
         PBlock::Quote(children) => {

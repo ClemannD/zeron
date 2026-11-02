@@ -19,6 +19,29 @@ enum DeliveryMode: String {
     case interrupt
 }
 
+/// The composer's text view. Paste (the edit menu, ⌘V) also takes copied
+/// images — a screenshot, a photo from Photos or Safari — and stages them
+/// as attachments, like the attach menu's Paste Image.
+final class ComposerTextView: UITextView {
+    var onPasteImages: (([StagedImage]) -> Void)?
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), onPasteImages != nil, UIPasteboard.general.hasImages { return true }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        let board = UIPasteboard.general
+        guard let onPasteImages, board.hasImages else { return super.paste(sender) }
+        let staged = (board.images ?? []).compactMap { AttachmentPicker.stage(image: $0) }
+        // Nothing decodable (or too large): fall back to whatever text came
+        // with it rather than doing nothing.
+        guard !staged.isEmpty else { return super.paste(sender) }
+        UISelectionFeedbackGenerator().selectionChanged()
+        onPasteImages(staged)
+    }
+}
+
 /// A context chip in the composer toolbar (model, effort, branch…).
 struct ComposerChip: Equatable {
     let id: String
@@ -87,7 +110,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         }
     }
 
-    let textView = UITextView()
+    let textView = ComposerTextView()
     private let glass = Glass.surface(interactive: false, radius: 25)
     private let placeholderLabel = UILabel()
     private let attachButton = UIButton(type: .system)
@@ -173,6 +196,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         textView.accessibilityIdentifier = "composer-input"
         textView.translatesAutoresizingMaskIntoConstraints = false
         textView.keyboardDismissMode = .interactive
+        textView.onPasteImages = { [weak self] staged in self?.addImages(staged) }
         content.addSubview(textView)
 
         placeholderLabel.font = font
