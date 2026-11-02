@@ -23,11 +23,11 @@ final class CoreSessionSource: SessionSource {
     /// host doesn't open until it answers.
     private var hostHarnesses: [HarnessInfo] = []
     private var harnessesDevice = ""
-    /// What a chat with no model of its own runs: its host's default (the
-    /// catalog's first model), by "device|harness". Seeded from the built-in
-    /// list so the chip never shows a bare provider name, then the host's.
-    private var defaultModels: [String: ModelPickerRow] = [:]
-    private var defaultModelsLoading: Set<String> = []
+    /// The host's models per provider, by "device|harness": its default (the
+    /// first) and each model's options. Seeded from the built-in list so the
+    /// chip never shows a bare provider name, then the host's.
+    private var hostModels: [String: [ModelInfo]] = [:]
+    private var hostModelsLoading: Set<String> = []
     private weak var engine: TranscriptView?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
@@ -107,6 +107,9 @@ final class CoreSessionSource: SessionSource {
         }
         if let r = row?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
+        }
+        if let row, let model = currentModel(row) {
+            chips += ModelOptionChips.chips(options: model.options, picks: client.sessionConfig(chatId: chatId)?.modelOptions ?? [:])
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -287,7 +290,13 @@ final class CoreSessionSource: SessionSource {
                 UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
             ])
         default:
-            return nil
+            guard let optionId = ModelOptionChips.optionId(chip: id),
+                  let option = currentModel(row)?.options.first(where: { $0.id == optionId }) else { return nil }
+            let picks = client.sessionConfig(chatId: chatId)?.modelOptions ?? [:]
+            return ModelOptionChips.menu(option, picks: picks) { [weak self] choice in
+                self?.setConfig { $0.modelOptions[optionId] = choice }
+                self?.refresh()
+            }
         }
     }
 
@@ -331,9 +340,13 @@ final class CoreSessionSource: SessionSource {
                     // The old provider's effort and options don't carry over.
                     $0.reasoning = nil
                     $0.modelOptions = [:]
+                } else {
+                    let offered = self.models(for: pickedHarness).first { $0.id == model.id }?.options ?? []
+                    $0.modelOptions = ModelOptionChips.offered($0.modelOptions, by: offered)
                 }
                 $0.model = model.id
             }
+            self.refresh()
         }
     }
 
@@ -350,25 +363,34 @@ final class CoreSessionSource: SessionSource {
     }
 
     /// The model a chat without one runs: the host's default for its
-    /// provider. The built-in list answers at once; the host's (or Cloud's)
-    /// own list replaces it when it arrives.
+    /// provider.
     private func defaultModel(for row: SessionRow) -> ModelPickerRow? {
-        let harness = row.harness ?? "claude-code"
+        models(for: row.harness ?? "claude-code").first.map { ModelPickerRow(id: $0.id, label: $0.label, detail: $0.description) }
+    }
+
+    /// The model the chat runs (its own, else the default), with its options.
+    private func currentModel(_ row: SessionRow) -> ModelInfo? {
+        let list = models(for: row.harness ?? "claude-code")
+        guard let id = row.model else { return list.first }
+        return list.first { $0.id == id }
+    }
+
+    /// The host's models for `harness`. The built-in list answers at once;
+    /// the host's (or Cloud's) own list replaces it when it arrives.
+    private func models(for harness: String) -> [ModelInfo] {
         let key = "\(hostDevice)|\(harness)"
-        if defaultModels[key] == nil, let first = fallbackModels(harness: harness).first {
-            defaultModels[key] = ModelPickerRow(id: first.id, label: first.label, detail: first.description)
-        }
-        if !hostDevice.isEmpty, defaultModelsLoading.insert(key).inserted {
+        if hostModels[key] == nil { hostModels[key] = fallbackModels(harness: harness) }
+        if !hostDevice.isEmpty, hostModelsLoading.insert(key).inserted {
             let device = hostDevice
             Task { @MainActor [weak self] in
-                guard let self, let first = await self.client.listModels(deviceId: device, harness: harness).first else { return }
-                let row = ModelPickerRow(id: first.id, label: first.label, detail: first.description)
-                guard self.defaultModels[key] != row else { return }
-                self.defaultModels[key] = row
+                guard let self else { return }
+                let list = await self.client.listModels(deviceId: device, harness: harness)
+                guard !list.isEmpty, self.hostModels[key] != list else { return }
+                self.hostModels[key] = list
                 self.refresh()
             }
         }
-        return defaultModels[key]
+        return hostModels[key] ?? []
     }
 
     /// The providers a chat on this host can move to: Cloud runs Claude
@@ -473,5 +495,58 @@ final class CoreSessionSource: SessionSource {
         view.image = symbol
         view.isUserInteractionEnabled = false
         view.accessibilityLabel = "Image unavailable"
+    }
+}
+
+/// Model options the composer offers as chips of their own, beside effort,
+/// and only on models that carry them (the rest ride along untouched).
+enum ModelOptionChips {
+    static let shown: Set<String> = ["contextWindow"]
+    private static let prefix = "option:"
+
+    static func optionId(chip id: String) -> String? {
+        id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : nil
+    }
+
+    static func chips(options: [ModelOption], picks: [String: String]) -> [ComposerChip] {
+        options.filter { shown.contains($0.id) && $0.choices.count > 1 }.compactMap { option in
+            current(option, picks).map { choice in
+                ComposerChip(id: prefix + option.id, title: title(option, choice), symbol: symbol(option))
+            }
+        }
+    }
+
+    static func menu(_ option: ModelOption, picks: [String: String], pick: @escaping (String) -> Void) -> UIMenu {
+        let selected = current(option, picks)?.id
+        return UIMenu(title: option.label, children: option.choices.map { choice in
+            UIAction(title: choice.label, subtitle: choice.id == option.defaultChoice ? "Default" : nil, state: choice.id == selected ? .on : .off) { _ in
+                pick(choice.id)
+            }
+        })
+    }
+
+    /// Only the picks a model offers. Picks outlive the model they were made
+    /// on, and harnesses apply some blindly (Claude appends `[1m]` to any
+    /// model id when `contextWindow` is "1m").
+    static func offered(_ picks: [String: String], by options: [ModelOption]) -> [String: String] {
+        picks.filter { id, choice in
+            options.contains { $0.id == id && $0.choices.contains { $0.id == choice } }
+        }
+    }
+
+    /// The pick, else the option's default (what runs without one).
+    private static func current(_ option: ModelOption, _ picks: [String: String]) -> ModelOptionChoice? {
+        let id = picks[option.id] ?? option.defaultChoice
+        return option.choices.first { $0.id == id }
+            ?? option.choices.first { $0.id == option.defaultChoice }
+            ?? option.choices.first
+    }
+
+    private static func title(_ option: ModelOption, _ choice: ModelOptionChoice) -> String {
+        option.id == "contextWindow" ? "\(choice.label) context" : choice.label
+    }
+
+    private static func symbol(_ option: ModelOption) -> String? {
+        option.id == "contextWindow" ? "memorychip" : "slider.horizontal.3"
     }
 }

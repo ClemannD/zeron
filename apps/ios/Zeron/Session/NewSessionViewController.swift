@@ -12,6 +12,9 @@ struct NewSessionDraft: Equatable, Codable {
     var effort: String?
     /// Run on its own Cloud machine (optional: drafts saved before Cloud).
     var cloud: Bool?
+    /// Model option id → choice id (`contextWindow` → `1m`); optional:
+    /// drafts saved before options.
+    var modelOptions: [String: String]?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -48,6 +51,7 @@ struct ModelChoice: Equatable {
     let label: String
     let efforts: [String]
     var detail: String? = nil
+    var options: [ModelOption] = []
 }
 
 /// "Ask anything" → a composer-first canvas. Context is set with native menus
@@ -244,6 +248,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 draft.harness = first.harness
                 draft.model = nil
                 draft.effort = nil
+                draft.modelOptions = nil
             }
         } else {
             models = Self.modelCache[device] ?? Self.catalogModels()
@@ -264,7 +269,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private static func catalogModels() -> [ModelChoice] {
         fallbackHarnesses().filter(\.offered).flatMap { h in
-            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description, options: $0.options) }
         }
     }
 
@@ -332,13 +337,19 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
+        let optionChips = ModelOptionChips.chips(options: model?.options ?? [], picks: draft.modelOptions ?? [:])
+        chips += optionChips
         composer.chips = chips
-        composer.chipMenus = [
+        var menus: [String: () -> UIMenu?] = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
             "effort": { [weak self] in self?.effortMenu() },
         ]
+        for chip in optionChips {
+            menus[chip.id] = { [weak self] in self?.optionMenu(chip.id) }
+        }
+        composer.chipMenus = menus
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
 
@@ -506,9 +517,15 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let host = runsOnCloud ? (name: "Cloud", symbol: "cloud") : (name: app.deviceName(deviceId), symbol: "desktopcomputer")
         return ModelPickerViewController.sheet(tabs: tabs, harness: draft.harness, model: draft.model, host: host) { [weak self] harness, model in
             guard let self else { return }
-            if harness != self.draft.harness { self.draft.effort = nil }
+            if harness != self.draft.harness {
+                self.draft.effort = nil
+                self.draft.modelOptions = nil
+            }
             self.draft.harness = harness
             self.draft.model = model.id
+            // Keep only the picks the new model offers.
+            let offered = self.models.first { $0.harness == harness && $0.id == model.id }?.options ?? []
+            self.draft.modelOptions = ModelOptionChips.offered(self.draft.modelOptions ?? [:], by: offered)
             self.refreshChips()
         }
     }
@@ -532,6 +549,22 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         })
     }
 
+    private func optionMenu(_ chipId: String) -> UIMenu? {
+        guard let id = ModelOptionChips.optionId(chip: chipId),
+              let option = draftModel?.options.first(where: { $0.id == id }) else { return nil }
+        return ModelOptionChips.menu(option, picks: draft.modelOptions ?? [:]) { [weak self] choice in
+            self?.draft.modelOptions = (self?.draft.modelOptions ?? [:]).merging([id: choice]) { $1 }
+            self?.refreshChips()
+        }
+    }
+
+    /// The draft as sent: only the option picks its model offers.
+    private var sendableDraft: NewSessionDraft {
+        var out = draft
+        out.modelOptions = ModelOptionChips.offered(draft.modelOptions ?? [:], by: draftModel?.options ?? [])
+        return out
+    }
+
     /// False when the session couldn't be created (the prompt stays put).
     private func create(text: String, images: [StagedImage]) -> Bool {
         app.lastDraft = draft
@@ -539,7 +572,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             createOnCloud(text: text, images: images)
             return false
         }
-        guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
+        guard let chatId = app.createSession(draft: sendableDraft, text: text, images: images) else {
             let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
@@ -575,7 +608,7 @@ extension NewSessionViewController {
                 hud.removeFromSuperview()
             }
             do {
-                let chatId = try await self.app.createCloudSession(draft: self.draft, text: text, images: images)
+                let chatId = try await self.app.createCloudSession(draft: self.sendableDraft, text: text, images: images)
                 self.markCreated()
                 PushNotifications.shared.askAfterFirstSession()
                 self.app.newSessionText = ""
