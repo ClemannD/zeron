@@ -103,6 +103,7 @@ jobs:
           name: linux-browser
           path: ${{ runner.temp }}/linux-browser
           if-no-files-found: warn
+          retention-days: 3
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

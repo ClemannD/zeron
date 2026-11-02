@@ -211,7 +211,8 @@ jobs:
 
   android:
     needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).android
+    # Fork: no Android builds here (each APK artifact is ~37 MB of Actions storage).
+    if: github.repository != 'ClemannD/zeron' && fromJSON(needs.plan.outputs.suites).android
     uses: ./.github/workflows/android.yml
     # Only what android.yml uses, and only on pushes to main, which publish: pull
     # requests and the merge queue (code not on main yet) sign with a debug key.

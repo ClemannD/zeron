@@ -115,6 +115,7 @@ jobs:
           name: browser-macos-captures
           path: ${{ runner.temp }}/browser-captures*
           if-no-files-found: ignore
+          retention-days: 3
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: inputs.fixtures
         with:
@@ -137,6 +138,7 @@ jobs:
           name: preview-macos-captures
           path: ${{ runner.temp }}/preview-captures*
           if-no-files-found: ignore
+          retention-days: 3
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -281,6 +283,7 @@ jobs:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
           if-no-files-found: ignore
+          retention-days: 3
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
