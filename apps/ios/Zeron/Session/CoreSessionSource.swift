@@ -501,7 +501,10 @@ final class CoreSessionSource: SessionSource {
 /// Model options the composer offers as chips of their own, beside effort,
 /// and only on models that carry them (the rest ride along untouched).
 enum ModelOptionChips {
-    static let shown: Set<String> = ["contextWindow"]
+    /// Context size: Claude and ACP agents call it `contextWindow`, Cursor
+    /// (its SDK's model parameter) `context`.
+    static let contextIds: Set<String> = ["contextWindow", "context"]
+    static let shown = contextIds
     private static let prefix = "option:"
 
     static func optionId(chip id: String) -> String? {
@@ -543,10 +546,10 @@ enum ModelOptionChips {
     }
 
     private static func title(_ option: ModelOption, _ choice: ModelOptionChoice) -> String {
-        option.id == "contextWindow" ? "\(choice.label) context" : choice.label
+        contextIds.contains(option.id) ? "\(choice.label) context" : choice.label
     }
 
     private static func symbol(_ option: ModelOption) -> String? {
-        option.id == "contextWindow" ? "memorychip" : "slider.horizontal.3"
+        contextIds.contains(option.id) ? "memorychip" : "slider.horizontal.3"
     }
 }

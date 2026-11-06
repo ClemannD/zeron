@@ -23,6 +23,11 @@ final class ModelOptionChipsTests: XCTestCase {
         XCTAssertEqual(ModelOptionChips.optionId(chip: picked[0].id), "contextWindow")
     }
 
+    func testCursorContextParameterIsAChip() {
+        let cursor = ModelOption(id: "context", label: "context", choices: [ModelOptionChoice(id: "256k", label: "256k"), ModelOptionChoice(id: "500k", label: "500k")], defaultChoice: "500k")
+        XCTAssertEqual(ModelOptionChips.chips(options: [cursor], picks: [:]).map(\.title), ["500k context"])
+    }
+
     func testOnlyShownOptionsBecomeChips() {
         XCTAssertTrue(ModelOptionChips.chips(options: [fastMode], picks: [:]).isEmpty)
         XCTAssertTrue(ModelOptionChips.chips(options: [], picks: ["contextWindow": "1m"]).isEmpty)
