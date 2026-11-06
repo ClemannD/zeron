@@ -61,6 +61,7 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
                         base_ref: "main".into(),
                         head_ref: branch,
                         live: Default::default(),
+                        signals: None,
                     }),
                     updated_at: Utc::now(),
                 });

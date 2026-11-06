@@ -142,10 +142,13 @@ run again before replacement. Missing checksums, unexpected signatures, and
 damaged downloads fail without replacing the installed app.
 
 The app bundle is replaced without moving settings or session data. The
-previous bundle remains at `/Applications/.Zeron.app.previous`. To roll back,
-quit the app and engine and restore that bundle as `Zeron.app`. A failed
-bundle swap restores the original automatically; failed-launch rollback is
-manual.
+previous bundle remains at `/Applications/.Zeron.app.previous`. A failed
+bundle swap restores the original automatically, and an update the engine
+installs is on trial until the new version opens its data, serves clients and
+(when signed in) reaches the edge: a crash, hang or failed check goes back to
+the previous version and its SQLite stores (upstream #1241). To roll back by
+hand, quit the app and engine and restore that bundle as `Zeron.app`. The
+private feed has one channel; fork builds ignore the beta channel setting.
 
 ## Backend changes and validation
 

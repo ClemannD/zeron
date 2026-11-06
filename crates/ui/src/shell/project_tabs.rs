@@ -2176,6 +2176,7 @@ mod tests {
             checkout_id: None,
             repository_id: Some("commit:same".into()),
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         }
     }

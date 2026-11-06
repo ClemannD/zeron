@@ -167,6 +167,7 @@ async fn package_scripts_validate_the_chat_and_open_fresh_terminals() {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
     let client = zeron_rpc::memory_client(core.rpc_service());

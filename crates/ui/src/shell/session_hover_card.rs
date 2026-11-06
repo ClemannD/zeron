@@ -539,6 +539,7 @@ mod tests {
                         base_ref: "main".into(),
                         head_ref: "feature/pr".into(),
                         live: Default::default(),
+                        signals: None,
                     }),
                     None,
                     zeron_proto::ChatIndicator::Idle,

@@ -219,7 +219,7 @@ impl SidebarUsage {
             );
         }
         div()
-            .id(("sidebar-usage-card", account.harness as usize))
+            .id(gpui::SharedString::from(format!("sidebar-usage-card-{}", account.harness.as_str())))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .rounded(px(Theme::CONTROL_RADIUS))

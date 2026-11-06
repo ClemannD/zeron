@@ -7300,6 +7300,7 @@ impl Shell {
                 zeron_proto::view::cloud_repository_id(&self.state.read(cx).spaces, repo)
             }),
             github_repo: github_repo.clone(),
+            icon: None,
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {
@@ -9186,6 +9187,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
