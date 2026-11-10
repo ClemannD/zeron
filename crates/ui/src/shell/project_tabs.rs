@@ -1184,33 +1184,54 @@ impl Shell {
 
     /// Keep checkout diff snapshots for remote devices represented by visible
     /// project tabs, so their third-row totals reflect the host workspace too.
+    /// Hosts scan only chats someone is looking at, so each device's watch
+    /// names every visible project's latest chat, re-subscribing as those
+    /// change.
     fn refresh_project_tab_remote_diff_watches(&mut self, keys: &[String], cx: &mut Context<Self>) {
         let (engine, devices) = {
             let state = self.state.read(cx);
-            let devices = keys
-                .iter()
-                .filter_map(|key| state.space_row(key))
-                .filter(|space| state.local_device_id.as_deref() != Some(space.device_id.as_str()))
-                .map(|space| space.device_id.clone())
-                .collect::<std::collections::HashSet<_>>();
+            let mut devices = HashMap::<String, Vec<String>>::new();
+            for space in keys.iter().filter_map(|key| state.space_row(key)) {
+                if state.local_device_id.as_deref() == Some(space.device_id.as_str()) {
+                    continue;
+                }
+                let chats = devices.entry(space.device_id.clone()).or_default();
+                let latest = state
+                    .chats
+                    .iter()
+                    .filter(|chat| {
+                        !chat.archived
+                            && chat.device_id == space.device_id
+                            && chat.space_id.as_deref() == Some(space.id.as_str())
+                    })
+                    .max_by_key(|chat| chat.last_message_at.unwrap_or(chat.created_at));
+                if let Some(chat) = latest {
+                    chats.push(chat.id.clone());
+                }
+            }
+            for chats in devices.values_mut() {
+                chats.sort();
+                chats.dedup();
+            }
             (state.engine().cloned(), devices)
         };
         self.project_tab_remote_diff_tasks
-            .retain(|device, _| devices.contains(device));
+            .retain(|device, (chats, _)| devices.get(device) == Some(chats));
         self.project_tab_remote_diffs
-            .retain(|device, _| devices.contains(device));
+            .retain(|device, _| devices.contains_key(device));
         let Some(engine) = engine else {
             return;
         };
 
-        for device in devices {
+        for (device, chats) in devices {
             if self.project_tab_remote_diff_tasks.contains_key(&device) {
                 continue;
             }
             let engine = engine.clone();
             let target = device.clone();
+            let params = serde_json::json!({ "targetDeviceId": device, "chatIds": chats });
             let task = cx.spawn(async move |this, cx| loop {
-                let params = serde_json::json!({ "targetDeviceId": target.clone() });
+                let params = params.clone();
                 if let Ok(mut rx) = engine
                     .client()
                     .subscribe(methods::WATCH_CHECKOUT_DIFFS, params)
@@ -1235,7 +1256,7 @@ impl Shell {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             });
             self.project_tab_remote_diff_tasks
-                .insert(device, task);
+                .insert(device, (chats, task));
         }
     }
 

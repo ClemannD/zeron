@@ -2192,7 +2192,8 @@ pub struct Shell {
     /// Latest local working-tree totals shown at the right edge of each tab.
     project_tab_changes: std::collections::HashMap<String, (u32, u32)>,
     /// Remote checkout diff streams and their latest frames, keyed by device.
-    project_tab_remote_diff_tasks: std::collections::HashMap<String, gpui::Task<()>>,
+    /// Per device, the chats its watch names (so the host keeps scanning them).
+    project_tab_remote_diff_tasks: std::collections::HashMap<String, (Vec<String>, gpui::Task<()>)>,
     project_tab_remote_diffs: std::collections::HashMap<String, Vec<zeron_proto::CheckoutDiff>>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
@@ -9051,7 +9052,9 @@ impl Shell {
             Some("Queued")
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
+                zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => {
+                    Some("Working")
+                }
                 zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
@@ -14872,6 +14875,7 @@ mod tests {
             room_gen: None,
             parent_chat_id: None,
             child_kind: None,
+            sleep: None,
         }
     }
 
@@ -15194,6 +15198,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         }
     }
 
@@ -18155,6 +18160,7 @@ mod exit_regressions {
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
+                        sleep: None,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });

@@ -1178,6 +1178,149 @@ async fn git_status_enumerates_untracked_symlinks_without_reading_their_targets(
     );
 }
 
+/// A project's file tree follows a space, with no chat open: its checkout is
+/// still looked at while the tree is, and only that one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_status_for_a_project_keeps_its_checkout_scanned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let other = tmp.path().join("other");
+    init_repo(&root).await;
+    init_repo(&other).await;
+    std::fs::write(root.join("a.txt"), "first edit\n").unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    for (space, chat, path) in [
+        ("space", "chat", &root),
+        ("other-space", "other-chat", &other),
+    ] {
+        core.workspace
+            .create_space(space, &core.device_id, &path.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat(chat, Some(space), None, None, None)
+            .unwrap();
+    }
+    core.diff_sync.reconcile_now().await;
+    assert!(core.diff_sync.tracked_checkouts().is_empty());
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"spaceId": "space"}),
+        )
+        .await
+        .unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let value = stream.recv().await.expect("stream alive");
+            let frame: zeron_proto::WorkspaceGitStatusFrame =
+                serde_json::from_value(value).unwrap();
+            if let Some(status) = frame.status {
+                return status;
+            }
+        }
+    })
+    .await
+    .expect("the project's status arrives with no chat open");
+    assert_eq!(status.files[0].path, "a.txt");
+    assert_eq!(
+        core.diff_sync.tracked_checkouts().len(),
+        1,
+        "the other project isn't scanned"
+    );
+}
+
+/// The Changes pane of a chat on another device: the transcript stream that
+/// keeps a local chat scanned never reaches its host, so the diff watch names
+/// the chat. A watch naming none doesn't start a scan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_diff_watch_naming_a_chat_keeps_it_scanned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root).await;
+    std::fs::write(root.join("a.txt"), "first edit\n").unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space("space", &core.device_id, &root.to_string_lossy(), None, true)
+        .unwrap();
+    core.workspace
+        .create_chat("chat", Some("space"), None, None, None)
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let _everything = client
+        .subscribe(methods::WATCH_CHECKOUT_DIFFS, serde_json::Value::Null)
+        .await
+        .unwrap();
+    core.diff_sync.reconcile_now().await;
+    assert!(core.diff_sync.tracked_checkouts().is_empty());
+
+    let mut named = client
+        .subscribe(
+            methods::WATCH_CHECKOUT_DIFFS,
+            serde_json::json!({"chatId": "chat"}),
+        )
+        .await
+        .unwrap();
+    let files = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let value = named.recv().await.expect("stream alive");
+            let diffs: Vec<zeron_proto::CheckoutDiff> = serde_json::from_value(value).unwrap();
+            if let Some(diff) = diffs.first() {
+                return diff.files.clone();
+            }
+        }
+    })
+    .await
+    .expect("the chat's diff arrives");
+    assert_eq!(files[0].path, "a.txt");
+}
+
+/// Fork: another device's project tabs name each visible project's latest chat
+/// in one diff watch (`chatIds`), keeping exactly those checkouts scanned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_diff_watch_naming_several_chats_keeps_each_scanned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    for name in ["one", "two", "unnamed"] {
+        let root = tmp.path().join(name);
+        init_repo(&root).await;
+        std::fs::write(root.join("a.txt"), format!("{name} edit\n")).unwrap();
+        core.workspace
+            .create_space(name, &core.device_id, &root.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat(&format!("chat-{name}"), Some(name), None, None, None)
+            .unwrap();
+    }
+    core.diff_sync.reconcile_now().await;
+    assert!(core.diff_sync.tracked_checkouts().is_empty());
+
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut named = client
+        .subscribe(
+            methods::WATCH_CHECKOUT_DIFFS,
+            serde_json::json!({"chatIds": ["chat-one", "chat-two"]}),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let value = named.recv().await.expect("stream alive");
+            let diffs: Vec<zeron_proto::CheckoutDiff> = serde_json::from_value(value).unwrap();
+            if diffs.len() == 2 {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("both named chats' diffs arrive");
+    assert_eq!(
+        core.diff_sync.tracked_checkouts().len(),
+        2,
+        "the unnamed project isn't scanned"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_status_stream_is_scoped_deduplicated_and_resets_after_commit() {
     use zeron_proto::CheckoutGitStatus;
@@ -1639,6 +1782,7 @@ async fn diff_sync_publishes_without_rewriting_chat_branch() {
     core.workspace
         .create_chat("chat-diff", Some("space-diff"), None, None, None)
         .expect("chat row");
+    let _interest = core.diff_sync.retain_chat("chat-diff");
     core.diff_sync.reconcile_now().await;
 
     // Initial snapshot lands after the debounce; poll the watch.
