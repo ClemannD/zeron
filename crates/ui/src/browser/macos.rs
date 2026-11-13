@@ -499,6 +499,10 @@ impl NativePage {
                 } else {
                     event.as_ptr()
                 }
+            } else if let Some(action) = page_edit_action(&combo)
+                && send_to_page(&monitor_view, action)
+            {
+                std::ptr::null_mut()
             } else {
                 event.as_ptr()
             }
@@ -662,6 +666,33 @@ impl NativePage {
             );
         }
     }
+}
+
+/// The page's own edit command for a chord typed while it has the keyboard.
+/// GPUIView answers `performKeyEquivalent:` from GPUI's focus, which a click
+/// on the page leaves where it was (often the composer, whose ⌘C copies its
+/// own empty selection and swallows the key), so the Edit menu's `copy:`
+/// never reaches WebKit. Sending the action first keeps these with the page.
+fn page_edit_action(combo: &str) -> Option<objc2::runtime::Sel> {
+    Some(match combo {
+        "cmd-c" => sel!(copy:),
+        "cmd-x" => sel!(cut:),
+        "cmd-v" => sel!(paste:),
+        "cmd-a" => sel!(selectAll:),
+        "cmd-z" => sel!(undo:),
+        "cmd-shift-z" => sel!(redo:),
+        _ => return None,
+    })
+}
+
+/// Send `action` up the window's responder chain from its first responder
+/// (inside the page, per `has_focus`); false when nothing there took it.
+/// Not `NSApp sendAction:` — that ends at GPUI's app delegate, whose
+/// `copy:` reads the sender's menu tag and would run an unrelated action.
+fn send_to_page(view: &NSView, action: objc2::runtime::Sel) -> bool {
+    view.window()
+        .and_then(|w| w.firstResponder())
+        .is_some_and(|r| unsafe { r.tryToPerform_with(action, None) })
 }
 
 fn has_focus(view: &NSView) -> bool {
