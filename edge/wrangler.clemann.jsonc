@@ -79,6 +79,10 @@
     "APNS_TEAM_ID": "7C4DAG233S",
     "APNS_TOPIC": "app.clemann.zeron",
     "PRIVATE_RELEASES_USER_ID": "user_cc9417dab50d49a7ba18fee6f402356b",
+    // Relay layer for every chat room, as upstream's production
+    // (docs/design/relay-layer.md). Never deploy edge code older than this
+    // while a room may still hold a relay queue.
+    "CHAT_RELAY_LAYER": "1",
     "SANDBOX_PROVIDER": "boat",
     "BOAT_API_BASE": "https://boat.dev/api/v1",
     "CLOUD_IDLE_MINUTES": "10",

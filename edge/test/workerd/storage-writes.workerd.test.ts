@@ -64,7 +64,9 @@ describe("Durable Object write budgets", () => {
       const sql = state.storage.sql;
       expect(getMeta(sql, "backupDirty")).toBe("1");
       expect([...sql.exec("SELECT key FROM meta_updates WHERE key IN ('backupDirty', 'pushOutcomes')")]).toEqual([]);
-      expect(JSON.parse(getMeta(sql, "pushOutcomes")!).host.ok).toBe(1);
+      // Accepted pushes stay in memory until the bookkeeping flush alarm;
+      // /stats above already merged them.
+      expect(getMeta(sql, "pushOutcomes")).toBeUndefined();
     });
     const reset = await stub.fetch("https://room/reset", { method: "POST", headers });
     expect(reset.status).toBe(200);
