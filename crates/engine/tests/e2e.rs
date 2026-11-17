@@ -3260,6 +3260,84 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
     }
 }
 
+/// A reply that names a screenshot by path, outside the chat's folder, ends
+/// with that screenshot as an image part (a stored copy, so remote devices
+/// read it from uploads). A Markdown image the clients draw in place from
+/// the chat's folder, a missing file and a repeat are not added.
+#[tokio::test]
+async fn images_a_reply_names_by_path_become_image_parts() {
+    use zeron_engine::{DocHost, DocHostConfig, SessionsEngine, Uploads};
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    let scratch = dir.path().join("scratchpad/shots");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let png = |shade: u8| {
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 6, image::Rgb([shade; 3])))
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    };
+    let shot = scratch.join("desktop.png");
+    std::fs::write(&shot, png(10)).unwrap();
+    std::fs::write(project.join("inside.png"), png(200)).unwrap();
+    let reply = format!(
+        "Here are the screenshots:\n\n- **Desktop**: `{shot}`\n- Again: {shot}\n\
+         - Missing: `/nowhere/mobile.png`\n\n![in the repo](inside.png)",
+        shot = shot.display()
+    );
+    let script = vec![
+        AgentEvent::TextDelta { text: reply },
+        done(DoneStatus::Completed),
+    ];
+    let registry = registry_with(Arc::new(MockHarness { script }));
+    let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+    let sessions = SessionsEngine::new("host".into(), journal, registry);
+    let uploads = Uploads::from_root(&dir.path().join("profile/uploads"));
+    sessions.set_generated_images(uploads.clone(), dir.path().join("codex"));
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let host = DocHost::new(
+        store,
+        DocHostConfig {
+            device_id: "host".into(),
+            default_harness: HarnessId::Mock,
+            edge: None,
+        },
+    );
+    sessions.set_doc_host(host.clone());
+    let mut request = run_request("screenshots");
+    request.cwd = project.to_string_lossy().into_owned();
+    sessions
+        .dispatch(CHAT, HarnessId::Mock, request, None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
+        "reply completion",
+    )
+    .await;
+    let entries = host.open(CHAT).unwrap().doc().read_entries().unwrap();
+    let parts: Vec<_> = entries.iter().flat_map(|e| &e.parts).collect();
+    let images: Vec<_> = parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Image { path, name, .. } => Some((path.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 1, "{parts:?}");
+    assert_eq!(images[0].1, "desktop.png");
+    assert!(std::path::Path::new(&images[0].0).starts_with(uploads.dir()));
+    assert_eq!(std::fs::read(&images[0].0).unwrap(), std::fs::read(&shot).unwrap());
+    // After the text that names it.
+    assert!(matches!(parts.last(), Some(MessagePart::Image { .. })), "{parts:?}");
+}
+
 /// Real drive_run + journal + Loro, with an isolated Codex source root.
 #[tokio::test]
 async fn generated_image_is_materialized_before_publication_and_survives_reopen() {

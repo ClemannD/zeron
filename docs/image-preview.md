@@ -41,6 +41,18 @@ An image part (a harness's generated image, or one an agent showed with `show_im
 - The UI decodes within the shared raster limits (4096 pixels per side, 64 MiB decoder allocation, first frame), at most four reads at a time per transcript, cached by host, chat, path and type.
 - Anything refused or unreadable keeps the link. A failed image retries on the shared 2 s → 15 s backoff behind the link, without flashing a placeholder.
 
+### Image paths in a reply
+
+When a top-level turn ends, the host scans the reply's text for local image paths and appends each image as an image part, the same part `show_image` makes (`crates/engine/src/reply_images.rs`). This covers the common case where an agent writes "the screenshot is at `/tmp/…/shot.png`" instead of calling `show_image`. Such a path is usually in a scratch folder outside the chat's folder, where no client can read it.
+
+- A path counts in a Markdown image or link target, an inline code span, or as a bare word. It can be absolute, `~/`-relative, or relative to the chat's folder. Inside a fenced code block, only a line that is nothing but a path counts.
+- The file must be a regular PNG, JPEG, WebP or GIF by its bytes, at most 64 MB. Larger than 4096 px on a side or 10 MB, it is downscaled (PNG, or JPEG if the PNG is still over 10 MB).
+- Skipped: files in the uploads folder (the user's own attachments), images the turn already shows (compared by bytes), and a Markdown image that clients already draw in place from the chat's folder.
+- At most 8 images per turn. Subagent replies are not scanned.
+- The copy is stored as `tool-{chat}-{sha256}-image.{ext}`, so the same picture shown again in a chat reuses one file.
+
+The desktop and iOS need no changes: they already render image parts by reading the stored copy from the host (`ReadAttachmentChunk`, relayed for a remote host).
+
 `cargo run --locked -p zeron-ui --example reply-images-fixture --features appshots-fixture,resource-profile` renders one reply naming two images in its chat's folder and nine paths that stay links, after printing the engine's verdict for each; `-- 20 zeron-fixture-chat show-image` shows the image parts `show_image` publishes instead. Captures: `docs/screenshots/agent-images/`.
 
 ## Verification

@@ -426,7 +426,7 @@ const CANVAS_TERMINAL_PREFIX: &str = "space-canvas:";
 /// folder that is `home` or above it, or holds one of `data` (Zeron's own
 /// dirs), are refused, comparing canonical forms. A scratch folder is
 /// resolved under `scratch_root`, never created: only a run creates it.
-fn chat_image_folder(
+pub(crate) fn chat_image_folder(
     cwd: Option<&str>,
     scratch_root: &std::path::Path,
     home: &std::path::Path,

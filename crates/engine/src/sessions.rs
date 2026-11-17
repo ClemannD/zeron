@@ -2517,6 +2517,93 @@ fn tool_image_id(chat_id: &str, bytes: &[u8]) -> String {
     format!("tool-{}-{:x}", &chat[..16], Sha256::digest(bytes))
 }
 
+/// [`Inner::reply_image_events`] off the runtime: resolve each mention on
+/// this host, read and store it, and return the image parts. Skipped: files
+/// that don't exist or aren't images, the user's own uploads, pictures the
+/// reply already shows (by bytes), and a Markdown image the clients draw in
+/// place from the chat's folder (`ReadChatImageChunk` would serve it).
+fn store_reply_images(
+    chat_id: &str,
+    cwd: &str,
+    mentions: Vec<crate::reply_images::Mention>,
+    uploads: &crate::uploads::Uploads,
+    shown: &[String],
+    scratch_root: Option<std::path::PathBuf>,
+) -> Vec<AgentEvent> {
+    use sha2::{Digest, Sha256};
+    let home = crate::repos::session_home_dir().ok();
+    let cwd_path = std::path::Path::new(cwd);
+    let cwd_path = cwd_path.is_absolute().then_some(cwd_path);
+    let uploads_dir = std::fs::canonicalize(uploads.dir()).ok();
+    let projectless = scratch_root
+        .as_deref()
+        .is_some_and(|root| cwd_path.is_some_and(|cwd| cwd.starts_with(root)));
+    // The folder clients read a Markdown image from in place, if any.
+    let in_place_root = home.as_deref().and_then(|home| {
+        let scratch = scratch_root.clone().unwrap_or_default();
+        let data = [uploads.dir().to_path_buf(), scratch.clone()];
+        crate::rpc::chat_image_folder(Some(cwd), &scratch, home, &data).ok()
+    });
+    let mut seen_bytes: std::collections::HashSet<Vec<u8>> = shown
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .map(|bytes| Sha256::digest(&bytes).to_vec())
+        .collect();
+    let mut seen_files = std::collections::HashSet::new();
+    let mut events = Vec::new();
+    for mention in mentions {
+        if events.len() >= crate::reply_images::MAX_PER_TURN {
+            break;
+        }
+        let Some(path) = crate::reply_images::resolve(&mention.source, cwd_path, home.as_deref())
+        else {
+            continue;
+        };
+        let Ok(canonical) = std::fs::canonicalize(&path) else {
+            continue;
+        };
+        if !seen_files.insert(canonical.clone())
+            || uploads_dir.as_deref().is_some_and(|dir| canonical.starts_with(dir))
+        {
+            continue;
+        }
+        // Clients resolve a relative Markdown image only in a project chat,
+        // and never `~`.
+        let drawn_in_place = mention.markdown_image
+            && !mention.source.starts_with('~')
+            && (std::path::Path::new(&mention.source).is_absolute() || !projectless)
+            && in_place_root.as_deref().is_some_and(|root| {
+                crate::uploads::read_chat_image_chunk(&path.to_string_lossy(), 0, root).is_ok()
+            });
+        if drawn_in_place {
+            continue;
+        }
+        let loaded = match crate::reply_images::load(&canonical) {
+            Ok(loaded) => loaded,
+            Err(why) => {
+                tracing::debug!(chat = %chat_id, path = %canonical.display(), why, "reply image skipped");
+                continue;
+            }
+        };
+        if !seen_bytes.insert(Sha256::digest(&loaded.bytes).to_vec()) {
+            continue;
+        }
+        let id = tool_image_id(chat_id, &loaded.bytes);
+        match uploads.store_shown_image(&id, &loaded.name, &loaded.bytes) {
+            Ok(image) => events.push(AgentEvent::GeneratedImage {
+                id: format!("img:{id}"),
+                path: image.path,
+                name: image.name,
+                mime_type: image.mime_type,
+            }),
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, path = %canonical.display(), error = %err, "reply image rejected");
+            }
+        }
+    }
+    events
+}
+
 impl Inner {
     /// Store image bytes a tool result already carried. The model-supplied
     /// path is never opened. A bad payload leaves no preview and does not
@@ -2586,6 +2673,51 @@ impl Inner {
                 error = %err,
                 "tool image store failed"
             );
+            Vec::new()
+        })
+    }
+
+    /// The images a turn's reply names by path ([`crate::reply_images`]),
+    /// stored in uploads as image parts to fold in before its `Done`.
+    /// `folded` is the reply so far; images it already holds (`show_image`'s)
+    /// aren't added again.
+    async fn reply_image_events(
+        &self,
+        chat_id: &str,
+        cwd: &str,
+        folded: &[MessagePart],
+    ) -> Vec<AgentEvent> {
+        let text = folded
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mentions = crate::reply_images::mentions(&text);
+        if mentions.is_empty() {
+            return Vec::new();
+        }
+        let Some((uploads, _)) = self.generated_images.get() else {
+            return Vec::new();
+        };
+        let shown: Vec<String> = folded
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Image { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let uploads = uploads.clone();
+        let scratch_root = self.scratch_root.get().cloned();
+        let (chat, cwd) = (chat_id.to_owned(), cwd.to_owned());
+        tokio::task::spawn_blocking(move || {
+            store_reply_images(&chat, &cwd, mentions, &uploads, &shown, scratch_root)
+        })
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(chat = %chat_id, error = %err, "reply image store failed");
             Vec::new()
         })
     }
@@ -5551,6 +5683,15 @@ async fn drive_run(
                 }
             };
 
+            // The images the reply names by path, before the turn ends. A
+            // subagent's Done arrives wrapped, so this is the chat's own.
+            if matches!(raw_event, AgentEvent::Done { .. }) && !folded.is_empty() {
+                prepared_events.extend(
+                    inner
+                        .reply_image_events(&chat_id, &run_cwd, &folded)
+                        .await,
+                );
+            }
             prepared_events.extend(
                 inner
                     .prepare_generated_image(&chat_id, raw_event, &mut seen_images)

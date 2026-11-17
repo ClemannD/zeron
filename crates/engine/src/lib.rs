@@ -72,6 +72,7 @@ pub mod project_icon;
 pub mod registry;
 pub mod remote_terminals;
 pub mod repos;
+mod reply_images;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
