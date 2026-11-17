@@ -611,6 +611,12 @@ impl zeron_rpc::RpcService for HostService {
                 json!({ "name": "host.png", "mimeType": "image/png", "data": b64(&bytes[offset..end]),
                         "nextOffset": end, "done": end == bytes.len() })
             }
+            m::READ_PROJECT_ICON => {
+                assert_eq!(params["spaceId"], SPACE);
+                assert_eq!(params["maxSide"], 96);
+                json!({ "path": "apps/web/public/favicon.svg", "data": b64(b"\x89PNG icon"),
+                        "width": 96, "height": 96 })
+            }
             m::MUTATE => {
                 self.spaces
                     .lock()
@@ -720,6 +726,13 @@ async fn host_rpcs_ride_the_device_relay() {
     assert_eq!(committed.1, "photo_1.png");
     assert_eq!(committed.2, data);
     assert_eq!(progress.lock().unwrap().last().copied(), Some(1.0));
+
+    // The project's icon, rendered by the host holding its checkout.
+    let c = client.clone();
+    let icon = zeron_client::runtime::run(async move { c.project_icon(SPACE, 96).await })
+        .await
+        .unwrap();
+    assert_eq!(icon.as_deref(), Some(&b"\x89PNG icon"[..]));
 
     // Chunked attachment read.
     let c = client.clone();

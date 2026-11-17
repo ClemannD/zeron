@@ -1179,6 +1179,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func project(spaceId: String)  -> ProjectView?
     
     /**
+     * A project's own artwork (the desktop's project icon) as PNG bytes at
+     * most `max_side` pixels a side, rendered by a device holding its
+     * checkout. `None` when it has none.
+     */
+    func projectIcon(spaceId: String, maxSide: UInt32) async throws  -> Data?
+    
+    /**
      * Active sessions without a project.
      */
     func projectlessSessions()  -> [SessionRow]
@@ -2013,6 +2020,27 @@ open func project(spaceId: String) -> ProjectView?  {
         FfiConverterString.lower(spaceId),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * A project's own artwork (the desktop's project icon) as PNG bytes at
+     * most `max_side` pixels a side, rendered by a device holding its
+     * checkout. `None` when it has none.
+     */
+open func projectIcon(spaceId: String, maxSide: UInt32)async throws  -> Data?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_project_icon(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(spaceId),FfiConverterUInt32.lower(maxSide)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionData.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -19708,6 +19736,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePlatformMeasurer: FfiConverterRustBuffer {
     typealias SwiftType = PlatformMeasurer?
 
@@ -22199,6 +22251,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_project() != 50153) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_project_icon() != 30416) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_projectless_sessions() != 26434) {

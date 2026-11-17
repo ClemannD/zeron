@@ -119,6 +119,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.rememberDraft()
         }
+        // The picked project's artwork arrived after its chip drew the monogram.
+        NotificationCenter.default.addObserver(self, selector: #selector(artworkChanged(_:)), name: ProjectArtwork.didChange, object: nil)
         // Tapping the canvas puts the keyboard away (the card stays open here).
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
         dismissTap.cancelsTouchesInView = false
@@ -310,16 +312,20 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             .sorted { ($0.deviceName.lowercased(), $0.path) < ($1.deviceName.lowercased(), $1.path) }
     }
 
+    @objc private func artworkChanged(_ note: Notification) {
+        if let id = project?.id, id == note.object as? String { refreshChips() }
+    }
+
     private func refreshChips() {
         var chips: [ComposerChip] = []
         if let p = project, runsOnCloud {
             // On its own Cloud machine, from a branch of the repository.
-            chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
+            chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex, spaceId: p.id)))
             chips.append(ComposerChip(id: "host", title: "Cloud", symbol: "cloud"))
             chips.append(ComposerChip(id: "branch", title: draft.branch.map { "From \($0)" } ?? "Default branch", symbol: nil, icon: BranchIcon.sized()))
         } else if let p = project {
             // The project, then the host it runs on.
-            chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
+            chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex, spaceId: p.id)))
             chips.append(ComposerChip(id: "host", title: p.deviceName, symbol: "desktopcomputer"))
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
@@ -370,7 +376,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             let first = members[0]
             var hosts: [String] = []
             for m in members where !hosts.contains(m.deviceName) { hosts.append(m.deviceName) }
-            return UIAction(title: first.groupName, subtitle: hosts.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: ", "), image: ProjectTile.image(name: first.groupName, colorIndex: first.colorIndex, side: 18), state: first.groupKey == picked ? .on : .off) { [weak self] _ in
+            return UIAction(title: first.groupName, subtitle: hosts.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: ", "), image: ProjectTile.image(name: first.groupName, colorIndex: first.colorIndex, side: 18, spaceId: first.id), state: first.groupKey == picked ? .on : .off) { [weak self] _ in
                 self?.pickProject(members)
             }
         })]

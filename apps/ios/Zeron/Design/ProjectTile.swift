@@ -7,8 +7,13 @@ enum ProjectTile {
         String(name.trimmingCharacters(in: .whitespaces).first ?? "?").uppercased()
     }
 
-    /// The tile as an image (composer chips), light/dark aware.
-    static func image(name: String, colorIndex: Int, side: CGFloat = 14) -> UIImage {
+    /// The tile as an image (composer chips), light/dark aware: the
+    /// project's own artwork when `spaceId` has some here
+    /// (`ProjectArtwork`), else its monogram.
+    static func image(name: String, colorIndex: Int, side: CGFloat = 14, spaceId: String? = nil) -> UIImage {
+        if let spaceId, let art = ProjectArtwork.shared.image(spaceId: spaceId) {
+            return artwork(art, side: side)
+        }
         let tone = Palette.projectDots[colorIndex % Palette.projectDots.count]
         let asset = UIImageAsset()
         let scale = UITraitCollection.current.displayScale > 0 ? UITraitCollection.current.displayScale : 3
@@ -29,6 +34,22 @@ enum ProjectTile {
             asset.register(img, with: traits)
         }
         return asset.image(with: UITraitCollection { $0.userInterfaceStyle = UITraitCollection.current.userInterfaceStyle; $0.displayScale = scale })
+    }
+
+    /// Artwork fitted into the tile, with the monogram's subtle rounding
+    /// (app art often has square corners), as the desktop draws it.
+    private static func artwork(_ art: UIImage, side: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = UITraitCollection.current.displayScale > 0 ? UITraitCollection.current.displayScale : 3
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
+            let k = side / 13
+            UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: side, height: side), cornerRadius: 3 * k).addClip()
+            let w = art.size.width, h = art.size.height
+            guard w > 0, h > 0 else { return }
+            let fit = min(side / w, side / h)
+            let size = CGSize(width: w * fit, height: h * fit)
+            art.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height))
+        }.withRenderingMode(.alwaysOriginal)
     }
 }
 

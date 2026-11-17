@@ -1093,6 +1093,44 @@ pub struct ReadWorkspaceImageRequest {
     pub expected_content_hash: Option<String>,
 }
 
+/// The default and largest side, in pixels, of a project's icon as its host
+/// renders it for another device (`ReadProjectIcon`).
+pub const PROJECT_ICON_DEFAULT_SIDE: u32 = 128;
+pub const PROJECT_ICON_MAX_SIDE: u32 = 256;
+
+/// A project's own artwork, found and rendered by the device holding its
+/// checkout, so any client can show it without searching the folder
+/// itself or decoding SVG and ICO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadProjectIconRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    /// The longest side wanted, in pixels (default
+    /// [`PROJECT_ICON_DEFAULT_SIDE`], at most [`PROJECT_ICON_MAX_SIDE`]).
+    /// Artwork is only ever scaled down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_side: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIconImage {
+    /// The checkout-relative file the artwork came from; `None` when the
+    /// project has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The artwork as a base64 PNG. Empty when there's none, or when the
+    /// file found couldn't be read as an image (the client then draws its
+    /// default tile, as the host does).
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceImageChunk {

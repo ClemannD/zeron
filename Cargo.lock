@@ -13710,6 +13710,7 @@ dependencies = [
  "notify 7.0.0",
  "portable-pty",
  "reqwest",
+ "resvg",
  "ring",
  "rusqlite",
  "same-file",

@@ -948,3 +948,58 @@ async fn absolute_paths_read_inside_normally_and_outside_read_only() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_project_icon_finds_monorepo_artwork_and_renders_a_png() {
+    use base64::Engine as _;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-icons");
+    core.workspace
+        .create_space(
+            "space-icons",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let ask = async |max_side: Option<u32>| {
+        let mut params = serde_json::json!({ "spaceId": "space-icons" });
+        if let Some(side) = max_side {
+            params["maxSide"] = side.into();
+        }
+        let value = client
+            .call(methods::READ_PROJECT_ICON, params)
+            .await
+            .expect("project icon");
+        serde_json::from_value::<zeron_proto::ProjectIconImage>(value).expect("typed icon")
+    };
+
+    // No artwork: an empty answer, not an error.
+    assert_eq!(ask(None).await, zeron_proto::ProjectIconImage::default());
+
+    // Only a monorepo package's SVG favicon (no root icon), as this repo has.
+    std::fs::create_dir_all(repo.join("apps/landing/public")).unwrap();
+    std::fs::write(
+        repo.join("apps/landing/public/favicon.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="#0f0"/></svg>"##,
+    )
+    .unwrap();
+    let icon = ask(Some(64)).await;
+    assert_eq!(
+        icon.path.as_deref(),
+        Some("apps/landing/public/favicon.svg")
+    );
+    assert_eq!((icon.width, icon.height), (64, 32));
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(&icon.data)
+        .unwrap();
+    assert_eq!(image::guess_format(&png).unwrap(), image::ImageFormat::Png);
+
+    // The size asked for is bounded.
+    let icon = ask(Some(100_000)).await;
+    assert_eq!(icon.width, zeron_proto::PROJECT_ICON_MAX_SIDE);
+}

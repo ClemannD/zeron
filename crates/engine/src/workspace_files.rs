@@ -531,6 +531,25 @@ impl WorkspaceFiles {
         result
     }
 
+    /// The project's own artwork, searched for in its checkout the way the
+    /// desktop does locally ([`crate::project_icon`]) and rendered as a
+    /// small PNG, so another device needs one round trip and no decoders.
+    pub async fn read_project_icon(
+        &self,
+        request: zeron_proto::ReadProjectIconRequest,
+    ) -> Result<zeron_proto::ProjectIconImage, WorkspaceFilesError> {
+        let workspace = self.resolve_target(&request.target).await?;
+        let side = request
+            .max_side
+            .unwrap_or(zeron_proto::PROJECT_ICON_DEFAULT_SIDE)
+            .clamp(16, zeron_proto::PROJECT_ICON_MAX_SIDE);
+        tokio::task::spawn_blocking(move || crate::project_icon::read(&workspace.root, side))
+            .await
+            .map_err(|error| {
+                WorkspaceFilesError::Io(format!("project icon worker failed: {error}"))
+            })
+    }
+
     pub async fn read_image(
         &self,
         request: zeron_proto::ReadWorkspaceImageRequest,

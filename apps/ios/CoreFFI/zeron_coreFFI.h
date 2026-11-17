@@ -638,6 +638,11 @@ void uniffi_zeron_mobile_fn_method_coreclient_preload_sessions(uint64_t ptr, Rus
 RustBuffer uniffi_zeron_mobile_fn_method_coreclient_project(uint64_t ptr, RustBuffer space_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PROJECT_ICON
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PROJECT_ICON
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_project_icon(uint64_t ptr, RustBuffer space_id, uint32_t max_side
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PROJECTLESS_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PROJECTLESS_SESSIONS
 RustBuffer uniffi_zeron_mobile_fn_method_coreclient_projectless_sessions(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -2455,6 +2460,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_preload_sessions(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PROJECT
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PROJECT_ICON
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PROJECT_ICON
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_project_icon(void
     
 );
 #endif

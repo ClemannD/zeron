@@ -258,6 +258,7 @@ final class AppModel {
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
+            ProjectArtwork.shared.client = client
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
             if case .workOs = credentials { Credentials.store(credentials) }
@@ -325,6 +326,7 @@ final class AppModel {
         lastDeliveryActivity = .distantPast
         client?.shutdown()
         client = nil
+        ProjectArtwork.shared.client = nil
         Credentials.clearStored()
         AccountProfile.clear()
         clock?.invalidate()
@@ -629,6 +631,7 @@ final class AppModel {
             title: r.title,
             projectName: r.project?.name ?? r.deviceName ?? "No project",
             hasProject: r.project != nil,
+            projectId: r.project?.id,
             // Project-less sessions tone like the desktop's "home" tile.
             colorIndex: Int(r.project?.colorIndex ?? projectColorIndex(spacePath: "home")),
             harness: r.harness,

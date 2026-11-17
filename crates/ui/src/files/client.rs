@@ -221,6 +221,22 @@ impl WorkspaceFilesClient {
         self.call(methods::READ_WORKSPACE_FILE, &request).await
     }
 
+    /// The project's own artwork, found and rendered as a PNG by its host
+    /// (`ReadProjectIcon`). `Unsupported` from a host that predates it.
+    pub async fn read_project_icon(
+        &self,
+        max_side: u32,
+    ) -> Result<zeron_proto::ProjectIconImage, FilesClientError> {
+        self.call(
+            methods::READ_PROJECT_ICON,
+            &zeron_proto::ReadProjectIconRequest {
+                target: self.context.target.clone(),
+                max_side: Some(max_side),
+            },
+        )
+        .await
+    }
+
     pub async fn read_image(
         &self,
         path: String,
@@ -825,7 +841,10 @@ mod tests {
     #[async_trait]
     impl WorkspaceFilesTransport for ImageTransport {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-            assert_eq!(method, methods::READ_WORKSPACE_IMAGE);
+            assert!(matches!(
+                method,
+                methods::READ_WORKSPACE_IMAGE | methods::READ_PROJECT_ICON
+            ));
             self.calls.lock().unwrap().push(params);
             self.responses
                 .lock()
@@ -888,6 +907,30 @@ mod tests {
         assert_eq!(calls[0]["expectedCheckoutId"], "checkout");
         assert_eq!(calls[1]["expectedContentHash"], "hash");
         assert_eq!(calls[1]["offset"], 2);
+    }
+    #[tokio::test]
+    async fn project_icons_address_the_remote_target_and_report_old_hosts() {
+        let icon = zeron_proto::ProjectIconImage {
+            path: Some("apps/web/public/favicon.svg".into()),
+            data: "cG5n".into(),
+            width: 64,
+            height: 64,
+        };
+        let (client, transport) = image_client(vec![Ok(serde_json::to_value(&icon).unwrap())]);
+        assert_eq!(client.read_project_icon(64).await.unwrap(), icon);
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls[0]["targetDeviceId"], "remote");
+        assert_eq!(calls[0]["chatId"], "chat-1");
+        assert_eq!(calls[0]["maxSide"], 64);
+        drop(calls);
+        // A host from before the method: the caller falls back to probing.
+        let (client, _) = image_client(vec![Err(RpcError::UnknownMethod(
+            methods::READ_PROJECT_ICON.into(),
+        ))]);
+        assert!(matches!(
+            client.read_project_icon(64).await,
+            Err(FilesClientError::Unsupported(_))
+        ));
     }
     #[tokio::test]
     async fn image_reads_reject_inconsistent_or_unsupported_responses() {

@@ -61,6 +61,7 @@ pub mod package_scripts;
 pub mod plugins;
 pub mod profile;
 pub mod project_actions;
+pub mod project_icon;
 pub mod registry;
 pub mod remote_terminals;
 pub mod repos;

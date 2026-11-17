@@ -245,6 +245,9 @@ pub mod methods {
     /// Plain-text search over a workspace's file contents.
     pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
+    /// A project's own artwork, found in its checkout and rendered as a
+    /// small PNG by the device holding it.
+    pub const READ_PROJECT_ICON: &str = "ReadProjectIcon";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
     pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";

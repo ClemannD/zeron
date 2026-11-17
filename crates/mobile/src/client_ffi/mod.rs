@@ -600,6 +600,18 @@ impl CoreClient {
         Ok(on_runtime(async move { client.read_chat_image(&device_id, &chat_id, &path).await }).await?)
     }
 
+    /// A project's own artwork (the desktop's project icon) as PNG bytes at
+    /// most `max_side` pixels a side, rendered by a device holding its
+    /// checkout. `None` when it has none.
+    pub async fn project_icon(
+        &self,
+        space_id: String,
+        max_side: u32,
+    ) -> CoreResult<Option<Vec<u8>>> {
+        let client = self.client.clone();
+        on_runtime(async move { client.project_icon(&space_id, max_side).await }).await
+    }
+
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     /// OS network path: `false` only for a definitive "unsatisfied".

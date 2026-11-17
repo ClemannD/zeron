@@ -1759,6 +1759,69 @@ impl Client {
         }
     }
 
+    /// A project's own artwork as a PNG at most `max_side` pixels a side,
+    /// found and rendered by a device holding its checkout
+    /// (`ReadProjectIcon`). Clones share their representative's icon, as
+    /// they share its name and color; another clone answers when that one
+    /// can't. `None` when the project has no artwork, lives on Cloud alone,
+    /// or its hosts predate the method. Not cached: callers keep their own
+    /// decoded image.
+    pub async fn project_icon(&self, space_id: &str, max_side: u32) -> Result<Option<Vec<u8>>> {
+        let Backend::Live(live) = self.inner.backend() else {
+            return Ok(None);
+        };
+        let candidates: Vec<(String, String)> = {
+            let (state, _) = self.inner.workspace.state();
+            let space = state
+                .spaces
+                .iter()
+                .find(|s| s.id == space_id)
+                .ok_or_else(|| ClientError::NotFound(space_id.to_owned()))?;
+            let representative = zeron_proto::view::representative_space(&state.spaces, space);
+            let mut members = vec![representative, space];
+            if let Some(repository) = space.repository_id.as_deref() {
+                let mut clones: Vec<_> = state
+                    .spaces
+                    .iter()
+                    .filter(|s| s.repository_id.as_deref() == Some(repository))
+                    .collect();
+                clones.sort_by_key(|s| (s.created_at, s.id.as_str()));
+                members.extend(clones);
+            }
+            let mut seen = std::collections::HashSet::new();
+            members
+                .into_iter()
+                .filter(|s| !s.device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX))
+                .filter(|s| seen.insert(s.id.as_str()))
+                .take(3)
+                .map(|s| (s.device_id.clone(), s.id.clone()))
+                .collect()
+        };
+        let mut last_error = None;
+        for (device_id, space_id) in candidates {
+            let reply = live
+                .relay
+                .call(
+                    &device_id,
+                    zeron_rpc::methods::READ_PROJECT_ICON,
+                    serde_json::json!({ "spaceId": space_id, "maxSide": max_side }),
+                )
+                .await;
+            match reply {
+                Ok(value) => {
+                    let icon: zeron_proto::ProjectIconImage = serde_json::from_value(value)
+                        .map_err(|e| ClientError::HostError(e.to_string()))?;
+                    // A found file that won't decode is the default tile on
+                    // its host too: no other clone is asked.
+                    return Ok(crate::live::b64::decode(&icon.data).filter(|png| !png.is_empty()));
+                }
+                Err(ClientError::Unsupported(_)) => {}
+                Err(error) => last_error = Some(error),
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     /// OS network path (NWPathMonitor): `false` only for a definitive

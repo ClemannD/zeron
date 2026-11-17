@@ -2450,6 +2450,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WARM_WORKSPACE_SEARCH
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
+            | methods::READ_PROJECT_ICON
             | methods::READ_WORKSPACE_FILE
             | methods::DELETE_WORKSPACE_ENTRY
             | methods::MOVE_WORKSPACE_ENTRY
@@ -4944,6 +4945,17 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&chunk)
             }
+            methods::READ_PROJECT_ICON => {
+                let request: zeron_proto::ReadProjectIconRequest = parse_params(params)?;
+                let icon = tokio::time::timeout(
+                    crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                    self.workspace_files.read_project_icon(request),
+                )
+                .await
+                .map_err(|_| RpcError::Failed("Project icon read timed out".into()))?
+                .map_err(RpcError::from)?;
+                RpcReply::value(&icon)
+            }
             methods::READ_WORKSPACE_FILE => {
                 let request: zeron_proto::ReadWorkspaceFileRequest = parse_params(params)?;
                 let file = tokio::time::timeout(
@@ -6130,6 +6142,7 @@ mod tests {
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
+        assert!(forwardable(methods::READ_PROJECT_ICON));
         assert!(forwardable(methods::DELETE_WORKSPACE_ENTRY));
         assert!(forwardable(methods::MOVE_WORKSPACE_ENTRY));
         assert!(forwardable(methods::CREATE_WORKSPACE_ENTRY));

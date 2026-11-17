@@ -22,6 +22,8 @@ struct SessionRowVM: Hashable {
     var projectName: String
     /// False for project-less sessions (the tile reads "H" for Home, like desktop).
     var hasProject: Bool
+    /// Its project's space, whose artwork the tile wears when it has some.
+    var projectId: String? = nil
     var colorIndex: Int
     var harness: String?
     var branch: String?
@@ -86,6 +88,12 @@ final class SessionCell: UICollectionViewListCell {
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: SessionCell, _) in
             if let vm = cell.vm { cell.configure(vm) }
         }
+        // The project's artwork arrived after the row first drew its monogram.
+        NotificationCenter.default.addObserver(self, selector: #selector(artworkChanged(_:)), name: ProjectArtwork.didChange, object: nil)
+    }
+
+    @objc private func artworkChanged(_ note: Notification) {
+        if let vm, let id = vm.projectId, id == note.object as? String { configure(vm) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -129,7 +137,7 @@ final class SessionCell: UICollectionViewListCell {
         // the title's leading edge (a separately framed tile drifted high).
         let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
         let tileSide = (14 * TypeScale.factor).rounded()
-        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide, spaceId: vm.projectId))
         tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
         let metaText = NSMutableAttributedString(attachment: tile)
         metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))

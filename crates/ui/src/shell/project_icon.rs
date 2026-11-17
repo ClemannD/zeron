@@ -1,83 +1,7 @@
 //! Repository artwork is fetched once per project/connection, off the render thread.
 use super::*;
-use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
+use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
-
-/// Where projects typically keep their icon, best candidates first: large or
-/// vector artwork, then framework conventions (Next.js `app/` and `src/app/`,
-/// SvelteKit/Hugo `static/`, Angular `src/`, Expo, Electron, Tauri, Flutter),
-/// then repository logos and plain favicons. Paths are relative to the
-/// checkout root. Remote projects try exactly this list.
-pub(super) const ICON_PATHS: &[&str] = &[
-    "public/apple-touch-icon.png",
-    "apple-touch-icon.png",
-    "public/favicon.svg",
-    "favicon.svg",
-    "public/icon.svg",
-    "public/logo.svg",
-    "app/icon.svg",
-    "src/app/icon.svg",
-    "app/apple-icon.png",
-    "src/app/apple-icon.png",
-    "app/icon.png",
-    "src/app/icon.png",
-    "public/android-chrome-512x512.png",
-    "public/android-chrome-192x192.png",
-    "public/icon-512.png",
-    "public/icon-192.png",
-    "public/favicon.png",
-    "public/favicon-96x96.png",
-    "public/favicon-32x32.png",
-    "public/icon.png",
-    "public/logo.png",
-    "static/favicon.svg",
-    "static/favicon.png",
-    "static/logo.svg",
-    "static/logo.png",
-    "src/favicon.svg",
-    "src/assets/icon.svg",
-    "src/assets/icon.png",
-    "src/assets/logo.svg",
-    "src/assets/logo.png",
-    "assets/icon.svg",
-    "assets/icon.png",
-    "assets/images/icon.png",
-    "assets/logo.svg",
-    "assets/logo.png",
-    "resources/icon.png",
-    "build/icon.png",
-    "src-tauri/icons/icon.png",
-    "src-tauri/icons/128x128@2x.png",
-    "web/icons/Icon-512.png",
-    "web/favicon.png",
-    "icon.svg",
-    "icon.png",
-    "logo.svg",
-    "logo.png",
-    ".github/logo.svg",
-    ".github/logo.png",
-    "docs/logo.svg",
-    "docs/logo.png",
-    "favicon.png",
-    "public/favicon.ico",
-    "app/favicon.ico",
-    "src/app/favicon.ico",
-    "static/favicon.ico",
-    "src/favicon.ico",
-    "favicon.ico",
-];
-
-/// Monorepo package folders searched (locally) with [`ICON_PATHS`] when the
-/// root has no icon: `apps/web/public/favicon.svg` and the like.
-const MONOREPO_DIRS: &[&str] = &["apps", "packages", "sites"];
-
-/// The first candidate that exists under `dir`.
-fn first_icon_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    ICON_PATHS
-        .iter()
-        .map(|path| dir.join(path))
-        .find(|path| path.is_file())
-}
 
 /// Read and decode one icon file.
 fn load_icon_file(path: &std::path::Path) -> Option<MediaImage> {
@@ -97,70 +21,11 @@ fn load_icon_file(path: &std::path::Path) -> Option<MediaImage> {
     decode_project_icon(mime, bytes).ok()
 }
 
-/// Sorted subdirectories of `dir` (hidden ones skipped). Bounded: a huge
-/// folder must not stall the icon search.
-fn subdirectories(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<std::path::PathBuf> = entries
-        .filter_map(Result::ok)
-        .take(200)
-        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    dirs.sort();
-    dirs
-}
-
-/// The largest PNG of an Xcode app icon set within two levels of `root`, or
-/// within the conventional `apps/<platform>/<app>` monorepo layout.
-fn xcode_app_icon(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut parents = vec![root.to_path_buf()];
-    parents.extend(subdirectories(root));
-    let level_two: Vec<_> = parents.iter().skip(1).flat_map(|dir| subdirectories(dir)).collect();
-    parents.extend(level_two);
-    // Keep the search bounded for ordinary repositories, but include iOS (or
-    // other platform) apps living at `apps/<platform>/<app>`.
-    parents.extend(
-        subdirectories(&root.join("apps"))
-            .into_iter()
-            .flat_map(|platform| subdirectories(&platform)),
-    );
-    parents.into_iter().find_map(|dir| {
-        let set = dir.join("Assets.xcassets/AppIcon.appiconset");
-        std::fs::read_dir(&set)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|e| e == "png"))
-            .filter_map(|path| Some((path.metadata().ok()?.len(), path)))
-            .filter(|(len, _)| *len <= zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64)
-            .max_by_key(|(len, _)| *len)
-            .map(|(_, path)| path)
-    })
-}
-
+/// The project's artwork from this device's own checkout: the same search
+/// its host answers `ReadProjectIcon` with ([`zeron_engine::project_icon`]),
+/// decoded here (SVG stays vector-sharp).
 fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
-    // A project can point at a subdirectory; match the remote workspace RPC's
-    // checkout-root resolution, including linked worktrees with a .git file.
-    let canonical = root.canonicalize().ok()?;
-    let root = canonical
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .unwrap_or(&canonical);
-    // The first match wins even when it fails to decode: a corrupt icon shows
-    // the default rather than unrelated lower-priority art.
-    let path = first_icon_path(root)
-        .or_else(|| {
-            MONOREPO_DIRS
-                .iter()
-                .flat_map(|dir| subdirectories(&root.join(dir)))
-                .find_map(|package| first_icon_path(&package))
-        })
-        .or_else(|| xcode_app_icon(root))?;
-    load_icon_file(&path)
+    load_icon_file(&zeron_engine::project_icon::find(root)?)
 }
 
 // Curated badge tones: (dark appearance, light appearance). Keep the ordering
@@ -230,6 +95,10 @@ fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement
     crate::frost::frosted(3.0, crate::frost::MENU_BLUR, tile).into_any_element()
 }
 
+/// The pixel size asked of a host's artwork: a 16 pt icon on a 2x display,
+/// with room to spare (the local raster decode's bound).
+const PROJECT_ICON_SIDE: u32 = 64;
+
 pub(super) struct ProjectIcon {
     name: String,
     seed: String,
@@ -256,7 +125,24 @@ impl ProjectIcon {
                     return executor.spawn(async move { load_local_icon(&root) }).await;
                 }
                 let client = WorkspaceFilesClient::new(engine?, context.clone());
-                for path in ICON_PATHS {
+                // The host searches its checkout and renders a small PNG.
+                match client.read_project_icon(PROJECT_ICON_SIDE).await {
+                    Ok(icon) => {
+                        use base64::Engine as _;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(icon.data)
+                            .ok()
+                            .filter(|bytes| !bytes.is_empty())?;
+                        return executor
+                            .spawn(async move { decode_project_icon("image/png", bytes).ok() })
+                            .await;
+                    }
+                    Err(FilesClientError::Unsupported(_)) => {}
+                    Err(_) => return None,
+                }
+                // A host from before `ReadProjectIcon`: probe the root
+                // candidates one by one (no monorepo or Xcode artwork).
+                for path in zeron_engine::project_icon::ICON_PATHS {
                     // This also resolves the current checkout identity on the owning host.
                     let file = match client
                         .read_file(zeron_proto::ReadWorkspaceFileRequest {
