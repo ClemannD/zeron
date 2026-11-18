@@ -11365,6 +11365,11 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
+        // One image-cache frame per window frame: an override transcript
+        // renders in the same frame, so only the main one advances it.
+        if self.doc_override.is_none() {
+            crate::attachments::begin_image_frame();
+        }
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         if self.compact_mode != compact_mode {
             self.compact_mode = compact_mode;

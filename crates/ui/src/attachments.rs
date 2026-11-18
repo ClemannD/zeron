@@ -881,6 +881,8 @@ enum CacheEntry {
         image: CachedAttachmentImage,
         bytes: usize,
         last_used: u64,
+        /// The last [`ImageCache::frame`] that drew it (or stored it).
+        seen_frame: u64,
     },
     Error {
         attempts: u32,
@@ -935,6 +937,12 @@ struct ImageCache {
     tick: u64,
     loaded_bytes: usize,
     generated_bytes: usize,
+    /// Advanced once per transcript frame ([`begin_image_frame`]). An image
+    /// drawn in the current or previous frame is on screen and is never
+    /// evicted: when the images on screen alone are over budget, evicting
+    /// one blanks it to "Loading", its reload evicts the next, and the rows
+    /// flicker between the two forever.
+    frame: u64,
     /// Evicted images awaiting `flush_evicted` (freeing needs `&mut App`,
     /// which eviction sites — async load completions — don't always have).
     pending_free: Vec<Arc<Image>>,
@@ -953,12 +961,15 @@ impl ImageCache {
             .saturating_add(pixels.saturating_mul(8));
         let generated = key.raster_mime.is_some();
         self.tick += 1;
+        // A just-stored image counts as drawn this frame: a sibling load
+        // landing before the next frame must not evict it unseen.
         if let Some(CacheEntry::Loaded { image, bytes, .. }) = self.map.insert(
             key.clone(),
             CacheEntry::Loaded {
                 image,
                 bytes,
                 last_used: self.tick,
+                seen_frame: self.frame,
             },
         ) {
             self.loaded_bytes = self.loaded_bytes.saturating_sub(bytes);
@@ -971,26 +982,44 @@ impl ImageCache {
         if generated {
             self.generated_bytes = self.generated_bytes.saturating_add(bytes);
         }
-        let shielded = protected().lock().unwrap().clone();
+        self.trim(generated, Some(&key));
+    }
+
+    /// Evict least-recently-used images until the `generated` (or legacy)
+    /// budget fits, sparing `keep`, shielded attachments, and anything on
+    /// screen. What is on screen stays even over budget; it becomes
+    /// evictable once it has been off screen for a frame.
+    fn trim(&mut self, generated: bool, keep: Option<&AttachmentKey>) {
         // Separate budgets prevent protected legacy attachments from repeatedly
         // evicting visible generated previews, or vice versa.
-        while (if generated {
-            self.generated_bytes
-        } else {
-            self.loaded_bytes.saturating_sub(self.generated_bytes)
-        }) > IMAGE_CACHE_BUDGET_BYTES
-        {
+        let over = |cache: &Self| {
+            (if generated {
+                cache.generated_bytes
+            } else {
+                cache.loaded_bytes.saturating_sub(cache.generated_bytes)
+            }) > IMAGE_CACHE_BUDGET_BYTES
+        };
+        if !over(self) {
+            return;
+        }
+        let shielded = protected().lock().unwrap().clone();
+        let frame = self.frame;
+        while over(self) {
             let oldest = self
                 .map
                 .iter()
                 .filter(|(k, _)| {
-                    **k != key
+                    Some(*k) != keep
                         && k.raster_mime.is_some() == generated
                         && (k.raster_mime.is_some()
                             || !shielded.contains(&(k.device.clone(), k.path.clone())))
                 })
                 .filter_map(|(k, e)| match e {
-                    CacheEntry::Loaded { last_used, .. } => Some((*last_used, k.clone())),
+                    CacheEntry::Loaded {
+                        last_used,
+                        seen_frame,
+                        ..
+                    } if seen_frame.saturating_add(1) < frame => Some((*last_used, k.clone())),
                     _ => None,
                 })
                 .min_by_key(|(tick, _)| *tick);
@@ -1009,6 +1038,16 @@ impl ImageCache {
 fn cache() -> &'static Mutex<ImageCache> {
     static CACHE: OnceLock<Mutex<ImageCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(ImageCache::default()))
+}
+
+/// Start a transcript frame: images not drawn in the last one become
+/// evictable again, and any over budget go now (see [`ImageCache::frame`]).
+/// Called once per frame by the main transcript, before its rows render.
+pub(crate) fn begin_image_frame() {
+    let mut cache = cache().lock().unwrap();
+    cache.frame += 1;
+    cache.trim(true, None);
+    cache.trim(false, None);
 }
 
 /// Keys shielded from LRU eviction — the open transcript's attachments. The
@@ -1043,11 +1082,16 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
         cache.tick += 1;
         cache.tick
     };
+    let frame = cache.frame;
     match cache.map.get_mut(source) {
         Some(CacheEntry::Loaded {
-            image, last_used, ..
+            image,
+            last_used,
+            seen_frame,
+            ..
         }) => {
             *last_used = tick;
+            *seen_frame = frame;
             AttachmentSnapshot::Loaded(image.clone())
         }
         Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
@@ -1742,6 +1786,8 @@ mod generated_image_tests {
         // Cache accounting reads only IHDR. No large allocations are needed
         // to exercise the production eviction policy across a long history.
         for i in 0..100 {
+            // Each image is drawn in its own frames, then scrolled away.
+            cache.frame += 2;
             let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
             bytes.extend_from_slice(&2048_u32.to_be_bytes());
             bytes.extend_from_slice(&2048_u32.to_be_bytes());
@@ -1766,6 +1812,51 @@ mod generated_image_tests {
             "/99.png",
             Some("image/png")
         )));
+    }
+
+    /// Three 2048 px screenshots on screen together are over budget. Each
+    /// load used to evict another visible one, which reloaded and evicted the
+    /// next: the rows flickered between "Loading image…" and the image.
+    #[test]
+    fn generated_images_on_screen_are_not_evicted_over_budget() {
+        let mut cache = ImageCache::default();
+        let key = |i: usize| AttachmentKey::new("on-screen", &format!("/{i}.png"), Some("image/png"));
+        let image = || {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            bytes.extend_from_slice(&2048_u32.to_be_bytes());
+            bytes.extend_from_slice(&1440_u32.to_be_bytes());
+            CachedAttachmentImage {
+                name: "shot.png".into(),
+                image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+            }
+        };
+        let draw = |cache: &mut ImageCache, keys: &[usize]| {
+            cache.frame += 1;
+            cache.trim(true, None);
+            for &i in keys {
+                if let Some(CacheEntry::Loaded { seen_frame, .. }) = cache.map.get_mut(&key(i)) {
+                    *seen_frame = cache.frame;
+                }
+            }
+        };
+        draw(&mut cache, &[]);
+        for i in 0..3 {
+            cache.insert_loaded(key(i), image());
+        }
+        for _ in 0..3 {
+            draw(&mut cache, &[0, 1, 2]);
+        }
+        assert!(cache.generated_bytes > IMAGE_CACHE_BUDGET_BYTES);
+        assert!((0..3).all(|i| cache.map.contains_key(&key(i))));
+        assert!(cache.pending_free.is_empty());
+
+        // Scrolled to the third alone: the others go once they've been off
+        // screen for a frame.
+        draw(&mut cache, &[2]);
+        assert!((0..3).all(|i| cache.map.contains_key(&key(i))));
+        draw(&mut cache, &[2]);
+        assert!(cache.generated_bytes <= IMAGE_CACHE_BUDGET_BYTES);
+        assert!(cache.map.contains_key(&key(2)));
     }
 
     #[test]
