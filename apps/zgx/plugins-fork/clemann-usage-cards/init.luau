@@ -103,7 +103,16 @@ local function meter(w: any): Node
 		gap = "$space.2",
 		items = "center",
 		ui.text { w.label or "", w = 52, shrink = 0, truncate = true, text_size = "$font.size.xs", color = "$text.tertiary" },
-		ui.div { grow = 1, min_w = 0, Progress.ProgressBar { value = used / 100 } },
+		ui.div {
+			grow = 1,
+			min_w = 0,
+			Progress.ProgressBar {
+				value = function(): number?
+					return used / 100
+				end,
+				tone = if used >= 90 then "danger" elseif used >= 75 then "warning" else "accent",
+			},
+		},
 		ui.text {
 			string.format("%d%%", math.floor(used + 0.5)),
 			w = 34,
@@ -145,7 +154,7 @@ end
 
 -- The cards, for every window of this plugin: read once, then as Zeron
 -- says usage changed, and each minute (reset times move on).
-local shown = ui.state({} :: { any })
+local shown = ui.state("clemann_usage_cards", {} :: { any })
 local function load()
 	zeron.usage():after(function(got: any)
 		shown:set(cards(got or {}))

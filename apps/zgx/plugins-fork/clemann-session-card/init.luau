@@ -13,7 +13,7 @@ local zeron = require("./zeron")("clemann-session-card")
 
 local Glass = require("@ds/glass")
 local Icon = require("@ds/icon")
-local IconButton = require("@ds/icon_button")
+local IconButton = require("@ds/icon_button").IconButton
 local PanelHome = require("@ds/panel_home")
 
 local CALL = "plugin.clemann-session-card.fork_card"
@@ -53,10 +53,26 @@ end
 
 local function message(err: any): string
 	local m = if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
-	if string.find(m, "fork_card", 1, true) then
-		return "This Zeron build has no session card bridge"
+	if string.find(m, "fork_card", 1, true) or m == "no_bridge" then
+		return "Update Zeron for branch changes and npm scripts"
 	end
 	return m
+end
+
+-- The bridge, as a promise; a build without it refuses the call up front,
+-- which fails the promise instead of the card.
+local function call(arg: { [string]: any }): any
+	local ok, promise = pcall(ui.call, CALL, arg)
+	if ok then
+		return promise
+	end
+	return {
+		after = function(_self: any, _done: any, failed: ((any) -> ())?)
+			if failed then
+				failed({ message = "no_bridge" })
+			end
+		end,
+	}
 end
 
 -- A glyph that follows `name()`, for a row's icon.
@@ -79,7 +95,7 @@ zeron.place {
 		local all_open = ui.use_state(false)
 
 		local function load()
-			ui.call(CALL, { op = "info", session = id, device = record().device }):after(function(v: any)
+			call({ op = "info", session = id, device = record().device }):after(function(v: any)
 				info:set(v)
 				failed:set(nil)
 			end, function(err: any)
@@ -101,7 +117,7 @@ zeron.place {
 				zeron.toast("This chat has no project to run scripts in")
 				return
 			end
-			ui.call(CALL, { op = "run", session = id, project = r.project, device = r.device, script = name })
+			call({ op = "run", session = id, project = r.project, device = r.device, script = name })
 				:after(function() end, function(err: any)
 					zeron.toast(message(err))
 				end)
@@ -296,16 +312,24 @@ zeron.place {
 			end },
 		}
 
-		return ui.div {
-			absolute = true,
-			top = 52,
-			right = 16,
-			ui.show(function(): boolean
-				return folded:get() ~= true
-			end, card),
-			ui.show(function(): boolean
-				return folded:get() == true
-			end, reopen),
+		-- A band across the page's top that the pointer passes through, the
+		-- card at its right end (Zeron draws what's placed here over the
+		-- page, so it floats over the transcript).
+		return ui.row {
+			w_full = true,
+			justify = "end",
+			pt = "$space.2",
+			pr = "$space.4",
+			pointer_events = "none",
+			ui.column {
+				pointer_events = "auto",
+				ui.show(function(): boolean
+					return folded:get() ~= true
+				end, card),
+				ui.show(function(): boolean
+					return folded:get() == true
+				end, reopen),
+			},
 		}
 	end,
 }
