@@ -7,5 +7,15 @@
     "ui.add",
     "sessions.read"
   ],
-  "version": "0.1.0"
+  "signature": {
+    "files": {
+      "README.md": "f4d9566bc41a287d153af80c1e09ee6001009f02b4ac6f22f74f9420b468ccc9",
+      "init.luau": "eb9d90c2f2e6172ad006e4c18dd836e9dcd3bfac93eed3985519205786b4ebe8",
+      "locales/en.json": "b2b0f2201f9570d82660dc3ff8f21de283df00c9f9fc8711daaa378cce1812c5",
+      "zeron.luau": "178b79b55566c9643b26181539b8e1348482179a169da98ba384cd66f3f8a483"
+    },
+    "key": "w0vfh6Iek1CbDMkK4sdEZByoJCG0wPAnlHxiTcbh260",
+    "sig": "BV8nHmtWQabPcHbj1TvxQzKklRDDVetU4xOayEfVfFV6fTpSn5dxiXY430k0VFgqfvWcnoVEHiGTf9rKoCMACg"
+  },
+  "version": "0.2.0"
 }

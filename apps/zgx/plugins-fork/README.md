@@ -15,11 +15,27 @@ terminal tab) and the engine's `crates/engine/src/rpc/fork_session_card.rs`
 
 ## Installing on a Mac
 
-Plugins live in the app's data dir, not the bundle. From an agent with
-Zeron's MCP tools, `create_plugin` with the id, name and permissions in the
-manifest, then copy `init.luau` over the scaffold's; Zeron signs it as yours
-and reloads it. Allow it once in Zeron. For another Mac, `export_plugin` there
-or here and install the `.zeron-plugin` file.
+Each plugin's folder here is the signed copy (manifest, signature, the SDK
+it was signed with), so Zeron can install it straight from GitHub. In
+Settings → Plugins (choose the device at the top for another Mac), Install
+from a link, and paste:
 
-The installed copy (`~/.zeron/plugins/<id>/`) is what runs: copy changes back
-here after editing it.
+- `https://github.com/ClemannD/zeron/tree/main/apps/zgx/plugins-fork/clemann-usage-cards`
+- `https://github.com/ClemannD/zeron/tree/main/apps/zgx/plugins-fork/clemann-session-card`
+
+Allow it on that Mac when it asks. Zeron then offers updates from the same
+link (Settings → Plugins, or `update_plugin`) whenever the version here is
+higher and the same key signed it.
+
+## Changing a plugin
+
+Edit the installed copy on the Mac that signs them (`~/.zeron/plugins/<id>/`):
+Zeron re-signs it on save. Bump `version` in its `zeron-plugin.json` for
+other Macs to see an update, then copy the whole folder back here, exactly
+(Zeron checks every file against the signature):
+
+    rsync -a --delete --exclude '.*' ~/.zeron/plugins/<id>/ apps/zgx/plugins-fork/<id>/
+
+The session card needs a fork build with the bridge (0.3.15.23 or later);
+the usage cards need 0.3.15.24 or later to hide providers you've switched
+off (older builds show every provider with usage).

@@ -31,11 +31,12 @@ local function rank(provider: string): number
 	return #ORDER + 1
 end
 
--- Each provider's active account that has meters to show, in order.
-local function cards(list: { any }): { any }
+-- Each provider's active account that has meters to show, in order: of
+-- the providers switched on here (`on`, by id), or all when that's unknown.
+local function cards(list: { any }, on: { [string]: boolean }?): { any }
 	local out = {}
 	for _, a in list do
-		if a.active and type(a.windows) == "table" and #a.windows > 0 then
+		if a.active and type(a.windows) == "table" and #a.windows > 0 and (on == nil or on[a.provider]) then
 			table.insert(out, a)
 		end
 	end
@@ -164,10 +165,31 @@ end
 -- The cards, for every window of this plugin: read once, then as Zeron
 -- says usage changed, and each minute (reset times move on).
 local shown = ui.state("clemann_usage_cards", {} :: { any })
+-- The providers switched on and installed here, through the fork's bridge
+-- (src/plugins/fork_bridge.rs); nil from a build without it.
+local function providers(done: ({ [string]: boolean }?) -> ())
+	local ok, promise = pcall(ui.call, "plugin.clemann-usage-cards.fork_card", { op = "providers" })
+	if not ok then
+		done(nil)
+		return
+	end
+	promise:after(function(list: any)
+		local on = {}
+		for _, p in list or {} do
+			on[p.id] = true
+		end
+		done(on)
+	end, function()
+		done(nil)
+	end)
+end
+
 local function load()
-	zeron.usage():after(function(got: any)
-		shown:set(cards(got or {}))
-	end, function() end)
+	providers(function(on)
+		zeron.usage():after(function(got: any)
+			shown:set(cards(got or {}, on))
+		end, function() end)
+	end)
 end
 load()
 zeron.on("usage.changed", function()
