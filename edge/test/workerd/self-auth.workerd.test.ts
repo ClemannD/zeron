@@ -11,7 +11,9 @@ import { describe, expect, it } from "vitest";
 import { authenticate } from "../../src/auth";
 import { handleAuthRoute } from "../../src/auth-routes";
 import type { Env } from "../../src/env";
-import { allowedRedirect, handleSelfAuthRoute } from "../../src/self-auth/routes";
+import { handleUsernameRoute } from "../../src/card-routes";
+import { handleOnboardingRoute } from "../../src/onboarding-routes";
+import { allowedRedirect, ensureDirectoryUser, handleSelfAuthRoute } from "../../src/self-auth/routes";
 import { createFakePasskey, type FakePasskey } from "./passkey-fake";
 
 const ORIGIN = "https://zeron.example.test";
@@ -170,6 +172,30 @@ describe("self-hosted auth", () => {
     ownerSession = { ...ownerSession, ...next };
     const foreign = await refresh(ownerSession.refreshToken, "org_not_mine");
     expect(foreign.status).toBe(401);
+  });
+
+  it("adds a signed-in user to the user directory, so they can claim a username and finish onboarding", async () => {
+    const auth = { authorization: `Bearer ${ownerSession.accessToken}` };
+    // As index.ts routes a bearer request: the directory sync, then the routes.
+    const routed = async (method: string, path: string, body?: unknown) => {
+      const req = request(method, path, body, auth);
+      const url = new URL(req.url);
+      const verified = (await authenticate(selfEnv, req))!;
+      await ensureDirectoryUser(selfEnv, verified, url);
+      const res = (await handleUsernameRoute(req, selfEnv, verified, url)) ?? (await handleOnboardingRoute(req, selfEnv, verified, url));
+      if (!res) throw new Error(`unrouted: ${method} ${path}`);
+      return res;
+    };
+    const check = await routed("GET", "/username/check?username=ada");
+    expect(check.status).toBe(200);
+    expect(await jsonOf<{ available: boolean }>(check)).toEqual({ available: true });
+    const claim = await routed("POST", "/username", { username: "ada" });
+    expect(claim.status).toBe(200);
+    expect(await jsonOf<{ username: string }>(await routed("GET", "/username"))).toEqual({ username: "ada" });
+    const done = await routed("POST", "/onboarding", { done: ["welcome"] });
+    expect(done.status).toBe(200);
+    // A second pass finds the row already there and changes nothing.
+    expect((await routed("GET", "/username")).status).toBe(200);
   });
 
   it("rotates refresh tokens, tolerates a quick retry, and revokes the session on late reuse", async () => {

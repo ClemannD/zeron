@@ -15,7 +15,9 @@
  * `/auth/exchange`, `/auth/refresh` and `/auth/orgs` keep their WorkOS-era
  * wire shapes and dispatch here from auth-routes.ts (see `selfDirectory`).
  */
+import type { Verified } from "../auth";
 import type { Env } from "../env";
+import { userDirectoryStub } from "../user-directory";
 import { AUTH_DIRECTORY_NAME, type AuthDirectory, type RelyingParty, type Result } from "./directory";
 import { signInPage } from "./page";
 import { secretEquals } from "./tokens";
@@ -44,6 +46,24 @@ export const selfAuthEnabled = (env: Pick<Env, "AUTH_MODE">): boolean => env.AUT
 export const selfDirectory = (env: Env): DurableObjectStub<AuthDirectory> | undefined => {
   if (!env.AUTH_DIRECTORY) return undefined;
   return env.AUTH_DIRECTORY.get(env.AUTH_DIRECTORY.idFromName(AUTH_DIRECTORY_NAME));
+};
+
+/**
+ * Upstream's UserDirectory (usernames, onboarding, member cards) learns of
+ * users from WorkOS webhooks, which a self-hosted edge never gets. Before a
+ * route that needs the caller's row, add it from our own directory. A read
+ * when the row is there already; a write only the first time.
+ */
+export const ensureDirectoryUser = async (env: Env, auth: Verified, url: URL): Promise<void> => {
+  if (!selfAuthEnabled(env) || auth.kind !== "user") return;
+  const first = url.pathname.split("/").filter(Boolean)[0];
+  if (first !== "username" && first !== "onboarding") return;
+  const users = userDirectoryStub(env);
+  const self = selfDirectory(env);
+  if (!users || !self) return;
+  if (Object.keys(await users.profiles([auth.userId])).length > 0) return;
+  const record = await self.directoryRecord(auth.userId);
+  if (record) await users.upsert(record);
 };
 
 export const resultResponse = <T>(result: Result<T>): Response =>

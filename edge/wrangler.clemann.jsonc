@@ -5,9 +5,10 @@
   //   - AUTH_MODE=self: this edge is its own identity provider (passkeys,
   //     src/self-auth/) instead of WorkOS;
   //   - no Stripe, no staging, no zeron.sh routes;
-  //   - none of upstream's WorkOS user directory (USER_DIRECTORY, webhooks)
-  //     or member cards (CARD_IMAGES, CARD_READS, BROWSER, static assets):
-  //     unbound, those routes answer 404/503;
+  //   - upstream's user directory (USER_DIRECTORY: usernames, onboarding)
+  //     is fed by self-auth instead of WorkOS webhooks; member card images
+  //     and pages (CARD_IMAGES, CARD_READS, BROWSER, static assets) stay
+  //     unbound and answer 404/503;
   //   - its own R2 bucket names (fresh account, nothing to keep).
   // Deploy (vault first): `npx wrangler deploy -c wrangler.clemann.jsonc`.
   // Keep bindings and migrations in step with wrangler.jsonc on upstream
@@ -47,7 +48,10 @@
       { "name": "CLOUD_ACCOUNTS", "class_name": "CloudAccount" },
       { "name": "CLOUD_INDEX", "class_name": "CloudIndex" },
       // auth1 — users, passkeys, orgs, sessions (src/self-auth/directory.ts).
-      { "name": "AUTH_DIRECTORY", "class_name": "AuthDirectory" }
+      { "name": "AUTH_DIRECTORY", "class_name": "AuthDirectory" },
+      // users1 — usernames, onboarding, member cards (user-directory.ts).
+      // Fed from AUTH_DIRECTORY, not WorkOS webhooks (ensureDirectoryUser).
+      { "name": "USER_DIRECTORY", "class_name": "UserDirectory" }
     ]
   },
   "migrations": [
@@ -56,7 +60,9 @@
     { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
     { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
     { "tag": "v5", "new_sqlite_classes": ["CloudAccount", "CloudIndex"] },
-    { "tag": "self-auth-v1", "new_sqlite_classes": ["AuthDirectory"] }
+    { "tag": "self-auth-v1", "new_sqlite_classes": ["AuthDirectory"] },
+    // Upstream's v6, appended after ours.
+    { "tag": "v6", "new_sqlite_classes": ["UserDirectory"] }
   ],
   "workflows": [
     { "name": "zeron-cloud-provision", "binding": "CLOUD_PROVISION", "class_name": "ProvisionWorkflow" },

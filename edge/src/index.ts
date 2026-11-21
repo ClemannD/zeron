@@ -79,7 +79,7 @@ import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
 import { AuthDirectory } from "./self-auth/directory";
-import { handleSelfAuthRoute } from "./self-auth/routes";
+import { ensureDirectoryUser, handleSelfAuthRoute } from "./self-auth/routes";
 import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
 import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
@@ -215,6 +215,7 @@ export default {
       return fake instanceof FakeProvider ? json({ sandboxes: fake.snapshot() }) : json({ error: "not_found" }, 404);
     }
 
+    await ensureDirectoryUser(env, auth, url); // fork: self-auth users in the user directory
     const usernameRouted = await handleUsernameRoute(request, env, auth, url);
     if (usernameRouted) return usernameRouted;
     const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);

@@ -18,6 +18,7 @@
  * so a single instance is not a hotspot for a personal deployment.
  */
 import { DurableObject } from "cloudflare:workers";
+import type { WorkOsUser } from "../user-directory";
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -154,6 +155,28 @@ export class AuthDirectory extends DurableObject<Env> {
 
   private userCount(): number {
     return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM users").one().n;
+  }
+
+  /** A user as upstream's UserDirectory records one (a WorkOS user's shape),
+   * so usernames, onboarding and cards work without WorkOS webhooks. */
+  directoryRecord(id: string): WorkOsUser | undefined {
+    const row = this.sql
+      .exec<{ id: string; email: string; first_name: string | null; last_name: string | null; created_at: number }>(
+        "SELECT id, email, first_name, last_name, created_at FROM users WHERE id = ?",
+        id
+      )
+      .toArray()[0];
+    if (!row) return undefined;
+    const at = new Date(row.created_at).toISOString();
+    return {
+      id: row.id,
+      email: row.email,
+      first_name: row.first_name,
+      last_name: row.last_name,
+      profile_picture_url: null,
+      created_at: at,
+      updated_at: at
+    };
   }
 
   private user(id: string): User | undefined {

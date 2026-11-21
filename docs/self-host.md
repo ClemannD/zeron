@@ -51,6 +51,13 @@ Self-auth answers token exchange, refresh and `GET`/`POST /auth/orgs`. The
 account settings routes (`/auth/me`, profile photo, members, invitations)
 are WorkOS-only and return 404 here, so those zgx Settings screens fail.
 
+Usernames and onboarding (zgx's first-run "claim your username") live in
+upstream's `UserDirectory` (`USER_DIRECTORY`, migration `v6`), which upstream
+fills from WorkOS webhooks. Here `ensureDirectoryUser`
+(`src/self-auth/routes.ts`) copies the signed-in user from `AUTH_DIRECTORY`
+before `/username` and `/onboarding` requests. Member card images and pages
+stay unbound.
+
 - **First account:** on the sign-in page, "Set up a passkey" with the
   `AUTH_SETUP_CODE`. The code stops working once any account exists.
 - **More passkeys / more people:** mint an invite and open its URL on the new
