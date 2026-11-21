@@ -10,11 +10,9 @@
 //! - New toasts rise in from below; dismissed ones fade away.
 //! - A toast is dismissed by swiping it off to the right.
 //!
-//! Push from anywhere with [`error`], [`success`] or [`info`] — or
-//! [`show_with_action`] for one with a button; the shell mounts
-//! [`render_toaster`] once per window.
+//! Push from anywhere with [`error`], [`success`] or [`info`]; the shell
+//! mounts [`render_toaster`] once per window.
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -46,10 +44,6 @@ pub enum ToastKind {
     Success,
     Info,
 }
-
-/// A live toast that can be updated as a background operation advances.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ToastId(u64);
 
 /// A value easing from one target to the next, restarting from wherever it
 /// is whenever the target moves.
@@ -93,19 +87,10 @@ impl Glide {
     }
 }
 
-/// A toast's one button: its label and what a click does (the toast then
-/// closes).
-#[derive(Clone)]
-struct ToastAction {
-    label: SharedString,
-    run: Rc<dyn Fn(&mut Window, &mut App)>,
-}
-
 struct Toast {
     id: u64,
     kind: ToastKind,
     message: SharedString,
-    action: Option<ToastAction>,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
     remaining: Duration,
@@ -117,8 +102,6 @@ struct Toast {
     clip: Option<Glide>,
     swipe: f32,
     swipe_from: Option<f32>,
-    /// Pending toasts stay visible until their owner finishes them.
-    pending: bool,
 }
 
 impl Toast {
@@ -162,19 +145,13 @@ struct ToastStore {
 
 impl Global for ToastStore {}
 
-fn push(
-    cx: &mut App,
-    kind: ToastKind,
-    message: SharedString,
-    action: Option<ToastAction>,
-) -> Option<ToastId> {
+fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
     let message: SharedString = message.trim().to_owned().into();
     if message.is_empty() {
-        return None;
+        return;
     }
     let now = Instant::now();
     let store = cx.default_global::<ToastStore>();
-    let id;
     // A repeat of the live front toast restarts it instead of stacking.
     if let Some(front) = store
         .toasts
@@ -186,16 +163,14 @@ fn push(
     {
         front.remaining = DURATION;
         front.resumed = (!store.hovered).then_some(now);
-        id = front.id;
     } else {
         store.next_id += 1;
-        id = store.next_id;
+        let id = store.next_id;
         let hovered = store.hovered;
         store.toasts.push(Toast {
             id,
             kind,
             message,
-            action,
             created: now,
             remaining: DURATION,
             resumed: (!hovered).then_some(now),
@@ -205,104 +180,29 @@ fn push(
             clip: None,
             swipe: 0.0,
             swipe_from: None,
-            pending: false,
         });
     }
     cx.refresh_windows();
-    Some(ToastId(id))
 }
 
 /// A toast of `kind`.
 pub fn show(cx: &mut App, kind: ToastKind, message: impl Into<SharedString>) {
-    push(cx, kind, message.into(), None);
-}
-
-/// A toast of `kind` with a button ("Add credits") that runs `run` in the
-/// window it was clicked in, then closes the toast.
-pub fn show_with_action(
-    cx: &mut App,
-    kind: ToastKind,
-    message: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    run: impl Fn(&mut Window, &mut App) + 'static,
-) {
-    push(
-        cx,
-        kind,
-        message.into(),
-        Some(ToastAction {
-            label: label.into(),
-            run: Rc::new(run),
-        }),
-    );
-}
-
-/// Show a toast that remains on screen until [`finish`] is called.
-pub fn pending(cx: &mut App, message: impl Into<SharedString>) -> ToastId {
-    let id = push(cx, ToastKind::Info, message.into(), None).expect("non-empty pending toast");
-    if let Some(toast) = cx
-        .global_mut::<ToastStore>()
-        .toasts
-        .iter_mut()
-        .find(|toast| toast.id == id.0)
-    {
-        toast.pending = true;
-        toast.resumed = None;
-    }
-    id
-}
-
-/// Replace a pending toast's message while keeping it visible.
-pub fn update(cx: &mut App, id: ToastId, message: impl Into<SharedString>) {
-    let message: SharedString = message.into().trim().to_owned().into();
-    if message.is_empty() {
-        return;
-    }
-    if let Some(toast) = cx
-        .global_mut::<ToastStore>()
-        .toasts
-        .iter_mut()
-        .find(|toast| toast.id == id.0 && toast.closing.is_none())
-    {
-        toast.message = message;
-        toast.height = 0.0;
-        cx.refresh_windows();
-    }
-}
-
-/// Complete a pending toast, changing its state and starting the normal expiry.
-pub fn finish(cx: &mut App, id: ToastId, kind: ToastKind, message: impl Into<SharedString>) {
-    let message: SharedString = message.into().trim().to_owned().into();
-    let hovered = cx.global::<ToastStore>().hovered;
-    if let Some(toast) = cx
-        .global_mut::<ToastStore>()
-        .toasts
-        .iter_mut()
-        .find(|toast| toast.id == id.0 && toast.closing.is_none())
-    {
-        toast.kind = kind;
-        toast.message = message;
-        toast.pending = false;
-        toast.remaining = DURATION;
-        toast.resumed = (!hovered).then_some(Instant::now());
-        toast.height = 0.0;
-        cx.refresh_windows();
-    }
+    push(cx, kind, message.into());
 }
 
 /// A failure toast.
 pub fn error(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Error, message.into(), None);
+    push(cx, ToastKind::Error, message.into());
 }
 
 /// A confirmation toast ("Link copied").
 pub fn success(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Success, message.into(), None);
+    push(cx, ToastKind::Success, message.into());
 }
 
 /// A neutral notice.
 pub fn info(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Info, message.into(), None);
+    push(cx, ToastKind::Info, message.into());
 }
 
 /// Surface a view's pending error as a toast, once: takes it out of `slot`.
@@ -352,9 +252,6 @@ fn set_hovered(hovered: bool, cx: &mut App) {
     }
     store.hovered = hovered;
     for toast in &mut store.toasts {
-        if toast.pending {
-            continue;
-        }
         if hovered {
             toast.pause(now);
         } else {
@@ -369,9 +266,6 @@ fn set_hovered(hovered: bool, cx: &mut App) {
 fn tick(store: &mut ToastStore, active: bool, now: Instant) -> bool {
     let paused = store.hovered || !active;
     for toast in &mut store.toasts {
-        if toast.pending {
-            continue;
-        }
         if paused {
             toast.pause(now);
         } else {
@@ -564,7 +458,6 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         }
         let kind = toast.kind;
         let message = toast.message.clone();
-        let action = toast.action.clone();
         let content = div()
             .id(("toast-content", id as usize))
             .w_full()
@@ -578,35 +471,6 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             .text_color(theme.text)
             .child(kind_icon(kind, &theme))
             .child(div().flex_1().min_w_0().child(message.clone()))
-            .children(action.map(|action| {
-                let run = action.run.clone();
-                // Sonner's action button: a small filled chip in the text
-                // color.
-                div()
-                    .id(("toast-action", id as usize))
-                    .role(gpui::Role::Button)
-                    .aria_label(action.label.clone())
-                    .flex_none()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .bg(theme.text)
-                    .text_color(theme.bg)
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .hover(|style| style.opacity(0.85))
-                    // Not the start of a swipe.
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        run(window, cx);
-                        dismiss(id, cx);
-                    })
-                    .child(action.label)
-            }))
             .child(
                 // Measure the natural height for the stack's layout.
                 gpui::canvas(
@@ -768,7 +632,6 @@ mod tests {
             id: store.next_id,
             kind: ToastKind::Error,
             message: message.to_owned().into(),
-            action: None,
             created: now,
             remaining: DURATION,
             resumed: Some(now),
@@ -778,7 +641,6 @@ mod tests {
             clip: None,
             swipe: 0.0,
             swipe_from: None,
-            pending: false,
         });
     }
 
@@ -808,20 +670,6 @@ mod tests {
         assert!(store.toasts.is_empty(), "removed after its exit");
     }
 
-    #[test]
-    fn pending_toast_does_not_expire_until_finished() {
-        let start = Instant::now();
-        let mut store = ToastStore::default();
-        toast(&mut store, "working", start);
-        store.toasts[0].pending = true;
-        tick(&mut store, true, start + Duration::from_secs(60));
-        assert!(store.toasts[0].closing.is_none());
-        store.toasts[0].pending = false;
-        store.toasts[0].resumed = Some(start + Duration::from_secs(60));
-        tick(&mut store, true, start + Duration::from_secs(65));
-        assert!(store.toasts[0].closing.is_some());
-    }
-
     struct Host;
 
     impl gpui::Render for Host {
@@ -847,31 +695,6 @@ mod tests {
         let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[1].id);
         cx.update(|_, cx| dismiss(id, cx));
         cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't save"]));
-    }
-
-    #[gpui::test]
-    fn action_runs_in_the_window_and_closes_its_toast(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| Host);
-        let clicked = Rc::new(std::cell::Cell::new(false));
-        let seen = clicked.clone();
-        cx.update(|_, cx| {
-            show_with_action(cx, ToastKind::Error, "Out of credits", "Add credits", move |_, _| {
-                seen.set(true)
-            });
-        });
-        cx.run_until_parked();
-        let (id, action) = cx.update(|_, cx| {
-            let toast = &cx.global::<ToastStore>().toasts[0];
-            (toast.id, toast.action.clone().expect("has a button"))
-        });
-        assert_eq!(action.label, "Add credits");
-        cx.update(|window, cx| {
-            (action.run)(window, cx);
-            dismiss(id, cx);
-        });
-        assert!(clicked.get());
-        cx.update(|_, cx| assert!(messages(cx).is_empty()));
     }
 
     #[test]

@@ -63,7 +63,6 @@ pub mod heap;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
-pub mod package_scripts;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;

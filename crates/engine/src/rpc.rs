@@ -306,13 +306,6 @@ struct DiscardWorkingTreeParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListPackageScriptsParams {
-    space_id: String,
-    chat_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ListProjectActionsParams {
     space_id: String,
 }
@@ -360,7 +353,6 @@ struct StopWaitingParams {
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
-    #[serde(alias = "scriptName")]
     action_id: String,
     cols: u16,
     rows: u16,
@@ -1427,38 +1419,6 @@ impl EngineRpc {
         Ok(space)
     }
 
-    async fn project_action_checkout(
-        &self,
-        space: &Space,
-        chat_id: &str,
-    ) -> Result<std::path::PathBuf, RpcError> {
-        let chat = self
-            .workspace
-            .chat(chat_id)
-            .map_err(|err| RpcError::Failed(err.to_string()))?
-            .ok_or_else(|| RpcError::Failed("Project chat not found".into()))?;
-        if chat.device_id != self.doc_host.device_id() {
-            return Err(RpcError::Failed(
-                "Project chat belongs to another device".into(),
-            ));
-        }
-        if chat.space_id.as_deref() != Some(space.id.as_str()) {
-            return Err(RpcError::Failed(
-                "Project chat belongs to another space".into(),
-            ));
-        }
-        let cwd = chat
-            .cwd
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| RpcError::Failed("Project chat has no checkout".into()))?;
-        let checkout = self
-            .repos
-            .workspace_checkout(std::path::Path::new(&space.path), &cwd)
-            .await
-            .ok_or_else(|| RpcError::Failed("Project chat checkout is unavailable".into()))?;
-        Ok(checkout)
-    }
-
     /// Resolve a mention-search root from synced workspace rows. A client may
     /// name an existing linked worktree for a new chat, but it is verified
     /// against the space repository before any filesystem walk begins.
@@ -2485,7 +2445,6 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     match method {
         methods::CLONE_REPO
         | methods::FETCH_ALL
-        | methods::RESET_REPO_TO_BASE
         | methods::APPLY_UPDATE => Duration::from_secs(15 * 60),
         methods::INSTALL_HARNESS | methods::ADD_ACP_AGENT => Duration::from_secs(15 * 60),
         methods::LIST_ACP_REGISTRY => Duration::from_secs(60),
@@ -2601,7 +2560,6 @@ fn forwardable(method: &str) -> bool {
             | methods::RESOLVE_GIT_AVATARS
             | methods::FETCH_ALL
             | methods::SWITCH_REF
-            | methods::RESET_REPO_TO_BASE
             | methods::LIST_FOLDERS
             | methods::GET_WORKTREE_SETTINGS
             | methods::SET_WORKTREE_SETTINGS
@@ -2627,8 +2585,6 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
-            | methods::LIST_PACKAGE_SCRIPTS
-            | methods::RUN_PACKAGE_SCRIPT
             | methods::RUN_PROJECT_ACTION
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
@@ -2722,7 +2678,6 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
-            | methods::RESET_REPO_TO_BASE
             | methods::WATCH_PLUGINS
     )
 }
@@ -5266,44 +5221,6 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
             }
-            methods::RESET_REPO_TO_BASE => {
-                let p: RepoPathParams = parse_params(params)?;
-                let repos = self.repos.clone();
-                let diffs = self.diff_sync.clone();
-                let repo_path = std::path::PathBuf::from(p.repo_path);
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-                tokio::spawn(async move {
-                    let result = repos
-                        .reset_to_default_branch_with_progress(&repo_path, |progress| {
-                            let _ = tx.send(serde_json::json!({
-                                "kind": "progress",
-                                "message": progress.message,
-                                "complete": progress.complete,
-                            }));
-                        })
-                        .await;
-                    match result {
-                        Ok(result) => {
-                            // A branch change alters every checkout snapshot.
-                            diffs.sync_all();
-                            let _ = tx.send(serde_json::json!({
-                                "kind": "complete",
-                                "branch": result.branch,
-                                "stashed": result.stashed,
-                            }));
-                        }
-                        Err(error) => {
-                            let _ = tx.send(serde_json::json!({
-                                "kind": "error",
-                                "message": error.to_string(),
-                            }));
-                        }
-                    }
-                });
-                Ok(RpcReply::Stream(Box::pin(futures::stream::poll_fn(
-                    move |cx| rx.poll_recv(cx),
-                ))))
-            }
             methods::GET_WORKTREE_SETTINGS => RpcReply::value(&self.repos.worktree_settings()),
             methods::SET_WORKTREE_SETTINGS => {
                 let settings: zeron_proto::WorktreeSettings = parse_params(params)?;
@@ -5630,40 +5547,42 @@ impl RpcService for EngineRpc {
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
-            methods::LIST_PACKAGE_SCRIPTS => {
-                let p: ListPackageScriptsParams = parse_params(params)?;
-                let space = self.local_project_action_space(&p.space_id)?;
-                let checkout = self.project_action_checkout(&space, &p.chat_id).await?;
-                let scripts = tokio::task::spawn_blocking(move || {
-                    crate::package_scripts::read_package_scripts(&checkout)
-                })
-                .await
-                .map_err(|err| RpcError::Failed(err.to_string()))?
-                .map_err(|err| RpcError::Failed(err.to_string()))?;
-                RpcReply::value(&scripts)
-            }
-            methods::RUN_PROJECT_ACTION | methods::RUN_PACKAGE_SCRIPT => {
-                let package_script = method == methods::RUN_PACKAGE_SCRIPT;
+            methods::RUN_PROJECT_ACTION => {
                 let p: RunProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
-                let checkout = self.project_action_checkout(&space, &p.chat_id).await?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Project chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::Failed(
+                        "Project chat belongs to another device".into(),
+                    ));
+                }
+                if chat.space_id.as_deref() != Some(space.id.as_str()) {
+                    return Err(RpcError::Failed(
+                        "Project chat belongs to another space".into(),
+                    ));
+                }
+                let cwd = chat
+                    .cwd
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| RpcError::Failed("Project chat has no checkout".into()))?;
+                let checkout = self
+                    .repos
+                    .workspace_checkout(std::path::Path::new(&space.path), &cwd)
+                    .await
+                    .ok_or_else(|| {
+                        RpcError::Failed("Project chat checkout is unavailable".into())
+                    })?;
                 let project_root = std::fs::canonicalize(&space.path)
                     .map_err(|_| RpcError::Failed("Project root is unavailable".into()))?;
-                let action = if package_script {
-                    let name = p.action_id.clone();
-                    let checkout = checkout.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::package_scripts::package_script_action(&checkout, &name)
-                    })
-                    .await
+                let action = self
+                    .project_actions
+                    .action(&space.id, std::path::Path::new(&space.path), &p.action_id)
                     .map_err(|err| RpcError::Failed(err.to_string()))?
-                    .map_err(|err| RpcError::Failed(err.to_string()))?
-                } else {
-                    self.project_actions
-                        .action(&space.id, std::path::Path::new(&space.path), &p.action_id)
-                        .map_err(|err| RpcError::Failed(err.to_string()))?
-                        .ok_or_else(|| RpcError::Failed("Project action not found".into()))?
-                };
+                    .ok_or_else(|| RpcError::Failed("Project action not found".into()))?;
                 let run = crate::project_actions::launch_project_action(
                     &self.terminals,
                     &action,
@@ -6809,8 +6728,6 @@ mod tests {
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
-        assert!(forwardable(methods::RESET_REPO_TO_BASE));
-        assert!(is_stream_method(methods::RESET_REPO_TO_BASE));
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
@@ -6885,7 +6802,7 @@ mod tests {
         );
         assert!(
             service
-                .handle(methods::AUTH_STATUS, serde_json::json!({}))
+            .handle(methods::AUTH_STATUS, serde_json::json!({}))
                 .await
                 .is_ok()
         );
