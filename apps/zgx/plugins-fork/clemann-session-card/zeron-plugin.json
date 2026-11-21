@@ -1,0 +1,11 @@
+{
+  "description": "A floating card on a chat: where it runs, its branch's changes, and its project's npm scripts.",
+  "entry": "init.luau",
+  "id": "clemann-session-card",
+  "name": "Session card",
+  "permissions": [
+    "ui.add",
+    "sessions.read"
+  ],
+  "version": "0.1.0"
+}

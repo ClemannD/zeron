@@ -57,6 +57,7 @@ pub mod host_bar;
 pub mod locales;
 pub mod network;
 pub mod plugin_menus;
+mod fork_bridge; // fork: the session card plugin's calls
 
 use std::{
     cell::{Cell, RefCell},
@@ -351,6 +352,7 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
     }
     // What's behind a token an element gave it, as its records allow.
     tokens::serve(host, id, &host.shared(&format!("plugin.{id}.records"), Value::Nil));
+    fork_bridge::expose_own(host, id); // fork
 }
 
 /// The plugin watches on connection `rpc`. The engine answers them (and
@@ -2215,6 +2217,7 @@ impl Bridge {
         }
         let plugin = id.to_string();
         let me = Rc::downgrade(&self.me());
+        self.expose_fork(id); // fork: plugins/fork_bridge.rs
         host.action(format!("plugin.{id}.result"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |answer| {

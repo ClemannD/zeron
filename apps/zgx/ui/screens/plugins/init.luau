@@ -361,6 +361,8 @@ local function run(r: any)
 		if ok and type(Panel) == "table" and Panel.open_plugin_tab then
 			Panel.open_plugin_tab(r.value.session, r.value)
 		end
+	elseif r.kind == "fork_terminal" and type(r.value) == "table" then
+		require("@app/screens/panel/fork_terminal").open(r.value) -- fork
 	elseif r.kind == "link" and type(r.value) == "string" then
 		-- A plugin's link (the host checked "links.open" and that it's a web
 		-- link): where Zeron opens links, never back into a plugin's tab (the

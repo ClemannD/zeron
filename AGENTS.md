@@ -78,6 +78,15 @@ fork's traffic to WorkOS.
   is in `apps/zgx/src/files/fork_artwork.rs`; upstream's `apps/zgx/src/files.rs`
   carries only `mod fork_artwork;` and one call at the top of `artwork()`.
   Keep both if an upstream merge touches that file.
+- **The session card plugin's bridge** gives one plugin,
+  `clemann-session-card` (`apps/zgx/plugins-fork/`), calls the plugin API
+  lacks: `apps/zgx/src/plugins/fork_bridge.rs`, `apps/zgx/ui/screens/panel/fork_terminal.luau`
+  and `crates/engine/src/rpc/fork_session_card.rs`. Upstream files carry only
+  hooks: `mod fork_bridge;`, one line each in `expose_own` and `expose` in
+  `apps/zgx/src/plugins/mod.rs`, a `fork_terminal` branch in
+  `apps/zgx/ui/screens/plugins/init.luau`, and in `crates/engine/src/rpc.rs`
+  `mod fork_session_card;`, a `forwardable` check and a dispatch before the
+  main `match`. Keep them on upstream merges.
 - **Desktop customisations are zgx plugins, not fork patches.** The GPUI app
   (`crates/ui`) is gone upstream. Don't re-fork the interface; build features
   as plugins (`apps/zgx/docs/plugins.md`). The pre-reset fork, with its

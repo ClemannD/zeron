@@ -61,6 +61,7 @@
 
 mod agent_gate;
 mod device_stats;
+mod fork_session_card; // fork: the session card plugin's calls
 mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
@@ -2691,7 +2692,7 @@ fn warm_signed_out(
 }
 
 fn forwardable(method: &str) -> bool {
-    if voice_remote::handles(method) {
+    if voice_remote::handles(method) || fork_session_card::forwardable(method) {
         return true;
     }
     matches!(
@@ -3574,6 +3575,9 @@ impl RpcService for EngineRpc {
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
+        }
+        if let Some(reply) = self.fork_session_card(method, &params).await {
+            return reply; // fork: rpc/fork_session_card.rs
         }
         // Signing out retires this device's plugin signing key first, while
         // the session can still revoke it on the edge.

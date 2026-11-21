@@ -1,0 +1,11 @@
+{
+  "description": "Your agents' plan usage at the foot of the sidebar.",
+  "entry": "init.luau",
+  "id": "clemann-usage-cards",
+  "name": "Usage cards",
+  "permissions": [
+    "ui.add",
+    "usage.read"
+  ],
+  "version": "0.1.0"
+}
