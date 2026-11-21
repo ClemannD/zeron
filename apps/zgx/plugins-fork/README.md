@@ -5,7 +5,7 @@ fork used to carry as patches to the old GPUI app.
 
 | Plugin | What it does | Needs the fork build? |
 | --- | --- | --- |
-| `clemann-usage-cards` | Plan usage cards at the foot of the sidebar (`zeron.usage`) | No: plain plugin API |
+| `clemann-usage-cards` | Plan usage cards at the foot of the sidebar for the device the chat in front runs on (`zeron.usage { device }`); needs the plugin, same version, allowed on that device too | 0.3.15.25+ to hide switched-off providers |
 | `clemann-session-card` | The floating session card: device, project, branch `+N −M`, and the project's npm scripts, pinnable to the card | Yes: it calls `plugin.clemann-session-card.fork_card` |
 
 The session card's bridge is `apps/zgx/src/plugins/fork_bridge.rs` (served

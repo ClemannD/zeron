@@ -10,9 +10,10 @@
 //!       npm script `script` in a terminal tab of the session's panel, as a
 //!       run action opens one (ui/screens/panel/fork_terminal.luau): the
 //!       engine resolves the name again and runs it in the chat's checkout.
-//!   `plugin.<id>.fork_card { op = "providers" }` (the usage cards)
-//!       the agents switched on and installed on this device, as Settings →
-//!       Providers lists them: `{ id }` (the engine's `ListHarnesses`).
+//!   `plugin.<id>.fork_card { op = "providers", device? }` (the usage cards)
+//!       the agents switched on and installed on that device (this one
+//!       without it), as Settings → Providers lists them: `{ id }` (the
+//!       engine's `ListHarnesses`).
 //!
 //! Kept in its own file so plugins/mod.rs carries only the hooks.
 
@@ -60,7 +61,11 @@ impl Bridge {
                     return Err(format!("unknown op {op}"));
                 }
                 if op == "providers" {
-                    let list = crate::engine::get().call("ListHarnesses", json!({})).await?;
+                    let mut params = json!({});
+                    if let Some(device) = crate::files::route_to(field("device")).await {
+                        params["targetDeviceId"] = json!(device);
+                    }
+                    let list = crate::engine::get().call("ListHarnesses", params).await?;
                     let on: Vec<_> = list
                         .as_array()
                         .into_iter()

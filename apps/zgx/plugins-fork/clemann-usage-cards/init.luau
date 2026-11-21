@@ -167,8 +167,15 @@ end
 local shown = ui.state("clemann_usage_cards", {} :: { any })
 -- The providers switched on and installed here, through the fork's bridge
 -- (src/plugins/fork_bridge.rs); nil from a build without it.
-local function providers(done: ({ [string]: boolean }?) -> ())
-	local ok, promise = pcall(ui.call, "plugin.clemann-usage-cards.fork_card", { op = "providers" })
+-- Whose usage shows: the device the chat in front runs on, as the old
+-- desktop's cards followed it (nil: this one). Kept while no chat is in
+-- front, so the home page shows the last chat's.
+local target = ui.state("clemann_usage_target", nil :: string?)
+
+-- The providers switched on and installed on `device`, through the fork's
+-- bridge (src/plugins/fork_bridge.rs); nil from a build without it.
+local function providers(device: string?, done: ({ [string]: boolean }?) -> ())
+	local ok, promise = pcall(ui.call, "plugin.clemann-usage-cards.fork_card", { op = "providers", device = device })
 	if not ok then
 		done(nil)
 		return
@@ -184,11 +191,18 @@ local function providers(done: ({ [string]: boolean }?) -> ())
 	end)
 end
 
+-- Usage on another device is that device's to give: its Zeron needs this
+-- plugin allowed there too. Refused or away, the cards keep what they had.
 local function load()
-	providers(function(on)
-		zeron.usage():after(function(got: any)
-			shown:set(cards(got or {}, on))
-		end, function() end)
+	local device = target:peek()
+	providers(device, function(on)
+		zeron.usage({ device = device }):after(function(got: any)
+			if target:peek() == device then
+				shown:set(cards(got or {}, on))
+			end
+		end, function(why: any)
+			print(`clemann-usage-cards: usage on {device or "this device"}: {why}`)
+		end)
 	end)
 end
 load()
@@ -197,20 +211,47 @@ zeron.on("usage.changed", function()
 end)
 zeron.every(60, load)
 
+-- The device of the chat in front, as the route moves.
+local function follow(): Node
+	local route = zeron.live("route")
+	ui.effect(function()
+		local r = route()
+		local sid = if type(r) == "table" then r.session else nil
+		if type(sid) == "table" then
+			sid = sid.id
+		end
+		if type(sid) ~= "string" then
+			return
+		end
+		local s = zeron.context_of("session", sid)
+		local device = if s and type(s.device) == "string" and s.device ~= "" then s.device else nil
+		if device ~= target:peek() then
+			target:set(device)
+			load()
+		end
+	end)
+	return ui.div {}
+end
+
 zeron.place {
 	at = "#sidebar",
 	after = function(): Node
-		return ui.show(function(): boolean
-			return #shown:get() > 0
-		end, ui.column {
+		return ui.column {
 			w_full = true,
 			shrink = 0,
-			px = "$space.2",
-			pb = "$space.2",
-			gap = "$space.1",
-			ui.each(shown, function(a: any): Node
-				return card(a)
-			end, { key = signature }),
-		})
+			follow(),
+			ui.show(function(): boolean
+				return #shown:get() > 0
+			end, ui.column {
+				w_full = true,
+				shrink = 0,
+				px = "$space.2",
+				pb = "$space.2",
+				gap = "$space.1",
+				ui.each(shown, function(a: any): Node
+					return card(a)
+				end, { key = signature }),
+			}),
+		}
 	end,
 }
