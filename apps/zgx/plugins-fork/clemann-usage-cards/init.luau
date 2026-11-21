@@ -96,13 +96,17 @@ local function resets(windows: { any }): string
 	return if #lines > 0 then table.concat(lines, "\n") else "Usage"
 end
 
+-- One window's meter, as Settings → Providers draws it: its name, a thin
+-- bar filling the room between, the percent in the bar's tone past 75%.
 local function meter(w: any): Node
 	local used = math.clamp(tonumber(w.used) or 0, 0, 100)
+	local tone = if used >= 90 then "danger" elseif used >= 75 then "warning" else "accent"
 	return ui.row {
 		w_full = true,
+		min_w = 0,
 		gap = "$space.2",
 		items = "center",
-		ui.text { w.label or "", w = 52, shrink = 0, truncate = true, text_size = "$font.size.xs", color = "$text.tertiary" },
+		ui.text { w.label or "", w = 52, shrink = 0, truncate = true, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
 		ui.div {
 			grow = 1,
 			min_w = 0,
@@ -110,7 +114,10 @@ local function meter(w: any): Node
 				value = function(): number?
 					return used / 100
 				end,
-				tone = if used >= 90 then "danger" elseif used >= 75 then "warning" else "accent",
+				tone = tone,
+				size = "thin",
+				w_full = true,
+				label = `{w.label or "Usage"} usage`,
 			},
 		},
 		ui.text {
@@ -120,7 +127,8 @@ local function meter(w: any): Node
 			align = "right",
 			tabular = true,
 			text_size = "$font.size.xs",
-			color = "$text.secondary",
+			line_height = "$font.line.xs",
+			color = if tone == "accent" then "$text.tertiary" else `$zeron.tone.{tone}.ink`,
 		},
 	}
 end
@@ -133,6 +141,7 @@ local function card(a: any): Node
 	end
 	return ui.column {
 		w_full = true,
+		min_w = 0,
 		px = "$space.2",
 		py = 6,
 		gap = 2,
@@ -143,7 +152,7 @@ local function card(a: any): Node
 			w_full = true,
 			gap = 6,
 			items = "center",
-			if p.mark then ui.div { shrink = 0, Mark { name = p.mark, size = 13, bare = true } } else nil,
+			if p.mark then ui.div { shrink = 0, color = "$text.primary", Mark { name = p.mark, size = 13, bare = true } } else nil,
 			ui.text { p.name, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.primary" },
 			if a.plan then ui.text { a.plan, shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" } else nil,
 		},
