@@ -1383,12 +1383,11 @@ pub enum ChangeRequestState {
 }
 
 /// Whether a change request can be merged without resolving conflicts first.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeRequestMergeability {
     Mergeable,
     Conflicting,
-    #[default]
     Unknown,
 }
 
@@ -1414,35 +1413,11 @@ pub struct ChangeRequestSummary {
     pub state: ChangeRequestState,
     pub base_ref: String,
     pub head_ref: String,
-    /// Draft, CI, and queue status. Defaults (unknown) when the host predates
-    /// it or the provider's extra lookup failed; omitted from the wire then.
-    #[serde(default, skip_serializing_if = "ChangeRequestLiveStatus::is_unknown")]
-    pub live: ChangeRequestLiveStatus,
     /// Where an open request's review and checks stand, when the provider
     /// told it. Absent from older engines and closed requests; clients that
     /// don't read it are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signals: Option<ChangeRequestSignals>,
-}
-
-/// What a checkout surface needs to say whether a change request is waiting
-/// on CI, blocked, queued, or ready. Missing data stays at its unknown default
-/// and never implies a pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ChangeRequestLiveStatus {
-    pub is_draft: bool,
-    pub in_merge_queue: bool,
-    pub ci: crate::change_request_assessment::ChangeRequestCi,
-    pub mergeability: ChangeRequestMergeability,
-    pub review_decision: ChangeRequestReviewDecision,
-}
-
-impl ChangeRequestLiveStatus {
-    /// Nothing known yet: the provider wasn't asked, or didn't answer.
-    pub fn is_unknown(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// Where an open change request's review and checks stand.
@@ -1858,6 +1833,12 @@ pub const CURSOR_USAGE_CURSOR: &str = "Cursor";
 pub const CURSOR_USAGE_GROK: &str = "Grok";
 pub const CURSOR_USAGE_OTHER: &str = "Other";
 
+/// The groups Antigravity's usage windows are labelled by ("Gemini Session",
+/// "Claude & GPT Week"): Google limits each group of models on its own, and
+/// the composer shows the group of the selected model.
+pub const ANTIGRAVITY_USAGE_GEMINI: &str = "Gemini";
+pub const ANTIGRAVITY_USAGE_OTHER: &str = "Claude & GPT";
+
 /// CLI plan quota or spend window (accounts settings meters), not app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2197,7 +2178,6 @@ mod tests {
                     state,
                     base_ref: "main".into(),
                     head_ref: "feature/change".into(),
-                    live: Default::default(),
                     signals: None,
                 }),
                 updated_at: Utc.with_ymd_and_hms(2026, 8, 15, 12, 30, 0).unwrap(),

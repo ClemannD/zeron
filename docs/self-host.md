@@ -34,17 +34,22 @@ to a password manager; `VAULT_KEK` in particular is unrecoverable. Set one with
 ## Sign-in
 
 Engines open `{ZERON_WORKOS_API_BASE}/user_management/authorize`, which is the
-edge's own passkey page. `scripts/install-fork-macos.sh` bakes the three env
-vars into the app bundle:
+edge's own passkey page. With client id `zeron-self` and no
+`ZERON_WORKOS_API_BASE`, the engine uses the edge URL as that base.
+
+`scripts/install-fork-macos.sh` compiles the edge URL and client id into the
+zgx interface (`apps/zgx/src/auth.rs`), which hands them to the engine it
+starts. A headless engine needs two variables (`zeron daemon install`
+captures them):
 
 ```
 ZERON_EDGE_URL=https://zeron.clemann.app
-ZERON_WORKOS_API_BASE=https://zeron.clemann.app
 ZERON_WORKOS_CLIENT_ID=zeron-self
 ```
 
-A headless engine needs the same three in its environment (`zeron daemon
-install` captures them).
+Self-auth answers token exchange, refresh and `GET`/`POST /auth/orgs`. The
+account settings routes (`/auth/me`, profile photo, members, invitations)
+are WorkOS-only and return 404 here, so those zgx Settings screens fail.
 
 - **First account:** on the sign-in page, "Set up a passkey" with the
   `AUTH_SETUP_CODE`. The code stops working once any account exists.

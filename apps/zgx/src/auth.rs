@@ -91,10 +91,20 @@ const STAGING: Env = Env {
 };
 const PRODUCTION: Env = Env {
     name: "production",
-    edge: "https://edge.zeron.sh",
-    client: "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    edge: fork_or("https://edge.zeron.sh", option_env!("ZERON_FORK_EDGE_URL")),
+    client: fork_or("client_01KWD0EAKZKD50YCQJNYSRE4BY", option_env!("ZERON_FORK_CLIENT_ID")),
     port: 27641,
 };
+
+/// Fork: a self-hosted build bakes its own edge and sign-in client in at
+/// compile time (scripts/install-fork-macos.sh). Unset or empty keeps
+/// upstream's, so upstream builds are unchanged.
+const fn fork_or(upstream: &'static str, fork: Option<&'static str>) -> &'static str {
+    match fork {
+        Some(value) if !value.is_empty() => value,
+        _ => upstream,
+    }
+}
 
 /// How long the browser has to come back (the engine forgets a sign-in
 /// after 15 minutes).
@@ -340,6 +350,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             a.sign_out().await;
             Ok(Value::Nil)
         }
+    });
+    host.async_action("account.keeps_chats_local", move |_| async move {
+        Ok(Value::Bool(engine::get().keeps_chats_local()))
+    });
+    host.async_action("account.keep_chats_local", move |on| async move {
+        crate::plugins::preview::refuse("account.keep_chats_local")?;
+        engine::get().keep_chats_local(matches!(on, Value::Bool(true)))?;
+        Ok(Value::Nil)
     });
     let a = auth.clone();
     host.async_action("account.username", move |_| {

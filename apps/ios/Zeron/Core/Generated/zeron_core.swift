@@ -7097,7 +7097,7 @@ public struct AgentLoginRules: Equatable, Hashable {
      */
     public var signsIn: Bool
     /**
-     * Zeron switches between its accounts (not Hermes, not Antigravity).
+     * Zeron switches between its accounts (not Hermes' own pool).
      */
     public var switches: Bool
     /**
@@ -7122,7 +7122,7 @@ public struct AgentLoginRules: Equatable, Hashable {
          * The agent has accounts Zeron can sign in to at all.
          */signsIn: Bool, 
         /**
-         * Zeron switches between its accounts (not Hermes, not Antigravity).
+         * Zeron switches between its accounts (not Hermes' own pool).
          */switches: Bool, 
         /**
          * It holds one login: once connected there is nothing to add.

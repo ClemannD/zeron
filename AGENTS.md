@@ -57,10 +57,26 @@ fork's traffic to WorkOS.
 - **Don't push to `main` expecting CI to deploy.** `.github/workflows/deploy.yml`
   is upstream's and targets upstream's configs. It stays inert while the fork
   has no `CLOUDFLARE_API_TOKEN` secret. Don't add one.
-- **The macOS app is built with `scripts/install-fork-macos.sh`.** It bakes
-  `ZERON_EDGE_URL`, `ZERON_WORKOS_API_BASE` (both `https://zeron.clemann.app`)
-  and `ZERON_WORKOS_CLIENT_ID=zeron-self` into the bundle, and turns
-  auto-update off. Headless engines need the same three env vars.
+- **The macOS app is the zgx interface (`apps/zgx`), built with
+  `scripts/install-fork-macos.sh`.** zgx's release build (`--features beta`)
+  ignores environment variables, so the script compiles our edge and sign-in
+  client into it (`ZERON_FORK_EDGE_URL`, `ZERON_FORK_CLIENT_ID`, read by
+  `apps/zgx/src/auth.rs`). The engine treats client id `zeron-self` as "the
+  edge is the identity provider" and signs in at the edge
+  (`crates/engine/src/lib.rs`), so headless engines need only
+  `ZERON_EDGE_URL=https://zeron.clemann.app` and
+  `ZERON_WORKOS_CLIENT_ID=zeron-self`. The script mirrors upstream's
+  `scripts/package-zgx-macos.sh`, which can't be reused because it only
+  accepts `x.y.z` / `x.y.z-beta.n` versions; our private releases are
+  `x.y.z.n`.
+- **On every upstream merge, also diff `scripts/package-zgx-macos.sh` and
+  `apps/zgx/src/auth.rs`.** Carry bundle layout, plist and resource changes
+  into `install-fork-macos.sh`, and keep the `fork_or` override on
+  `PRODUCTION` if upstream reshapes that file.
+- **Desktop customisations are zgx plugins, not fork patches.** The GPUI app
+  (`crates/ui`) is gone upstream. Don't re-fork the interface; build features
+  as plugins (`apps/zgx/docs/plugins.md`). The pre-reset fork, with its
+  project tabs, usage cards and other GPUI work, is tagged `fork-pre-zgx`.
 - **Distributable Mac releases use `scripts/release-fork-macos.sh publish`.**
   This builds the app plus engine, signs and notarizes them, and publishes to
   the private bucket. `ZERON_FORK_BUILD` enables the authenticated private

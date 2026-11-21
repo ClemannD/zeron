@@ -35,7 +35,6 @@ const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
 const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
 
-const GITHUB_PR_LIVE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid isDraft isInMergeQueue mergeable reviewDecision autoMergeRequest { enabledAt } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
 const GITHUB_PR_METADATA_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";
 
 fn remove_nulls(value: &mut serde_json::Value) {
@@ -773,54 +772,6 @@ impl GitHubCli {
         }
     }
 
-    /// Draft, CI, queue and merge readiness for one open pull request. Any
-    /// failure leaves the unknown defaults: a tab then shows a plain pull
-    /// request rather than a guess.
-    async fn fetch_live_status(&self, url: &str) -> zeron_proto::ChangeRequestLiveStatus {
-        let Ok(url) = validated_pull_request_url(url) else {
-            return Default::default();
-        };
-        let parts: Vec<_> = url.split('/').collect();
-        let output = self
-            .runner
-            .run(ProcessRequest {
-                args: vec![
-                    "api".into(),
-                    "graphql".into(),
-                    "-f".into(),
-                    format!("query={GITHUB_PR_LIVE_QUERY}"),
-                    "-f".into(),
-                    format!("owner={}", parts[3]),
-                    "-f".into(),
-                    format!("name={}", parts[4]),
-                    "-F".into(),
-                    format!("number={}", parts[6]),
-                ],
-                ..github_request()
-            })
-            .await;
-        let Ok(output) = output else {
-            return Default::default();
-        };
-        if !output.success || output.stdout_truncated {
-            return Default::default();
-        }
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-            return Default::default();
-        };
-        if value["errors"]
-            .as_array()
-            .is_some_and(|errors| !errors.is_empty())
-        {
-            return Default::default();
-        }
-        serde_json::from_value::<GhLivePullRequest>(
-            value["data"]["repository"]["pullRequest"].clone(),
-        )
-        .map(GhLivePullRequest::into_status)
-        .unwrap_or_default()
-    }
-
     async fn fetch_pr_metadata(
         &self,
         canonical: &str,
@@ -1344,13 +1295,11 @@ impl ChangeRequestProvider for GitHubCli {
                 default_branch.as_deref(),
                 candidates,
             )?;
-            // An open one's draft/CI/queue status (project tabs), then its
-            // review and checks, asked of that one alone (the list stays
-            // light); missing either never fails the watch.
+            // An open one's review and checks, asked of that one alone (the
+            // list stays light); missing them never fails the watch.
             if let Some(summary) = found.as_mut()
-                && summary.state == ChangeRequestState::Open
+                && summary.state == zeron_proto::ChangeRequestState::Open
             {
-                summary.live = self.fetch_live_status(&summary.url).await;
                 summary.signals = self.signals_for(source, &summary.url).await;
             }
             return Ok(found);
@@ -1718,37 +1667,6 @@ struct GhSearchPullRequest {
     is_draft: bool,
     additions: u64,
     deletions: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhLivePullRequest {
-    #[serde(flatten)]
-    metadata: GhPrMetadata,
-    is_draft: bool,
-    #[serde(default)]
-    is_in_merge_queue: bool,
-    #[serde(default)]
-    mergeable: Option<GhMergeability>,
-    #[serde(default)]
-    review_decision: Option<GhReviewDecision>,
-    #[serde(default)]
-    auto_merge_request: Option<serde_json::Value>,
-}
-
-impl GhLivePullRequest {
-    fn into_status(self) -> zeron_proto::ChangeRequestLiveStatus {
-        let (_, ci, _, _) = self.metadata.into_fields();
-        zeron_proto::ChangeRequestLiveStatus {
-            is_draft: self.is_draft,
-            // Auto-merge is the queue's cousin: both mean "merges itself once
-            // ready", so a tab shows them alike.
-            in_merge_queue: self.is_in_merge_queue || self.auto_merge_request.is_some(),
-            ci,
-            mergeability: self.mergeable.map(Into::into).unwrap_or_default(),
-            review_decision: self.review_decision.map(Into::into).unwrap_or_default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2154,7 +2072,6 @@ fn to_summary(
         state: pull_request.state.into(),
         base_ref: pull_request.base_ref_name,
         head_ref: pull_request.head_ref_name,
-        live: Default::default(),
         signals: None,
     })
 }
@@ -3473,29 +3390,6 @@ mod tests {
         (result, runner)
     }
 
-    /// The provider's extra lookup for an open pull request: a draft with one
-    /// failing check, waiting in the merge queue.
-    fn live_status_response() -> Result<ProcessOutput, ProcessRunError> {
-        command_success(
-            serde_json::json!({"data": {"repository": {"pullRequest": {
-                "headRefOid": "a".repeat(40),
-                "isDraft": true,
-                "isInMergeQueue": true,
-                "mergeable": "CONFLICTING",
-                "reviewDecision": "APPROVED",
-                "autoMergeRequest": null,
-                "statusCheckRollup": {
-                    "commit": {"oid": "a".repeat(40)},
-                    "state": "FAILURE",
-                    "contexts": {"totalCount": 1,
-                        "checkRunCountsByState": [{"state": "FAILURE", "count": 1}],
-                        "statusContextCountsByState": []}
-                }
-            }}}})
-            .to_string(),
-        )
-    }
-
     async fn resolve_with(
         source: &CheckoutSourceContext,
         response: Result<ProcessOutput, ProcessRunError>,
@@ -3503,12 +3397,8 @@ mod tests {
         Result<Option<ChangeRequestSummary>, ChangeRequestError>,
         Arc<FakeProcessRunner>,
     ) {
-        // (An open one's signals are asked after its live status: unanswered here.)
-        let runner = FakeProcessRunner::with_responses([
-            response,
-            live_status_response(),
-            command_failure("no signals"),
-        ]);
+        // (An open one's signals are asked after: unanswered here.)
+        let runner = FakeProcessRunner::with_responses([response, command_failure("no signals")]);
         let github = GitHubCli::with_runner(runner.clone());
         let result = github.find_for_branch(source).await;
         (result, runner)
@@ -3531,26 +3421,13 @@ mod tests {
         assert_eq!(summary.number, 90);
         assert_eq!(summary.state, ChangeRequestState::Open);
         assert_eq!(summary.provider, "github");
-        assert!(summary.live.is_draft && summary.live.in_merge_queue);
-        assert_eq!(
-            summary.live.ci.state,
-            zeron_proto::change_request_assessment::CiState::Failed
-        );
-        assert_eq!(
-            summary.live.mergeability,
-            ChangeRequestMergeability::Conflicting
-        );
-        assert_eq!(
-            summary.live.review_decision,
-            ChangeRequestReviewDecision::Approved
-        );
         assert_eq!(summary.signals, None, "signals unanswered: none, and the watch goes on");
         let requests = runner.requests();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 2);
         // Then the open one's review and checks, alone.
-        assert_eq!(requests[2].cwd.as_deref(), Some(Path::new("/checkout")));
+        assert_eq!(requests[1].cwd.as_deref(), Some(Path::new("/checkout")));
         assert_eq!(
-            requests[2].args,
+            requests[1].args,
             ["pr", "view", summary.url.as_str(), "--json", "reviewDecision,reviewRequests,statusCheckRollup"]
         );
         assert_eq!(requests[0].program, "gh");
@@ -4786,10 +4663,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         let (result, runner) = resolve_with(&source, command_success(json)).await;
 
         assert_eq!(result.unwrap().unwrap().number, 90);
-        // The list, the live-status lookup, then the open one's signals; never the default branch.
-        let requests = runner.requests();
-        assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|request| request.args[0] != "repo"));
+        assert_eq!(runner.requests().len(), 2, "the list, then the open one's signals; no default-branch lookup");
     }
 
     #[tokio::test]
@@ -4797,7 +4671,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         let source = source("feature/status", "acme", Some("main"));
         let list = serde_json::to_vec(&vec![pull_request(90, "OPEN", "acme", "feature/status", "2026-08-15T12:00:00Z")]).unwrap();
         let view = br#"{"reviewDecision":"REVIEW_REQUIRED","reviewRequests":[{"__typename":"User","login":"ada"}],"statusCheckRollup":[{"__typename":"CheckRun","name":"tests","status":"COMPLETED","conclusion":"FAILURE"}]}"#;
-        let runner = FakeProcessRunner::with_responses([command_success(list), command_failure("no live status"), command_success(view.to_vec()), command_success("ada\n")]);
+        let runner = FakeProcessRunner::with_responses([command_success(list), command_success(view.to_vec()), command_success("ada\n")]);
         let github = GitHubCli::with_runner(runner.clone());
         let summary = github.find_for_branch(&source).await.unwrap().unwrap();
         let signals = summary.signals.expect("signals");

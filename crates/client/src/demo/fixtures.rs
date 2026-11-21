@@ -520,7 +520,6 @@ pub(crate) fn seed(
                     state,
                     base_ref: "main".into(),
                     head_ref: source.branch.clone(),
-                    live: Default::default(),
                     signals: None,
                 }),
                 updated_at: Utc::now(),

@@ -44,6 +44,7 @@ mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
 pub mod cloud_disk;
+pub mod commands;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -63,6 +64,7 @@ pub mod heap;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
+pub mod model_publish;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
@@ -78,6 +80,7 @@ pub mod runner;
 pub mod wake_trace;
 pub mod wake_update;
 pub mod self_schedule;
+pub mod sign_in_catalog;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -187,6 +190,8 @@ pub struct EngineCore {
     pub repos: Repos,
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
+    /// Agents' shell commands on this device ([`commands`]).
+    pub commands: commands::Commands,
     /// I/O routing for terminals on other devices (direct link or relay).
     pub remote_terminals: remote_terminals::RemoteTerminals,
     pub project_actions: ProjectActionsStore,
@@ -386,12 +391,18 @@ impl EngineCore {
             repos.clone(),
             workspace.clone(),
             device_id.clone(),
-            runner::session()
-                .and_then(|session| session.path.clone())
-                .map(std::path::PathBuf::from),
+            runner::session().and_then(|session| {
+                Some(workspace_files::CloudCheckout {
+                    path: std::path::PathBuf::from(session.path.clone()?),
+                    chat_id: session.chat_id.clone(),
+                })
+            }),
         );
         let terminals = Terminals::new();
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
+        let commands = commands::Commands::default();
+        // An agent's background commands end with its chat.
+        commands.follow_chats(workspace.watch_chats());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = zeron_preview::PreviewService::new(
@@ -498,6 +509,7 @@ impl EngineCore {
             repos,
             workspace_files,
             terminals,
+            commands,
             remote_terminals: Default::default(),
             project_actions,
             previews,
@@ -526,16 +538,18 @@ impl EngineCore {
         self.workspace_scope
     }
 
-    /// When an update may restart this engine: never under a live run or an open
-    /// terminal. On a Cloud machine, a message waiting counts too: nothing is
+    /// When an update may restart this engine: never under a live run, an open
+    /// terminal or a running command. On a Cloud machine, a message waiting counts too: nothing is
     /// running yet, and a restart would land just as its turn starts.
     pub fn update_quiescence(&self, cloud: bool) -> zeron_update::QuiescentCheck {
         let sessions = self.sessions.clone();
         let terminals = self.terminals.clone();
+        let commands = self.commands.clone();
         let doc_host = cloud.then(|| self.doc_host.clone());
         Arc::new(move || {
             !sessions.any_active()
                 && !terminals.any_open()
+                && commands.running() == 0
                 && !doc_host.as_ref().is_some_and(DocHost::has_waiting_commands)
         })
     }
@@ -647,9 +661,7 @@ impl EngineCore {
                 }
             }
         });
-        let mut service: Arc<dyn RpcService> = Arc::new(rpc::PeerRpc {
-            inner: self.rpc_service(),
-        });
+        let mut service: Arc<dyn RpcService> = self.rpc_service();
         // Cloud runner: requests served to remote devices are the heartbeat's
         // `clients` activity (idle sleep), counted at the relay boundary.
         if let Some(activity) = self.relay_activity() {
@@ -677,6 +689,7 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
+        .with_commands(self.commands.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
         .with_plugins(self.plugins.clone());
@@ -762,6 +775,7 @@ impl EngineCore {
         }
         self.sessions.shutdown().await;
         self.terminals.shutdown();
+        self.commands.shutdown().await;
         self.sessions.stop_activity_projection().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
@@ -945,6 +959,10 @@ impl Engine {
             && !base.trim().is_empty()
         {
             auth_config.workos_api_base = base;
+        } else if config.workos_client_id.as_deref() == Some(SELF_AUTH_CLIENT_ID) {
+            // Fork: a self-hosted edge (AUTH_MODE=self) is its own identity
+            // provider, so its sign-in page lives at the edge.
+            auth_config.workos_api_base = config.edge_url.trim_end_matches('/').to_owned();
         }
         auth_config.callback_port = Some(
             std::env::var("ZERON_CALLBACK_PORT")
@@ -965,9 +983,11 @@ impl Engine {
             WorkspaceScope::Synced
         } else if !auth.workos_enabled() {
             WorkspaceScope::Development
-        } else if auth.loaded_workos_session() {
+        } else if auth.loaded_workos_session() && !auth.keeps_chats_local() {
             WorkspaceScope::Synced
         } else {
+            // Signed out, or signed in with chats kept on this device: the
+            // local profile, with no edge transports.
             WorkspaceScope::Local
         }
     }
@@ -1142,6 +1162,15 @@ impl Engine {
         // backs ListGithubRepos / CloneRepo); the heartbeat feeds idle sleep.
         // Attached before the host relay so relayed RPCs see the broker.
         if let Some(identity) = auth.runner_identity() {
+            // A Cloud machine's agents run on its newest Node: the image's
+            // default `node` can be older than npm-distributed agents need.
+            if runner::is_cloud_platform()
+                && let Some((dir, (major, minor, patch))) = zeron_harness::newest_node_dir()
+            {
+                tracing::info!(dir = %dir.display(), version = %format!("{major}.{minor}.{patch}"),
+                    "agents run on the machine's newest Node");
+                zeron_harness::prefer_node_dir(dir);
+            }
             let tokens: Arc<dyn zeron_rpc::TokenSource> = Arc::new(auth.clone());
             wake_trace::report_to(identity.edge_url(), tokens.clone());
             let broker = credentials::CredentialBroker::new(
@@ -1151,12 +1180,33 @@ impl Engine {
             );
             core.registry.set_run_environment(Arc::new(broker.clone()));
             broker.start();
+            // Each agent's models as this machine's credentials list them,
+            // kept on the edge for every device's picker while Cloud sleeps.
+            let publisher = model_publish::ModelPublisher::new(
+                &core.registry,
+                Arc::new(model_publish::EdgeSink::new(
+                    identity.edge_url(),
+                    tokens.clone(),
+                )),
+            );
+            core.registry
+                .set_catalog_publisher(Arc::new(publisher.clone()));
+            // Connected agents' catalogs, published soon after a boot, so a
+            // picker lists them before their first run here.
+            publisher.prime();
             let sessions = core.sessions.clone();
+            let commands = core.commands.clone();
             let activity = runner::RelayActivity::default();
             let heartbeat = runner::spawn_heartbeat(
                 identity.edge_url(),
                 tokens,
-                Arc::new(move || sessions.run_counts()),
+                // An agent's running commands (a dev server left running)
+                // keep the machine awake as background work does.
+                Arc::new(move || {
+                    let mut counts = sessions.run_counts();
+                    counts.background += commands.running();
+                    counts
+                }),
                 Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
@@ -1263,13 +1313,6 @@ impl Engine {
         // The release channel a macOS app install follows lives in the data
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
-        if zeron_update::fork::enabled() {
-            let release_auth = auth.clone();
-            zeron_update::fork::set_token_provider(Arc::new(move |refresh| {
-                let auth = release_auth.clone();
-                Box::pin(async move { Ok(auth.release_access_token(refresh).await?) })
-            }));
-        }
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
         // A check that came due while the machine slept runs as it wakes,
         // so the loop needn't look at the clock each minute.
@@ -1510,6 +1553,9 @@ fn watch_store_corruption(store: PathBuf, restart: bool) -> tokio::task::JoinHan
 
 /// A Cloud engine restarting to rebuild a damaged store.
 const STORE_DAMAGED_EXIT: i32 = 70;
+
+/// Fork: the sign-in client of a self-hosted edge (edge/src/self-auth/).
+const SELF_AUTH_CLIENT_ID: &str = "zeron-self";
 
 /// Whether a stopping engine's cut-off turns stay ended rather than revive on
 /// the next boot ([`EngineCore::shutdown`] asks): a synced engine whose

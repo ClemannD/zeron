@@ -11,9 +11,6 @@ use zeron_update::{InstallKind, Offer};
 /// (`update-channel.json` in the data dir), as the app's own updater does.
 pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
     zeron_update::channel::set_data_dir(&super::paths::data_dir());
-    if zeron_update::fork::enabled() {
-        use_engine_for_private_release_tokens().await?;
-    }
     let manifest = zeron_update::fetch_latest(edge_url).await?;
     let current = zeron_update::app_version();
     let running_engine = match zeron_update::detect_install() {
@@ -173,37 +170,4 @@ async fn wait_for_outcome(
         "the update hasn't finished after {} min. Check `zeron daemon status`.",
         limit.as_secs() / 60
     )
-}
-
-/// A private fork release is downloaded with the account's token, which the
-/// running engine owns (it alone rotates refresh credentials): ask it over
-/// local IPC, as the app does.
-async fn use_engine_for_private_release_tokens() -> anyhow::Result<()> {
-    let data_dir = super::paths::data_dir();
-    let token = zeron_rpc::ipc_auth::client_tokens(Some(&data_dir))
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Open Zeron and sign in before checking for private updates"))?;
-    let client = zeron_rpc::connect_ws(
-        &format!("ws://127.0.0.1:{}", super::ipc_port_from_env()),
-        Some(&token),
-    )
-    .await?;
-    let client = std::sync::Arc::new(client);
-    zeron_update::fork::set_token_provider(std::sync::Arc::new(move |refresh| {
-        let client = client.clone();
-        Box::pin(async move {
-            let value = client
-                .call(
-                    zeron_rpc::methods::RELEASE_ACCESS_TOKEN,
-                    serde_json::json!({"refresh": refresh}),
-                )
-                .await?;
-            value["accessToken"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("Sign in to Zeron to download private updates"))
-        })
-    }));
-    Ok(())
 }

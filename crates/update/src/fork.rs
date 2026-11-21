@@ -1,7 +1,5 @@
 //! Private fork policy. Upstream builds retain the anonymous release feed.
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, bail};
 
@@ -22,16 +20,6 @@ pub fn version() -> &'static str {
             None => env!("CARGO_PKG_VERSION").to_owned(),
         },
     )
-}
-
-pub type TokenFuture = Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>;
-/// `true` requests one refresh after a 401. The engine remains the single
-/// owner of rotating refresh credentials; UI processes use its local IPC.
-pub type TokenProvider = Arc<dyn Fn(bool) -> TokenFuture + Send + Sync>;
-static TOKENS: RwLock<Option<TokenProvider>> = RwLock::new(None);
-
-pub fn set_token_provider(provider: TokenProvider) {
-    *TOKENS.write().unwrap_or_else(|e| e.into_inner()) = Some(provider);
 }
 
 pub fn validate_url(url: &str) -> anyhow::Result<()> {
@@ -86,35 +74,9 @@ async fn send_private(
             .await
             .context("requesting private release");
     }
-    // Compatibility with older fork builds that used an owner session.
-    let provider = TOKENS
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .context("Sign in to Zeron to check for private updates")?;
-    send_authorized(client, url, provider).await
-}
-
-async fn send_authorized(
-    client: &reqwest::Client,
-    url: &str,
-    provider: TokenProvider,
-) -> anyhow::Result<reqwest::Response> {
-    for refresh in [false, true] {
-        let token = provider(refresh)
-            .await
-            .context("Sign in to Zeron to download private updates")?;
-        let response = client
-            .get(url)
-            .bearer_auth(token)
-            .header(reqwest::header::CACHE_CONTROL, "no-cache")
-            .send()
-            .await?;
-        if response.status() != reqwest::StatusCode::UNAUTHORIZED || refresh {
-            return Ok(response);
-        }
-    }
-    unreachable!()
+    // The release script always bakes the update capability in; a fork
+    // build without one has no way to reach the private feed.
+    bail!("This build has no private update credential; install a current signed fork release")
 }
 
 pub fn verify_bundle(bundle: &std::path::Path) -> anyhow::Result<()> {
@@ -192,13 +154,10 @@ mod tests {
         let bootstrap = std::path::PathBuf::from(
             std::env::var("ZERON_UPDATE_TEST_APP").expect("signed bootstrap app"),
         );
-        if option_env!("ZERON_FORK_UPDATE_TOKEN").is_none_or(|token| token.is_empty()) {
-            let token = std::env::var("ZERON_UPDATE_TEST_TOKEN").expect("owner access token");
-            set_token_provider(Arc::new(move |_| {
-                let token = token.clone();
-                Box::pin(async move { Ok(token) })
-            }));
-        }
+        assert!(
+            option_env!("ZERON_FORK_UPDATE_TOKEN").is_some_and(|token| !token.is_empty()),
+            "compile with ZERON_FORK_UPDATE_TOKEN set"
+        );
         let manifest = crate::fetch_latest("https://zeron.clemann.app")
             .await
             .unwrap();
@@ -333,55 +292,14 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        // No token provider is registered: each request must bypass sync auth,
-        // including when the update credential is refused.
+        // Each request carries only the update capability, never sync auth,
+        // including when the credential is refused.
         for status in [200, 401, 302] {
             let response = send_private(&client, &url, Some("update-only"))
                 .await
                 .unwrap();
             assert_eq!(response.status().as_u16(), status);
         }
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn expired_bearer_gets_exactly_one_refresh_without_following_redirects() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for expected in ["Bearer stale", "Bearer fresh"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                while !bytes.ends_with(b"\r\n\r\n") {
-                    let mut chunk = [0; 512];
-                    let length = socket.read(&mut chunk).await.unwrap();
-                    assert!(length > 0 && bytes.len() < 4096);
-                    bytes.extend_from_slice(&chunk[..length]);
-                }
-                let request = String::from_utf8_lossy(&bytes);
-                assert!(request.contains(expected));
-                let response = if expected.ends_with("stale") {
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                } else {
-                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                };
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let record = calls.clone();
-        let provider: TokenProvider = Arc::new(move |refresh| {
-            record.lock().unwrap().push(refresh);
-            Box::pin(async move { Ok(if refresh { "fresh" } else { "stale" }.into()) })
-        });
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
-        let response = send_authorized(&client, &url, provider).await.unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-        assert_eq!(*calls.lock().unwrap(), vec![false, true]);
         server.await.unwrap();
     }
 }

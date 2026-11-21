@@ -120,8 +120,7 @@ runs or open terminals before restarting into it.
 ## Normal updates
 
 The app checks at launch and periodically, and **Check for Updates…** checks
-immediately. Signing in or changing the engine connection also wakes the
-checker. An available release downloads in the background and offers
+immediately. An available release downloads in the background and offers
 **Restart to update**. A staged release also installs on normal app quit.
 
 Current signed releases check and download using the bundled release-only
@@ -129,11 +128,12 @@ credential. They work without a sync account, an engine auth session, or
 registering the Mac with the backend. Remaining signed out keeps the Mac's
 chats local; update requests only read the feed and release package.
 
-Older private releases obtain account access tokens over authenticated local
-IPC from the engine and refresh once on HTTP 401. A signed-out Mac on one of
-these builds needs the current signed ZIP installed once; after that it can
-update while signed out. Both paths send credentials only to the fixed fork
-feed and never follow private update redirects or fall back to public releases.
+The credential is required: a fork build without one refuses to check
+rather than falling back to a sync session. (Private releases from before
+the credential existed fetched account tokens from the engine instead; the
+edge still accepts the owner's bearer for them, so they can update once to a
+current release.) Requests go only to the fixed fork feed and never follow
+private update redirects or fall back to public releases.
 
 Before executing any staged binary, the updater requires its manifest's
 checksum, verifies Developer ID signatures for both executables against our
@@ -156,7 +156,7 @@ After changing the edge, run `npm run typecheck && npm test` in `edge/`.
 Deploy the vault first, then the edge, using the fork configs. The private
 release route does not require new Durable Object migrations or new auth keys.
 
-Updater tests cover signed-out capability access, credential destination restrictions, refresh-on-401,
+Updater tests cover signed-out capability access, credential destination restrictions,
 redirect handling, mandatory checksums, interrupted downloads and staging.
 Workerd tests cover self-auth JWTs, the owner allowlist, runner refusal,
 HEAD requests, malformed paths, and isolation from the public release route

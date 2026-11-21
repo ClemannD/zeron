@@ -2,13 +2,24 @@
 
 /// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
 /// `ZERON_EDGE_URL` overrides (local dev / self-hosting).
-pub const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
+pub const DEFAULT_EDGE_URL: &str = fork_or("https://edge.zeron.sh", option_env!("ZERON_FORK_EDGE_URL"));
 
 /// Production WorkOS AuthKit client id — public knowledge (it appears in every
 /// authorize URL), so baking it in is safe. Overridden by `ZERON_WORKOS_CLIENT_ID`;
 /// set it to the empty string — or set a dev bearer via `ZERON_EDGE_TOKEN` — to
 /// force dev-mode auth instead.
-pub const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
+pub const DEFAULT_WORKOS_CLIENT_ID: &str =
+    fork_or("client_01KWD0EAKZKD50YCQJNYSRE4BY", option_env!("ZERON_FORK_CLIENT_ID"));
+
+/// Fork: a self-hosted build bakes its own edge and sign-in client in at
+/// compile time (scripts/install-fork-macos.sh), so `zeron` run without any
+/// environment never reaches upstream's. Unset or empty keeps upstream's.
+const fn fork_or(upstream: &'static str, fork: Option<&'static str>) -> &'static str {
+    match fork {
+        Some(value) if !value.is_empty() => value,
+        _ => upstream,
+    }
+}
 
 pub fn edge_url_from_env() -> String {
     std::env::var("ZERON_EDGE_URL")

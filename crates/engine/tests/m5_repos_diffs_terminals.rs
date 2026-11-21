@@ -1194,52 +1194,6 @@ async fn checkout_diff_watch_naming_a_chat_keeps_it_scanned() {
     assert_eq!(files[0].path, "a.txt");
 }
 
-/// Fork: another device's project tabs name each visible project's latest chat
-/// in one diff watch (`chatIds`), keeping exactly those checkouts scanned.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn checkout_diff_watch_naming_several_chats_keeps_each_scanned() {
-    let tmp = tempfile::tempdir().unwrap();
-    let core = assemble(&tmp.path().join("data"));
-    for name in ["one", "two", "unnamed"] {
-        let root = tmp.path().join(name);
-        init_repo(&root).await;
-        std::fs::write(root.join("a.txt"), format!("{name} edit\n")).unwrap();
-        core.workspace
-            .create_space(name, &core.device_id, &root.to_string_lossy(), None, true)
-            .unwrap();
-        core.workspace
-            .create_chat(&format!("chat-{name}"), Some(name), None, None, None)
-            .unwrap();
-    }
-    core.diff_sync.reconcile_now().await;
-    assert!(core.diff_sync.tracked_checkouts().is_empty());
-
-    let client = zeron_rpc::memory_client(core.rpc_service());
-    let mut named = client
-        .subscribe(
-            methods::WATCH_CHECKOUT_DIFFS,
-            serde_json::json!({"chatIds": ["chat-one", "chat-two"]}),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let value = named.recv().await.expect("stream alive");
-            let diffs: Vec<zeron_proto::CheckoutDiff> = serde_json::from_value(value).unwrap();
-            if diffs.len() == 2 {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("both named chats' diffs arrive");
-    assert_eq!(
-        core.diff_sync.tracked_checkouts().len(),
-        2,
-        "the unnamed project isn't scanned"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_status_stream_is_scoped_deduplicated_and_resets_after_commit() {
     use zeron_proto::CheckoutGitStatus;
@@ -2618,6 +2572,48 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("OpenTerminal");
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(session["cwd"], repo_path);
+    assert_eq!(
+        core.terminals.chats().get(&terminal_id).map(String::as_str),
+        Some("chat-term")
+    );
+
+    // A chat another device runs (seen here, as a Cloud machine sees every
+    // chat): its folder is a path there, and its session row is its host's,
+    // so the terminal neither starts in it nor joins it. (No project: a
+    // project's chats run on the project's device.)
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": "chat-elsewhere",
+                "deviceId": "another-device",
+                "cwd": repo_path,
+            }),
+        )
+        .await
+        .expect("createChat elsewhere");
+    assert_eq!(
+        core.workspace.chat("chat-elsewhere").unwrap().unwrap().device_id,
+        "another-device"
+    );
+    let elsewhere = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "chat-elsewhere", "cols": 80, "rows": 24 }),
+        )
+        .await
+        .expect("OpenTerminal for a chat run elsewhere");
+    assert_ne!(elsewhere["cwd"], repo_path);
+    let elsewhere_id = elsewhere["id"].as_str().expect("terminal id");
+    assert!(!core.terminals.chats().contains_key(elsewhere_id));
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": elsewhere_id }),
+        )
+        .await
+        .expect("CloseTerminal elsewhere");
 
     // New-chat canvas: no chat row. The space id in chatId is enough even
     // when the UI still sends `~` (spaces watch not landed) or omits cwd.

@@ -53,8 +53,9 @@ checks and deploys rather than repeating them. Merge the reviewed upstream
 revision; if a new fetch adds material changes, summarize those additions
 before seeking approval for the expanded scope.
 
-Preserve both upstream behavior and fork features, especially project tabs,
-usage cards, self-auth, private updates, tracked `.agents/skills/`, and the
+Preserve both upstream behavior and fork features, especially self-auth,
+the zgx endpoint override, private updates, the iPhone features (sessions
+Live Activity, context chips, reply images, project artwork, credit spend), tracked `.agents/skills/`, and the
 `.claude/skills` directory symlink and ignore exceptions. Inspect auto-merged
 integration points too. If unrelated dirty
 work or a product decision prevents a safe merge, describe the concrete
