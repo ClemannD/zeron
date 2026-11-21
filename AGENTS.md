@@ -73,6 +73,11 @@ fork's traffic to WorkOS.
   `apps/zgx/src/auth.rs`.** Carry bundle layout, plist and resource changes
   into `install-fork-macos.sh`, and keep the `fork_or` override on
   `PRODUCTION` if upstream reshapes that file.
+- **Project icons on the Mac come from the engine** (`ReadProjectIcon`,
+  `crates/engine/src/project_icon.rs`), the search the iPhone uses. The logic
+  is in `apps/zgx/src/files/fork_artwork.rs`; upstream's `apps/zgx/src/files.rs`
+  carries only `mod fork_artwork;` and one call at the top of `artwork()`.
+  Keep both if an upstream merge touches that file.
 - **Desktop customisations are zgx plugins, not fork patches.** The GPUI app
   (`crates/ui`) is gone upstream. Don't re-fork the interface; build features
   as plugins (`apps/zgx/docs/plugins.md`). The pre-reset fork, with its

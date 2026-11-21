@@ -91,6 +91,8 @@ use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::engine::{self, rpc};
 
+mod fork_artwork;
+
 /// Frames kept for scripts to catch up on.
 const KEPT: usize = 256;
 /// A folder's pages followed at most (the engine pages by a few hundred):
@@ -817,6 +819,7 @@ impl Files {
     /// engine, a path at a time, its bytes kept here by their hash.
     async fn artwork(&self, arg: Value) -> Result<Value, String> {
         let target = arg.field("target").ok_or("no target")?;
+        if let Some(found) = self.engine_artwork(target).await { return Ok(found); } // fork: files/fork_artwork.rs
         let found = |path: PathBuf| Value::record([("src", Value::from(path.to_string_lossy().as_ref()))]);
         if self.is_local(target).await {
             let root = PathBuf::from(text(target.field("root")));
